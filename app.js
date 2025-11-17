@@ -1,4 +1,165 @@
+// --- FUNCTIONS FOR PYTHON BRIDGE ---
+// These 11 functions MUST be outside the DOMContentLoaded listener
+// to be available when Python loads.
+
+function clear_csv_upload_status() {
+    const csvLoadStatusElement = document.getElementById('csv-load-status');
+    const correctedCsvUploadElement = document.getElementById('corrected-csv-upload');
+    
+    if (csvLoadStatusElement) {
+        csvLoadStatusElement.textContent = "";
+    }
+    if (correctedCsvUploadElement) {
+        correctedCsvUploadElement.value = "";
+    }
+}
+window.clear_csv_upload_status = clear_csv_upload_status;
+
+function disable_absentee_tab(disabled) {
+    const navAbsentees = document.getElementById('nav-absentees');
+    const absenteeLoader = document.getElementById('absentee-loader');
+    const absenteeContentWrapper = document.getElementById('absentee-content-wrapper');
+
+    if (!navAbsentees) return; // Guard clause in case elements aren't ready
+
+    navAbsentees.disabled = disabled;
+    if (disabled) {
+        absenteeLoader?.classList.remove('hidden');
+        absenteeContentWrapper?.classList.add('hidden');
+        navAbsentees.classList.add('opacity-50', 'cursor-not-allowed');
+    } else {
+        absenteeLoader?.classList.add('hidden');
+        absenteeContentWrapper?.classList.remove('hidden');
+        navAbsentees.classList.remove('opacity-50', 'cursor-not-allowed');
+    }
+}
+window.disable_absentee_tab = disable_absentee_tab;
+
+function populate_session_dropdown() {
+    // This function's body is complex and relies on DOM elements.
+    // It will be called *after* extraction, so the elements *should* exist.
+    // We will define its full logic inside the DOMContentLoaded.
+    // This top-level function will just call the *real* one.
+    if (window.real_populate_session_dropdown) {
+        window.real_populate_session_dropdown();
+    }
+}
+window.populate_session_dropdown = populate_session_dropdown;
+
+function disable_qpcode_tab(disabled) {
+    const navQPCodes = document.getElementById('nav-qpcodes');
+    const qpcodeLoader = document.getElementById('qpcode-loader');
+    const qpcodeContentWrapper = document.getElementById('qpcode-content-wrapper');
+
+    if (!navQPCodes) return;
+
+    navQPCodes.disabled = disabled;
+    if (disabled) {
+        qpcodeLoader?.classList.remove('hidden');
+        qpcodeContentWrapper?.classList.add('hidden');
+        navQPCodes.classList.add('opacity-50', 'cursor-not-allowed');
+    } else {
+        qpcodeLoader?.classList.add('hidden');
+        qpcodeContentWrapper?.classList.remove('hidden');
+        navQPCodes.classList.remove('opacity-50', 'cursor-not-allowed');
+    }
+}
+window.disable_qpcode_tab = disable_qpcode_tab;
+
+function populate_qp_code_session_dropdown() {
+    if (window.real_populate_qp_code_session_dropdown) {
+        window.real_populate_qp_code_session_dropdown();
+    }
+}
+window.populate_qp_code_session_dropdown = populate_qp_code_session_dropdown;
+
+function disable_room_allotment_tab(disabled) {
+    const navRoomAllotment = document.getElementById('nav-room-allotment');
+    const roomAllotmentLoader = document.getElementById('room-allotment-loader');
+    const roomAllotmentContentWrapper = document.getElementById('room-allotment-content-wrapper');
+    
+    if (!navRoomAllotment) return;
+
+    navRoomAllotment.disabled = disabled;
+    if (disabled) {
+        roomAllotmentLoader?.classList.remove('hidden');
+        roomAllotmentContentWrapper?.classList.add('hidden');
+        navRoomAllotment.classList.add('opacity-50', 'cursor-not-allowed');
+    } else {
+        roomAllotmentLoader?.classList.add('hidden');
+        roomAllotmentContentWrapper?.classList.remove('hidden');
+        navRoomAllotment.classList.remove('opacity-50', 'cursor-not-allowed');
+    }
+}
+window.disable_room_allotment_tab = disable_room_allotment_tab;
+
+function populate_room_allotment_session_dropdown() {
+    if (window.real_populate_room_allotment_session_dropdown) {
+        window.real_populate_room_allotment_session_dropdown();
+    }
+}
+window.populate_room_allotment_session_dropdown = populate_room_allotment_session_dropdown;
+
+function disable_scribe_settings_tab(disabled) {
+    const navScribeSettings = document.getElementById('nav-scribe-settings');
+    const scribeLoader = document.getElementById('scribe-loader');
+    const scribeContentWrapper = document.getElementById('scribe-content-wrapper');
+    
+    if (!navScribeSettings) return;
+
+    navScribeSettings.disabled = disabled;
+    if (disabled) {
+        scribeLoader?.classList.remove('hidden');
+        scribeContentWrapper?.classList.add('hidden');
+        navScribeSettings.classList.add('opacity-50', 'cursor-not-allowed');
+    } else {
+        scribeLoader?.classList.add('hidden');
+        scribeContentWrapper?.classList.remove('hidden');
+        navScribeSettings.classList.remove('opacity-50', 'cursor-not-allowed');
+    }
+}
+window.disable_scribe_settings_tab = disable_scribe_settings_tab;
+
+function loadGlobalScribeList() {
+    if (window.real_loadGlobalScribeList) {
+        window.real_loadGlobalScribeList();
+    }
+}
+window.loadGlobalScribeList = loadGlobalScribeList;
+
+function disable_all_report_buttons(disabled) {
+    if (window.real_disable_all_report_buttons) {
+        window.real_disable_all_report_buttons(disabled);
+    }
+}
+window.disable_all_report_buttons = disable_all_report_buttons;
+
+function disable_edit_data_tab(disabled) {
+    const navEditData = document.getElementById('nav-edit-data');
+    const editDataLoader = document.getElementById('edit-data-loader');
+    const editDataContentWrapper = document.getElementById('edit-data-content-wrapper');
+    
+    if (!navEditData) return;
+    
+    navEditData.disabled = disabled;
+    if (disabled) {
+        editDataLoader?.classList.remove('hidden');
+        editDataContentWrapper?.classList.add('hidden');
+        navEditData.classList.add('opacity-50', 'cursor-not-allowed');
+    } else {
+        editDataLoader?.classList.add('hidden');
+        editDataContentWrapper?.classList.remove('hidden');
+        navEditData.classList.remove('opacity-50', 'cursor-not-allowed');
+    }
+}
+window.disable_edit_data_tab = disable_edit_data_tab;
+
+// --- END FUNCTIONS FOR PYTHON BRIDGE ---
+
+
+// --- MAIN APP LOGIC ---
 document.addEventListener('DOMContentLoaded', () => {
+
 // --- Debounce Helper Function ---
 function debounce(func, delay) {
     let timeout;
@@ -79,23 +240,16 @@ const viewSettings = document.getElementById('view-settings');
 const viewQPCodes = document.getElementById('view-qpcodes');
 const viewReports = document.getElementById('view-reports');
 const viewAbsentees = document.getElementById('view-absentees');
-// const viewRoomSettings = document.getElementById('view-room-settings'); // <-- No longer a main view
 const navExtractor = document.getElementById('nav-extractor');
 const navEditData = document.getElementById('nav-edit-data'); // <-- ADD THIS
 const navSettings = document.getElementById('nav-settings');
 const navQPCodes = document.getElementById('nav-qpcodes');
 const navReports = document.getElementById('nav-reports');
 const navAbsentees = document.getElementById('nav-absentees');
-// const navRoomSettings = document.getElementById('nav-room-settings'); // <-- No longer a main view
-// *** NEW SCRIBE NAV ***
 const navScribeSettings = document.getElementById('nav-scribe-settings');
-// const navScribeAllotment = document.getElementById('nav-scribe-allotment'); // REMOVED
-// **********************
 const navRoomAllotment = document.getElementById('nav-room-allotment');
 const viewRoomAllotment = document.getElementById('view-room-allotment');
-// *** NEW SCRIBE VIEWS ***
 const viewScribeSettings = document.getElementById('view-scribe-settings');
-// const viewScribeAllotment = document.getElementById('view-scribe-allotment'); // REMOVED
 
 // *** NEW SEARCH ELEMENTS ***
 const navSearch = document.getElementById('nav-search');
@@ -123,9 +277,7 @@ const searchResultScribeRoomLocation = document.getElementById('search-result-sc
 const modalCloseSearchResult = document.getElementById('modal-close-search-result');
 // ***************************
 
-// **********************
 const viewEditData = document.getElementById('view-edit-data');
-// *** MODIFIED allNavButtons and allViews TO MATCH NEW UI ***
 const allNavButtons = [navExtractor, navEditData, navScribeSettings, navRoomAllotment, navQPCodes, navSearch, navReports, navAbsentees, navSettings];
 const allViews = [viewExtractor, viewEditData, viewScribeSettings, viewRoomAllotment, viewQPCodes, viewSearch, viewReports, viewAbsentees, viewSettings];
 
@@ -141,14 +293,10 @@ const roomConfigStatus = document.getElementById('room-config-status');
 // --- Get references to Q-Paper Report elements ---
 const qPaperDataStore = document.getElementById('q-paper-data-store');
 const generateQPaperReportButton = document.getElementById('generate-qpaper-report-button');
-const generateQpDistributionReportButton = document.getElementById('generate-qp-distribution-report-button'); // <-- ADD THIS
-// *** NEW SCRIBE REPORT BUTTON ***
+const generateQpDistributionReportButton = document.getElementById('generate-qp-distribution-report-button');
 const generateScribeReportButton = document.getElementById('generate-scribe-report-button');
-const generateScribeProformaButton = document.getElementById('generate-scribe-proforma-button'); // <-- ADD THIS
-// ****************************
-// *** NEW INVIGILATOR REPORT BUTTON ***
-const generateInvigilatorReportButton = document.getElementById('generate-invigilator-report-button'); // <-- ADD THIS
-// --- Get references to Day-wise Report elements ---
+const generateScribeProformaButton = document.getElementById('generate-scribe-proforma-button');
+const generateInvigilatorReportButton = document.getElementById('generate-invigilator-report-button');
 const generateDaywiseReportButton = document.getElementById('generate-daywise-report-button');
 
 // --- Get references to CSV Upload elements ---
@@ -220,9 +368,6 @@ const currentScribeListDiv = document.getElementById('current-scribe-list');
 // ************************************
 
 // *** MODIFIED: SCRIBE ALLOTMENT ELEMENTS (Now part of Room Allotment view) ***
-// const scribeAllotmentLoader = document.getElementById('scribe-allotment-loader'); // No longer needed
-// const scribeAllotmentContentWrapper = document.getElementById('scribe-allotment-content-wrapper'); // No longer needed
-// const scribeSessionSelect = document.getElementById('scribe-session-select'); // No longer needed
 const scribeAllotmentListSection = document.getElementById('scribe-allotment-list-section');
 const scribeAllotmentList = document.getElementById('scribe-allotment-list');
 const scribeRoomModal = document.getElementById('scribe-room-modal');
@@ -235,7 +380,6 @@ const resetStudentDataButton = document.getElementById('reset-student-data-butto
 const masterResetButton = document.getElementById('master-reset-button');
 // *************************
 // *** NEW EDIT DATA ELEMENTS ***
-
 const editDataContentWrapper = document.getElementById('edit-data-content-wrapper');
 const editDataLoader = document.getElementById('edit-data-loader');
 const editSessionSelect = document.getElementById('edit-session-select');
@@ -258,38 +402,17 @@ const restoreDataButton = document.getElementById('restore-data-button');
 const restoreStatus = document.getElementById('restore-status');
 // *********************************
 
-// --// V90 FIX: Aggressive Key Cleaning Function (Fixes key collision) ---
-function cleanCourseKey(courseName) {
-    if (typeof courseName !== 'string') return '';
-    // V90 FIX: Keep only alphanumeric characters and the course code part
-    // The course code is the most unique part (e.g., BOT3CJ201)
-    let cleaned = courseName.toUpperCase();
-    
-    // 1. Extract the course code (e.g., BOT3CJ201) and the syllabus year (e.g., 2024)
-    const codeMatch = cleaned.match(/([A-Z]{3}\d[A-Z]{2}\d{3})/);
-    const syllabusMatch = cleaned.match(/(\d{4})\s+SYLLABUS/);
-    
-    let key = '';
-    if (codeMatch) {
-        key += codeMatch[1];
+// *** NEW: Universal Base64 key generator ***
+function getBase64CourseKey(courseName) {
+    try {
+        // This creates a stable Base64 key from the full course name
+        return btoa(unescape(encodeURIComponent(courseName)));
+    } catch (e) {
+        console.warn("Could not create Base64 key for:", courseName, e);
+        return null; // Return null on failure
     }
-    if (syllabusMatch) {
-        key += syllabusMatch[1];
-    }
-    
-    // Fallback: If no code is found, use the old aggressive cleaning method
-    if (!key) {
-        // Remove all non-standard chars (including BOM, non-breaking spaces, and control chars)
-        cleaned = cleaned.replace(/[\ufeff\u00A0\u200B\u200C\u200D\u200E\u200F\uFEFF]/g, ' ').toUpperCase(); 
-        // Remove ALL non-alphanumeric chars (except spaces, - ( ) [ ] / & , ; .)
-        cleaned = cleaned.replace(/[^\w\s\-\(\)\[\]\/&,;.]/g, ''); 
-        // Replace multiple spaces with one, then trim
-        key = cleaned.replace(/\s+/g, ' ').trim();
-    }
-    
-    return key;
-}        
-
+}
+      
 // --- Helper function to numerically sort room keys ---
 function getNumericSortKey(key) {
     const parts = key.split('_'); // Date_Time_Room 1
@@ -709,8 +832,11 @@ generateReportButton.addEventListener('click', async () => {
                     // *** NEW: Get QP Code ***
                     const sessionKey = `${student.Date} | ${student.Time}`;
                     const sessionQPCodes = qpCodeMap[sessionKey] || {};
-                    const courseKey = cleanCourseKey(student.Course);
+                    
+                    // --- MODIFIED TO USE Base64 KEY ---
+                    const courseKey = getBase64CourseKey(student.Course);
                     const qpCode = sessionQPCodes[courseKey] || "";
+                    // --- END MODIFICATION ---
                     
                     // *** FIX: QP Code first, then course name ***
                     const qpCodePrefix = qpCode ? `(${qpCode}) ` : ""; // e.g., "(QP123) "
@@ -811,7 +937,6 @@ generateReportButton.addEventListener('click', async () => {
         generateReportButton.textContent = "Generate Room-wise Seating Report";
     }
 });
-
 // --- (V29) Event listener for the "Day-wise Student List" button ---
 generateDaywiseReportButton.addEventListener('click', async () => {
     const sessionKey = reportsSessionSelect.value; if (filterSessionRadio.checked && !checkManualAllotment(sessionKey)) { return; }
@@ -1184,12 +1309,15 @@ generateQpDistributionReportButton.addEventListener('click', async () => {
             const sessionKey = `${student.Date}_${student.Time}`;
             const roomName = student['Room No'];
             const courseName = student.Course;
-            const courseKey = cleanCourseKey(courseName);
+
+            // --- MODIFIED TO USE Base64 KEY ---
+            const courseKey = getBase64CourseKey(courseName);
+            // --- END MODIFICATION ---
 
             // Get QP Code
             const sessionKeyPipe = `${student.Date} | ${student.Time}`;
             const sessionQPCodes = qpCodeMap[sessionKeyPipe] || {};
-            const qpCode = sessionQPCodes[courseKey] || 'N/A';
+            const qpCode = sessionQPCodes[courseKey] || 'N/A'; // <-- Use Base64 key for lookup
 
             // Initialize nested objects
             if (!sessions[sessionKey]) {
@@ -1411,7 +1539,11 @@ generateAbsenteeReportButton.addEventListener('click', async () => {
         const courses = {};
         for (const student of sessionStudents) {
             const courseDisplay = student.Course;
-            const courseKey = cleanCourseKey(courseDisplay); // V64 FIX: Ensure course key is aggressively cleaned
+
+            // --- MODIFIED TO USE Base64 KEY ---
+            const courseKey = getBase64CourseKey(courseDisplay);
+            if (!courseKey) continue; // Skip if key can't be created
+            // --- END MODIFICATION ---
             
             if (!courses[courseKey]) {
                 courses[courseKey] = {
@@ -1439,10 +1571,13 @@ generateAbsenteeReportButton.addEventListener('click', async () => {
         for (const courseKey of sortedCourseKeys) {
             totalPages++;
             const courseData = courses[courseKey];
-            // V64 FIX: Use the clean key for lookup
+            
             // V89: Load session-specific codes
             const sessionCodes = qpCodeMap[sessionKey] || {};
-            const qpCode = sessionCodes[courseKey] || "____"; 
+            
+            // --- MODIFIED TO USE Base64 KEY ---
+            const qpCode = sessionCodes[courseKey] || "____"; // Use the Base64 key
+            // --- END MODIFICATION ---
             
             // *** NEW: Use formatting function ***
             const presentListHtml = formatRegNoList(courseData.present);
@@ -1509,7 +1644,6 @@ generateAbsenteeReportButton.addEventListener('click', async () => {
         generateAbsenteeReportButton.textContent = "Generate Absentee Statement";
     }
 });
-        
 // *** NEW: Event listener for "Generate Scribe Report" ***
 generateScribeReportButton.addEventListener('click', async () => {
     const sessionKey = reportsSessionSelect.value; if (filterSessionRadio.checked && !checkManualAllotment(sessionKey)) { return; }
@@ -1559,7 +1693,10 @@ generateScribeReportButton.addEventListener('click', async () => {
             const sessionKey = `${s.Date} | ${s.Time}`;
             const sessionScribeRooms = allScribeAllotments[sessionKey] || {};
             const sessionQPCodes = qpCodeMap[sessionKey] || {};
-            const courseKey = cleanCourseKey(s.Course);
+
+            // --- MODIFIED TO USE Base64 KEY ---
+            const courseKey = getBase64CourseKey(s.Course);
+            // --- END MODIFICATION ---
             
             reportRows.push({
                 Date: s.Date,
@@ -1569,7 +1706,7 @@ generateScribeReportButton.addEventListener('click', async () => {
                 Course: s.Course,
                 OriginalRoom: originalRoomMap[s['Register Number']] || 'N/A',
                 ScribeRoom: sessionScribeRooms[s['Register Number']] || 'Not Allotted',
-                QPCode: sessionQPCodes[courseKey] || 'N/A'
+                QPCode: sessionQPCodes[courseKey] || 'N/A' // <-- Use Base64 key for lookup
             });
         }
         
@@ -1715,7 +1852,10 @@ generateScribeProformaButton.addEventListener('click', async () => {
             const sessionKey = `${s.Date} | ${s.Time}`;
             const sessionScribeRooms = allScribeAllotments[sessionKey] || {};
             const sessionQPCodes = qpCodeMap[sessionKey] || {};
-            const courseKey = cleanCourseKey(s.Course);
+
+            // --- MODIFIED TO USE Base64 KEY ---
+            const courseKey = getBase64CourseKey(s.Course);
+            // --- END MODIFICATION ---
             
             const originalRoomData = originalRoomMap[s['Register Number']] || { room: 'N/A', seat: 'N/A' };
             
@@ -1727,7 +1867,7 @@ generateScribeProformaButton.addEventListener('click', async () => {
                 Course: s.Course,
                 OriginalRoom: `${originalRoomData.room} (Seat: ${originalRoomData.seat})`,
                 ScribeRoom: sessionScribeRooms[s['Register Number']] || 'Not Allotted',
-                QPCode: sessionQPCodes[courseKey] || 'N/A'
+                QPCode: sessionQPCodes[courseKey] || 'N/A' // <-- Use Base64 key for lookup
             });
         }
         
@@ -1890,7 +2030,6 @@ navSearch.addEventListener('click', () => showView(viewSearch, navSearch)); // <
 navReports.addEventListener('click', () => showView(viewReports, navReports));
 navAbsentees.addEventListener('click', () => showView(viewAbsentees, navAbsentees));
 navSettings.addEventListener('click', () => showView(viewSettings, navSettings));
-// document.getElementById('nav-room-settings').addEventListener('click', ...); // Removed
 
 function showView(viewToShow, buttonToActivate) {
     allViews.forEach(view => view.classList.add('hidden'));
@@ -2054,27 +2193,7 @@ roomConfigContainer.addEventListener('click', (e) => {
         saveRoomConfigButton.click(); // Triggers re-saving and re-rendering to fix numbering and buttons
     }
 });
-
-
-// --- Q-PAPER REPORT LOGIC ---
-// Listener moved above
-
 // --- (V33) NEW CSV UPLOAD LOGIC ---
-
-// V33: Function called by Python to clear the CSV upload status
-// *** FIX: Attached to window object ***
-window.clear_csv_upload_status = function() {
-    // Query DOM elements directly to avoid scope issues
-    const csvLoadStatusElement = document.getElementById('csv-load-status');
-    const correctedCsvUploadElement = document.getElementById('corrected-csv-upload');
-    
-    if (csvLoadStatusElement) {
-        csvLoadStatusElement.textContent = "";
-    }
-    if (correctedCsvUploadElement) {
-        correctedCsvUploadElement.value = ""; // Clear the file input
-    }
-}
 
 // V33: Add event listener for the new "Load CSV" button
 loadCsvButton.addEventListener('click', () => {
@@ -2256,7 +2375,6 @@ function parseCsvAndLoadData(csvText) {
 
         // *** NEW: Enable Scribe Tabs ***
         disable_scribe_settings_tab(false); // MODIFIED
-        // populate_scribe_session_dropdown(); // REMOVED
         loadGlobalScribeList();
         // *****************************
         // *** NEW: Enable Edit Data Tab ***
@@ -2277,22 +2395,8 @@ function parseCsvAndLoadData(csvText) {
 
 // --- (V56) NEW ABSENTEE LOGIC ---
 
-// *** FIX: Attach to window object ***
-window.disable_absentee_tab = function(disabled) {
-    navAbsentees.disabled = disabled;
-    if (disabled) {
-        absenteeLoader.classList.remove('hidden');
-        absenteeContentWrapper.classList.add('hidden');
-        navAbsentees.classList.add('opacity-50', 'cursor-not-allowed');
-    } else {
-        absenteeLoader.classList.add('hidden');
-        absenteeContentWrapper.classList.remove('hidden');
-        navAbsentees.classList.remove('opacity-50', 'cursor-not-allowed');
-    }
-}
-
-// *** FIX: Attach to window object ***
-window.populate_session_dropdown = function() {
+// *** FIX: This is the REAL implementation of the function Python calls ***
+window.real_populate_session_dropdown = function() {
     try {
         allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
         if (allStudentData.length === 0) {
@@ -2385,6 +2489,7 @@ window.populate_session_dropdown = function() {
         disable_absentee_tab(true);
     }
 }
+
 sessionSelect.addEventListener('change', () => {
     const sessionKey = sessionSelect.value;
     if (sessionKey) {
@@ -2569,22 +2674,7 @@ function removeAbsentee(regNo) {
     saveAbsenteeList(sessionSelect.value);
     renderAbsenteeList();
 }
-
 // --- (V89) NEW QP CODE LOGIC (DIFFERENT STRATEGY) ---
-
-// *** FIX: Attach to window object ***
-window.disable_qpcode_tab = function(disabled) {
-    navQPCodes.disabled = disabled;
-    if (disabled) {
-        qpcodeLoader.classList.remove('hidden');
-        qpcodeContentWrapper.classList.add('hidden');
-        navQPCodes.classList.add('opacity-50', 'cursor-not-allowed');
-    } else {
-        qpcodeLoader.classList.add('hidden');
-        qpcodeContentWrapper.classList.remove('hidden');
-        navQPCodes.classList.remove('opacity-50', 'cursor-not-allowed');
-    }
-}
 
 // V89: Loads the *entire* QP code map from localStorage into the global var
 function loadQPCodes() {
@@ -2592,8 +2682,8 @@ function loadQPCodes() {
 }
 
 // V61: Populates the QP Code session dropdown
-// *** FIX: Attach to window object ***
-window.populate_qp_code_session_dropdown = function() {
+// *** FIX: This is the REAL implementation of the function Python calls ***
+window.real_populate_qp_code_session_dropdown = function() {
     try {
         if (allStudentData.length === 0) {
              allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
@@ -2671,28 +2761,28 @@ function render_qp_code_list(sessionKey) {
     }
 
     uniqueCoursesArray.forEach(courseName => {
-        const cleanKey = cleanCourseKey(courseName);
-
-        // V90 FIX: If the course name cleans to an empty string,
-        // don't render an input for it as it cannot be saved.
-        if (!cleanKey) {
+        // --- MODIFIED TO USE Base64 KEY ---
+        // 1. Create the new Base64 key
+        const base64Key = getBase64CourseKey(courseName); 
+        if (!base64Key) {
             console.warn(`Skipping QP code input for un-keyable course: ${courseName}`);
             return; // Skip this iteration
         }
-        
-        // V89: Look up the code in the session-specific map
-        const savedCode = sessionCodes[cleanKey] || "";
-        
-        htmlChunks.push(`
-            <div class="flex items-center gap-3 p-2 border-b border-gray-200">
-                <label class="font-medium text-gray-700 w-2/3 text-sm">${courseName}</label>
-                <input type="text" 
-                       class="qp-code-input block w-1/3 p-2 border border-gray-300 rounded-md shadow-sm text-sm" 
-                       value="${savedCode}" 
-                       data-course="${cleanKey}" 
-                       placeholder="Enter QP Code">
-            </div>
-        `);
+
+        // 2. Look up the code using the Base64 key
+        const savedCode = sessionCodes[base64Key] || "";
+
+       htmlChunks.push(`
+        <div class="flex items-center gap-3 p-2 border-b border-gray-200">
+            <label class="font-medium text-gray-700 w-2/3 text-sm">${courseName}</label>
+            <input type="text" 
+                   class="qp-code-input block w-1/3 p-2 border border-gray-300 rounded-md shadow-sm text-sm" 
+                   value="${savedCode}" 
+                   data-course-key="${base64Key}"
+                   placeholder="Enter QP Code">
+        </div>
+       `);
+       // --- END MODIFICATION ---
     });
     
     qpCodeContainer.innerHTML = htmlChunks.join('');
@@ -2724,15 +2814,18 @@ saveQpCodesButton.addEventListener('click', () => {
     // 3. Read all inputs from the DOM
     const qpInputs = qpCodeContainer.querySelectorAll('.qp-code-input');
     
+    // --- MODIFIED TO USE Base64 KEY ---
     for (let i = 0; i < qpInputs.length; i++) {
         const input = qpInputs[i];
-        const courseKey = input.dataset.course; // Already cleaned
+        const base64Key = input.dataset.courseKey; // Read the Base64 key
         const qpCode = input.value.trim();
 
-        if (courseKey && qpCode) {
-            thisSessionCodes[courseKey] = qpCode;
+        if (base64Key && qpCode) {
+            // Save using the Base64 key
+            thisSessionCodes[base64Key] = qpCode;
         }
     }
+    // --- END MODIFICATION ---
 
     // 4. Update the master map with the new data for this session
     qpCodeMap[sessionKey] = thisSessionCodes;
@@ -2933,7 +3026,6 @@ function loadInitialData() {
                 populate_session_dropdown();
                 populate_qp_code_session_dropdown();
                 populate_room_allotment_session_dropdown();
-                // populate_scribe_session_dropdown(); // <-- REMOVED
                 loadGlobalScribeList(); // <-- NEW
                 // *** NEW: Enable Edit Data Tab ***
                 disable_edit_data_tab(false);
@@ -2953,30 +3045,10 @@ function loadInitialData() {
     }
 }
 
-// *** WORKFLOW FIX: Removed the event listeners that disabled/enabled buttons ***
-// Both PDF and CSV upload are always available.
-
-
 // --- ROOM ALLOTMENT FUNCTIONALITY ---
 
-// Disable/Enable Room Allotment Tab
-// *** FIX: Attach to window object ***
-window.disable_room_allotment_tab = function(disabled) {
-    navRoomAllotment.disabled = disabled;
-    if (disabled) {
-        roomAllotmentLoader.classList.remove('hidden');
-        roomAllotmentContentWrapper.classList.add('hidden');
-        navRoomAllotment.classList.add('opacity-50', 'cursor-not-allowed');
-    } else {
-        roomAllotmentLoader.classList.add('hidden');
-        roomAllotmentContentWrapper.classList.remove('hidden');
-        navRoomAllotment.classList.remove('opacity-50', 'cursor-not-allowed');
-    }
-}
-
-// Populate Room Allotment Session Dropdown
-// *** FIX: Attach to window object ***
-window.populate_room_allotment_session_dropdown = function() {
+// *** FIX: This is the REAL implementation of the function Python calls ***
+window.real_populate_room_allotment_session_dropdown = function() {
     try {
         if (allStudentData.length === 0) {
             allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
@@ -3239,31 +3311,15 @@ saveRoomAllotmentButton.addEventListener('click', () => {
 
 // *** NEW: SCRIBE FUNCTIONALITY ***
 
-// Disable/Enable Scribe Settings Tab (MODIFIED)
-// *** FIX: Attach to window object ***
-window.disable_scribe_settings_tab = function(disabled) {
-    navScribeSettings.disabled = disabled;
-    
-    if (disabled) {
-        scribeLoader.classList.remove('hidden');
-        scribeContentWrapper.classList.add('hidden');
-        navScribeSettings.classList.add('opacity-50', 'cursor-not-allowed');
-    } else {
-        scribeLoader.classList.add('hidden');
-        scribeContentWrapper.classList.remove('hidden');
-        navScribeSettings.classList.remove('opacity-50', 'cursor-not-allowed');
-    }
-}
-
-// Load the global list from localStorage
-// *** FIX: Attach to window object ***
-window.loadGlobalScribeList = function() {
+// *** FIX: This is the REAL implementation of the function Python calls ***
+window.real_loadGlobalScribeList = function() {
     globalScribeList = JSON.parse(localStorage.getItem(SCRIBE_LIST_KEY) || '[]');
     renderGlobalScribeList();
 }
 
 // Render the global list in "Scribe Settings"
 function renderGlobalScribeList() {
+    if (!currentScribeListDiv) return; // Guard clause
     currentScribeListDiv.innerHTML = "";
     if (globalScribeList.length === 0) {
         currentScribeListDiv.innerHTML = `<em class="text-gray-500">No students added to the scribe list.</em>`;
@@ -3384,10 +3440,6 @@ function clearScribeSearch() {
 
 // --- Scribe Allotment Page Logic (MOVED) ---
 
-// THIS FUNCTION IS NO LONGER NEEDED
-// window.populate_scribe_session_dropdown = function() { ... }
-
-
 // NEW FUNCTION: This loads the scribe allotment data for the session
 function loadScribeAllotment(sessionKey) {
     if (sessionKey && globalScribeList.length > 0) {
@@ -3472,7 +3524,6 @@ function renderScribeAllotmentList(sessionKey) {
         scribeAllotmentList.appendChild(item);
     });
 }
-
 // Find available rooms for scribes
 async function findAvailableRooms(sessionKey) {
     
@@ -3579,15 +3630,15 @@ scribeCloseRoomModal.addEventListener('click', () => {
 // **********************************
 
 // --- Helper function to disable all report buttons ---
-// *** FIX: Attach to window object ***
-window.disable_all_report_buttons = function(disabled) {
-    generateReportButton.disabled = disabled;
-    generateQPaperReportButton.disabled = disabled;
-    generateDaywiseReportButton.disabled = disabled;
-    generateScribeReportButton.disabled = disabled;
-    generateScribeProformaButton.disabled = disabled;
-    generateQpDistributionReportButton.disabled = disabled; // <-- ADD THIS
-    generateInvigilatorReportButton.disabled = disabled; // <-- ADD THIS
+// *** FIX: This is the REAL implementation of the function Python calls ***
+window.real_disable_all_report_buttons = function(disabled) {
+    if (generateReportButton) generateReportButton.disabled = disabled;
+    if (generateQPaperReportButton) generateQPaperReportButton.disabled = disabled;
+    if (generateDaywiseReportButton) generateDaywiseReportButton.disabled = disabled;
+    if (generateScribeReportButton) generateScribeReportButton.disabled = disabled;
+    if (generateScribeProformaButton) generateScribeProformaButton.disabled = disabled;
+    if (generateQpDistributionReportButton) generateQpDistributionReportButton.disabled = disabled;
+    if (generateInvigilatorReportButton) generateInvigilatorReportButton.disabled = disabled;
 }
 
 // --- NEW: STUDENT DATA EDIT FUNCTIONALITY (MODAL VERSION) ---
@@ -3613,21 +3664,6 @@ const modalRegNo = document.getElementById('modal-edit-regno');
 const modalName = document.getElementById('modal-edit-name');
 const modalSaveBtn = document.getElementById('modal-save-student');
 const modalCancelBtn = document.getElementById('modal-cancel-student');
-
-
-// Disable/Enable Edit Data Tab
-window.disable_edit_data_tab = function(disabled) {
-    navEditData.disabled = disabled;
-    if (disabled) {
-        editDataLoader.classList.remove('hidden');
-        editDataContentWrapper.classList.add('hidden');
-        navEditData.classList.add('opacity-50', 'cursor-not-allowed');
-    } else {
-        editDataLoader.classList.add('hidden');
-        editDataContentWrapper.classList.remove('hidden');
-        navEditData.classList.remove('opacity-50', 'cursor-not-allowed');
-    }
-}
 
 // 1. Session selection (Same as before)
 editSessionSelect.addEventListener('change', () => {
@@ -3767,7 +3803,9 @@ addNewStudentBtn.addEventListener('click', () => {
 // 6. Handle Edit/Delete Clicks (NEW: Opens modal)
 editDataContainer.addEventListener('click', (e) => {
     const target = e.target;
+    if (!target.closest('tr')) return; // Guard clause if click is not on a row
     const rowIndex = target.closest('tr').dataset.rowIndex;
+    if (rowIndex === undefined) return; // Guard clause
 
     if (target.classList.contains('edit-row-btn')) {
         // --- Open Edit Modal ---
@@ -4169,8 +4207,11 @@ function showStudentDetailsModal(regNo, sessionKey) {
     // 4. Get QP Code (if any)
     loadQPCodes(); // Ensures qpCodeMap is populated
     const sessionQPCodes = qpCodeMap[sessionKey] || {};
-    const courseKey = cleanCourseKey(student.Course);
+    
+    // --- MODIFIED TO USE Base64 KEY ---
+    const courseKey = getBase64CourseKey(student.Course);
     const qpCode = sessionQPCodes[courseKey] || "Not Entered";
+    // --- END MODIFICATION ---
 
    // 5. Populate Modal
     searchResultName.textContent = student.Name;
