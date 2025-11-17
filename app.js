@@ -72,7 +72,7 @@ const reportStatus = document.getElementById('report-status');
 const finalPrintButton = document.getElementById('final-print-button');
 const clearReportButton = document.getElementById('clear-report-button');
 const roomCsvDownloadContainer = document.getElementById('room-csv-download-container');
-
+const statusLogDiv = document.getElementById('status-log');
 // --- Get references to all Navigation elements ---
 const viewExtractor = document.getElementById('view-extractor');
 const viewSettings = document.getElementById('view-settings');
@@ -368,29 +368,23 @@ function performOriginalAllocation(data) {
     // 1. Get CURRENT room capacities
     const { roomNames: masterRoomNames, roomCapacities: masterRoomCaps } = getRoomCapacitiesFromStorage();
     
-    // 2. Check for manual room allotments
+    // 2. Get manual room allotments
     const allAllotments = JSON.parse(localStorage.getItem(ROOM_ALLOTMENT_KEY) || '{}');
 
-    // 3. Get Scribe List (to mark them)
-    // *** FIX: We can't call loadGlobalScribeList() here as it updates the UI. Read from storage directly. ***
+    // 3. Get Scribe List
     const scribeRegNos = new Set( (JSON.parse(localStorage.getItem(SCRIBE_LIST_KEY) || '[]')).map(s => s.regNo) );
     
-    // 4. Perform Room Allocation
-    const processed_rows_with_rooms = [];
+    // 4. Pre-process data to populate sessionRoomFills with MANUAL allotments
+    //    This is the FIX for the 50-in-30 bug.
     const sessionRoomFills = {}; // Tracks { "Room 1": 0, "Room 2": 0 }
-    const sessionRoomStudentCount = {}; // Tracks { "Room 1": 0, "Room 2": 0 } for seat number
-    const DEFAULT_OVERFLOW_CAPACITY = 30;
-    
+    const processed_data_with_manual = []; // Will hold data with manual rooms pre-assigned
+
     for (const row of data) {
         const sessionKey = `${row.Date}_${row.Time}`;
         const sessionKeyPipe = `${row.Date} | ${row.Time}`;
-        
-        let assignedRoomName = "";
-        
-        // 4a. Check if student is a scribe.
-        const isScribe = scribeRegNos.has(row['Register Number']);
-        
-        // 4b. Check if manual allotment exists for this session
+        let assignedRoomName = ""; // Start blank
+
+        // Find manual allotment
         const manualAllotment = allAllotments[sessionKeyPipe];
         if (manualAllotment && manualAllotment.length > 0) {
             for (const room of manualAllotment) {
@@ -400,10 +394,38 @@ function performOriginalAllocation(data) {
                 }
             }
         }
-        
-        // 4c. If no manual allotment, use automatic allocation
-        if (assignedRoomName === "") {
+
+        // If manually assigned, increment the fill count for that room
+        if (assignedRoomName !== "") {
             if (!sessionRoomFills[sessionKey]) {
+                sessionRoomFills[sessionKey] = new Array(masterRoomCaps.length).fill(0);
+            }
+            
+            const roomIndex = masterRoomNames.indexOf(assignedRoomName);
+            if (roomIndex !== -1) {
+                // Increment the count. This respects manual allotment.
+                sessionRoomFills[sessionKey][roomIndex]++; 
+            }
+        }
+        
+        processed_data_with_manual.push({ ...row, assignedRoomName }); // Store intermediate result
+    }
+
+    // 5. Perform FINAL allocation (automatic for remaining)
+    const processed_rows_with_rooms = [];
+    const sessionRoomStudentCount = {}; // Tracks seat numbers
+    const DEFAULT_OVERFLOW_CAPACITY = 30;
+
+    for (const row_data of processed_data_with_manual) {
+        const sessionKey = `${row_data.Date}_${row_data.Time}`;
+        let assignedRoomName = row_data.assignedRoomName; // Get pre-assigned room
+        const isScribe = scribeRegNos.has(row_data['Register Number']);
+
+        // If no manual room, run automatic allocation
+        const sessionKeyPipe = `${row_data.Date} | ${row_data.Time}`;
+        const sessionManualAllotment = allAllotments[sessionKeyPipe];
+        if (assignedRoomName === "") {
+            if (assignedRoomName === "" && (!sessionManualAllotment || sessionManualAllotment.length === 0)) {
                 sessionRoomFills[sessionKey] = new Array(masterRoomCaps.length).fill(0);
             }
             
@@ -411,10 +433,8 @@ function performOriginalAllocation(data) {
             
             // Try to fill configured rooms
             for (let i = 0; i < masterRoomCaps.length; i++) {
-                // *** FIX: Use capacity from masterRoomCaps[i] ***
                 if (currentFills[i] < masterRoomCaps[i]) {
                     assignedRoomName = masterRoomNames[i];
-                    // *** FIX: Increment fill count for ALL students (including scribes) ***
                     currentFills[i]++;
                     break;
                 }
@@ -426,7 +446,6 @@ function performOriginalAllocation(data) {
                 for (let i = masterRoomCaps.length; i < currentFills.length; i++) {
                     if (currentFills[i] < DEFAULT_OVERFLOW_CAPACITY) {
                         assignedRoomName = `Room ${i + 1}`;
-                        // *** FIX: Increment fill count for ALL students (including scribes) ***
                         currentFills[i]++;
                         foundOverflowSpot = true;
                         break;
@@ -435,14 +454,13 @@ function performOriginalAllocation(data) {
                 
                 // If no existing overflow has space, create a *new* overflow
                 if (!foundOverflowSpot) {
-                    assignedRoomName = `Room ${currentFills.length + 1}`; // FIX: Use .length + 1 for new room
-                    // *** FIX: Increment fill count for ALL students (including scribes) ***
+                    assignedRoomName = `Room ${currentFills.length + 1}`;
                     currentFills.push(1); 
                 }
             }
         }
         
-        // 4d. Assign the *original* seat number
+        // 5d. Assign the *original* seat number
         const roomSessionKey = `${sessionKey}_${assignedRoomName}`;
         if (!sessionRoomStudentCount[roomSessionKey]) {
             sessionRoomStudentCount[roomSessionKey] = 0;
@@ -451,9 +469,9 @@ function performOriginalAllocation(data) {
         const seatNumber = sessionRoomStudentCount[roomSessionKey];
 
         processed_rows_with_rooms.push({ 
-            ...row, 
+            ...row_data, 
             'Room No': assignedRoomName,
-            'seatNumber': seatNumber, // This is the key: e.g., 1, 2, 3...
+            'seatNumber': seatNumber, 
             'isScribe': isScribe 
         });
     }
@@ -482,11 +500,54 @@ function getFilteredReportData(reportType) {
     return [];
 }
 
+// ### NEW HELPER FUNCTION ###
+// ### NEW HELPER FUNCTION (REPLACING THE OLD ONE) ###
+function checkManualAllotment(sessionKey) {
+    if (!sessionKey || sessionKey === 'all') {
+        alert('Please select a specific session to generate this report.');
+        return false;
+    }
 
-// --- 1. Event listener for the "Generate Room-wise Report" button ---
+    // 1. Get total unique students for the session (scribes included)
+    const [date, time] = sessionKey.split(' | ');
+    const sessionStudentRecords = allStudentData.filter(s => s.Date === date && s.Time === time);
+    const totalUniqueStudents = new Set(sessionStudentRecords.map(s => s['Register Number'])).size;
+
+    if (totalUniqueStudents === 0) {
+        alert('No students found for this session.');
+        return false;
+    }
+
+    // 2. Get total manually allotted students for the session
+    const allAllotments = JSON.parse(localStorage.getItem(ROOM_ALLOTMENT_KEY) || '{}');
+    const manualAllotment = allAllotments[sessionKey] || [];
+
+    if (!manualAllotment || manualAllotment.length === 0) {
+        alert('Error: No manual room allotment found for this session. Please complete the allotment on the "Room Allotment" tab before generating reports.');
+        return false;
+    }
+
+    // 3. Count unique allotted students
+    const allottedRegNos = new Set();
+    manualAllotment.forEach(room => {
+        room.students.forEach(regNo => {
+            allottedRegNos.add(regNo);
+        });
+    });
+    const allottedStudentCount = allottedRegNos.size;
+
+    // 4. Compare counts
+    if (allottedStudentCount < totalUniqueStudents) {
+        alert(`Error: Not all students are allotted.\n\nTotal Students: ${totalUniqueStudents}\nManually Allotted: ${allottedStudentCount}\nRemaining to Allot: ${totalUniqueStudents - allottedStudentCount}\n\nPlease complete the allotment.`);
+        return false;
+    }
+
+    // This check is good. All students are allotted.
+    return true;
+}
 // --- 1. Event listener for the "Generate Room-wise Report" button ---
 generateReportButton.addEventListener('click', async () => {
-    
+    const sessionKey = reportsSessionSelect.value; if (filterSessionRadio.checked && !checkManualAllotment(sessionKey)) { return; }
     generateReportButton.disabled = true;
     generateReportButton.textContent = "Allocating Rooms & Generating Report...";
     reportOutputArea.innerHTML = "";
@@ -753,6 +814,7 @@ generateReportButton.addEventListener('click', async () => {
 
 // --- (V29) Event listener for the "Day-wise Student List" button ---
 generateDaywiseReportButton.addEventListener('click', async () => {
+    const sessionKey = reportsSessionSelect.value; if (filterSessionRadio.checked && !checkManualAllotment(sessionKey)) { return; }
     generateDaywiseReportButton.disabled = true;
     // V49: Button text updated
     generateDaywiseReportButton.textContent = "Generating...";
@@ -1088,6 +1150,7 @@ generateQPaperReportButton.addEventListener('click', async () => {
 
 // *** NEW: Event listener for QP Distribution by QP-Code Report ***
 generateQpDistributionReportButton.addEventListener('click', async () => {
+    const sessionKey = reportsSessionSelect.value; if (filterSessionRadio.checked && !checkManualAllotment(sessionKey)) { return; }
     generateQpDistributionReportButton.disabled = true;
     generateQpDistributionReportButton.textContent = "Generating...";
     reportOutputArea.innerHTML = "";
@@ -1449,6 +1512,7 @@ generateAbsenteeReportButton.addEventListener('click', async () => {
         
 // *** NEW: Event listener for "Generate Scribe Report" ***
 generateScribeReportButton.addEventListener('click', async () => {
+    const sessionKey = reportsSessionSelect.value; if (filterSessionRadio.checked && !checkManualAllotment(sessionKey)) { return; }
     generateScribeReportButton.disabled = true;
     generateScribeReportButton.textContent = "Generating...";
     reportOutputArea.innerHTML = "";
@@ -1600,6 +1664,7 @@ generateScribeReportButton.addEventListener('click', async () => {
 
 // *** NEW: Event listener for Scribe Proforma Report ***
 generateScribeProformaButton.addEventListener('click', async () => {
+    const sessionKey = reportsSessionSelect.value; if (filterSessionRadio.checked && !checkManualAllotment(sessionKey)) { return; }
     generateScribeProformaButton.disabled = true;
     generateScribeProformaButton.textContent = "Generating...";
     reportOutputArea.innerHTML = "";
@@ -2234,10 +2299,51 @@ window.populate_session_dropdown = function() {
             disable_absentee_tab(true);
             return;
         }
+
+        // ### NEW: Data Analysis and Reporting ###
+        const totalRows = allStudentData.length;
+        const seenKeys = new Set();
+        const uniqueStudentEntries = []; // We will store the clean data here
+        let duplicateCount = 0;
+
+        allStudentData.forEach(row => {
+            // This key checks for a unique student *per session*, just as you described
+            const key = `${row.Date}|${row.Time}|${row['Register Number']}`;
+            
+            if (seenKeys.has(key)) {
+                duplicateCount++;
+            } else {
+                seenKeys.add(key);
+                uniqueStudentEntries.push(row); // Store the first unique entry
+            }
+        });
+
+        // If duplicates were found, report it to the Status Log
+        if (duplicateCount > 0) {
+            const uniqueCount = seenKeys.size;
+            const warningMsg = `
+                <p class="mb-1 text-red-600">&gt; <strong>Data Validation Warning:</strong></p>
+                <p class="mb-1 text-red-600" style="padding-left: 1rem;">- Total rows extracted: <strong>${totalRows}</strong></p>
+                <p class="mb-1 text-red-600" style="padding-left: 1rem;">- Unique student entries: <strong>${uniqueCount}</strong></p>
+                <p class="mb-1 text-red-600" style="padding-left: 1rem;">- Found <strong>${duplicateCount} duplicate entries.</strong></p>
+                <p class="mb-1 text-yellow-600" style="padding-left: 1rem;">&gt; This may be due to uploading a duplicate PDF file. The app will proceed using only the <strong>${uniqueCount}</strong> unique entries. If this is unexpected, please re-extract your data.</p>
+            `;
+            
+            if (statusLogDiv) {
+                statusLogDiv.innerHTML += warningMsg;
+                statusLogDiv.scrollTop = statusLogDiv.scrollHeight;
+            }
+            
+            // IMPORTANT: Fix the data for the rest of the app
+            // This ensures the 692 (unique) count is used everywhere
+            allStudentData = uniqueStudentEntries;
+        }
+        // ### END: Data Analysis and Reporting ###
+
         
-        updateUniqueStudentList(); // <-- ADDED: Build unique student list
+        updateUniqueStudentList(); // This will now use the clean 'allStudentData'
         
-        // Get unique sessions
+        // Get unique sessions (from the clean data)
         const sessions = new Set(allStudentData.map(s => `${s.Date} | ${s.Time}`));
         allStudentSessions = Array.from(sessions).sort();
         
@@ -2245,6 +2351,7 @@ window.populate_session_dropdown = function() {
         reportsSessionSelect.innerHTML = '<option value="all">All Sessions</option>'; // V68: Clear and set default for reports
         editSessionSelect.innerHTML = '<option value="">-- Select a Session --</option>'; // <-- ADD THIS
         searchSessionSelect.innerHTML = '<option value="">-- Select a Session --</option>'; // <-- ADD THIS
+        
         // Find today's session
         const today = new Date();
         const todayStr = today.toLocaleDateString('en-GB').replace(/\//g, '.'); // DD.MM.YYYY
@@ -2278,7 +2385,6 @@ window.populate_session_dropdown = function() {
         disable_absentee_tab(true);
     }
 }
-
 sessionSelect.addEventListener('change', () => {
     const sessionKey = sessionSelect.value;
     if (sessionKey) {
@@ -2929,11 +3035,10 @@ function saveRoomAllotment() {
 // Update the display with current allotment status
 function updateAllotmentDisplay() {
     const [date, time] = currentSessionKey.split(' | ');
-    const sessionStudents = allStudentData.filter(s => s.Date === date && s.Time === time);
-    
+    const sessionStudentRecords = allStudentData.filter(s => s.Date === date && s.Time === time);    
     // *** FIX: Include scribe students in count - they occupy space in original room ***
-    const totalStudents = sessionStudents.length;
-    // ***************************************************
+    const uniqueRegNos = new Set(sessionStudentRecords.map(s => s['Register Number']));
+    const totalStudents = uniqueRegNos.size;    // ***************************************************
     
     // Calculate allotted students
     let allottedCount = 0;
@@ -3055,7 +3160,8 @@ function showRoomSelectionModal() {
 // Select a room and allot students
 function selectRoomForAllotment(roomName, capacity) {
     const [date, time] = currentSessionKey.split(' | ');
-    const sessionStudents = allStudentData.filter(s => s.Date === date && s.Time === time);
+    const sessionStudentRecords = allStudentData.filter(s => s.Date === date && s.Time === time);
+    const uniqueSessionRegNos = new Set(sessionStudentRecords.map(s => s['Register Number']));
     
     // *** FIX: Check if this room already has students allocated ***
     const existingRoom = currentSessionAllotment.find(r => r.roomName === roomName);
@@ -3073,15 +3179,18 @@ function selectRoomForAllotment(roomName, capacity) {
     });
 
     // Get unallotted students (including scribes)
-    const unallottedStudents = sessionStudents.filter(s => 
-        !allottedRegNos.has(s['Register Number'])
-    );
+    const unallottedRegNos = [];
+for (const regNo of uniqueSessionRegNos) {
+    if (!allottedRegNos.has(regNo)) {
+        unallottedRegNos.push(regNo);
+    }
+}
     
     // Allot up to capacity
-    const studentsToAllot = unallottedStudents.slice(0, capacity);
+    const regNosToAllot = unallottedRegNos.slice(0, capacity);
     
     // *** FIX: Renamed this variable from 'allottedRegNos' to 'newStudentRegNos' ***
-    const newStudentRegNos = studentsToAllot.map(s => s['Register Number']);
+    const newStudentRegNos = regNosToAllot;
     
     // Add to current session allotment
     currentSessionAllotment.push({
@@ -3390,8 +3499,7 @@ async function findAvailableRooms(sessionKey) {
 
 
 // Open the Scribe Room Modal
-// Open the Scribe Room Modal
-async function openScribeRoomModal(regNo, studentName) {
+window.openScribeRoomModal = async function(regNo, studentName) {
     studentToAllotScribeRoom = regNo;
     scribeRoomModalTitle.textContent = `Select Room for ${studentName} (${regNo})`;
     
