@@ -626,7 +626,48 @@ function performOriginalAllocation(data) {
     return processed_rows_with_rooms;
 }
 
+// --- NEW: Helper to generate Room Serial Numbers (1, 2, 3...) ---
+function getRoomSerialMap(sessionKey) {
+    const serialMap = {};
+    let counter = 1;
 
+    // 1. Regular Allotment (Respects order in the array "Top to Bottom")
+    const allAllotments = JSON.parse(localStorage.getItem(ROOM_ALLOTMENT_KEY) || '{}');
+    const regularRooms = allAllotments[sessionKey] || [];
+
+    regularRooms.forEach(roomObj => {
+        // Only assign if not already assigned (handles duplicates if any)
+        if (!serialMap[roomObj.roomName]) { 
+            serialMap[roomObj.roomName] = counter++;
+        }
+    });
+
+    // 2. Scribe Allotment (Continue numbering)
+    const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
+    const scribeMap = allScribeAllotments[sessionKey] || {};
+    
+    // Collect unique scribe rooms
+    const uniqueScribeRooms = new Set(Object.values(scribeMap));
+    
+    // Remove rooms that were already counted in Regular Allotment
+    // (e.g., if a Scribe is placed in a Regular Room, it keeps the Regular serial number)
+    regularRooms.forEach(r => uniqueScribeRooms.delete(r.roomName));
+
+    // Sort remaining Scribe Rooms numerically/alphabetically
+    const sortedScribeRooms = Array.from(uniqueScribeRooms).sort((a, b) => {
+        const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
+        const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
+        return numA - numB;
+    });
+
+    // Assign serial numbers to Scribe Rooms
+    sortedScribeRooms.forEach(roomName => {
+        serialMap[roomName] = counter++;
+    });
+
+    return serialMap;
+}
+    
 // V68: Helper function to filter data based on selected report filter
 function getFilteredReportData(reportType) {
     const data = JSON.parse(jsonDataStore.innerHTML || '[]');
@@ -693,28 +734,29 @@ function checkManualAllotment(sessionKey) {
     // This check is good. All students are allotted.
     return true;
 }
+
 // --- 1. Event listener for the "Generate Room-wise Report" button ---
 generateReportButton.addEventListener('click', async () => {
-    const sessionKey = reportsSessionSelect.value; if (filterSessionRadio.checked && !checkManualAllotment(sessionKey)) { return; }
+    const sessionKey = reportsSessionSelect.value; 
+    if (filterSessionRadio.checked && !checkManualAllotment(sessionKey)) { return; }
+    
     generateReportButton.disabled = true;
     generateReportButton.textContent = "Allocating Rooms & Generating Report...";
     reportOutputArea.innerHTML = "";
     reportControls.classList.add('hidden');
     roomCsvDownloadContainer.innerHTML = "";
     lastGeneratedRoomData = [];
-    lastGeneratedReportType = ""; // V91: Reset report type
+    lastGeneratedReportType = ""; 
     await new Promise(resolve => setTimeout(resolve, 50));
 
     try {
-        // *** V95 FIX: Refresh college name from local storage BEFORE generation ***
         currentCollegeName = localStorage.getItem(COLLEGE_NAME_KEY) || "University of Calicut";
-        getRoomCapacitiesFromStorage(); // <-- ADD THIS LINE
-        loadQPCodes(); // <-- This line is already here, but make sure
+        getRoomCapacitiesFromStorage(); 
+        loadQPCodes(); 
+        
         // 1. Get FILTERED RAW student data
         const data = getFilteredReportData('room-wise');
-
         if (data.length === 0) {
-            // V70 FIX: Use alert instead of custom modal
             alert("No data found for the selected filter/session."); 
             return;
         }
@@ -722,40 +764,34 @@ generateReportButton.addEventListener('click', async () => {
         // 2. Get the ORIGINAL allocation with seat numbers
         const processed_rows_with_rooms = performOriginalAllocation(data);
 
-        // *** NEW: Load scribe data and create final list ***
+        // 3. Load scribe data and create final list
         const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
-        
         const final_student_list_for_report = [];
         
         for (const student of processed_rows_with_rooms) {
             if (student.isScribe) {
-                // This is a scribe student. Find their allotted scribe room.
                 const sessionKeyPipe = `${student.Date} | ${student.Time}`;
                 const sessionScribeAllotment = allScribeAllotments[sessionKeyPipe] || {};
                 const scribeRoom = sessionScribeAllotment[student['Register Number']] || 'N/A';
                 
-                // *** FIX: Add a 'remark' property instead of changing the name ***
                 final_student_list_for_report.push({ 
                     ...student, 
-                    Name: student.Name, // Keep original name
-                    remark: `${scribeRoom}`, // *** Add remark (Room Number only) ***
-                    isPlaceholder: true // Keep this for styling
+                    Name: student.Name, 
+                    remark: `${scribeRoom}`, 
+                    isPlaceholder: true 
                 });
             } else {
-                // Not a scribe, add as normal
                 final_student_list_for_report.push(student);
             }
         }
-        // *************************************************
-
         
-        // 3. Store data for CSV (use original allocation for CSV)
+        // 4. Store data for CSV
         lastGeneratedRoomData = processed_rows_with_rooms; 
         lastGeneratedReportType = "Roomwise_Seating_Report";
 
-        // 4. Group data for Report Generation (use the NEW final list)
+        // 5. Group data for Report Generation
         const sessions = {};
-        loadQPCodes(); // *** NEW: Load QP Codes for the report ***
+        loadQPCodes(); 
         final_student_list_for_report.forEach(student => {
             const key = `${student.Date}_${student.Time}_${student['Room No']}`;
             if (!sessions[key]) {
@@ -783,30 +819,55 @@ generateReportButton.addEventListener('click', async () => {
             return getNumericSortKey(a).localeCompare(getNumericSortKey(b));
         });
 
-        // 5. Build the HTML report pages
+        // 6. Build the HTML report pages
         sortedSessionKeys.forEach(key => {
             const session = sessions[key];
-            const studentsPerPage = 20;
             
-            // (V28) Get location for this room
+            // Get location
             const roomInfo = currentRoomConfig[session.Room];
             const location = (roomInfo && roomInfo.location) ? roomInfo.location : "";
             const locationHtml = location ? `<div class="report-location-header">Location: ${location}</div>` : "";
 
-            // V98: Prepare Course Summary for the FOOTER
+            // Get Serial Number
+            const sessionKeyPipe = `${session.Date} | ${session.Time}`;
+            const roomSerialMap = getRoomSerialMap(sessionKeyPipe);
+            const serialNo = roomSerialMap[session.Room] || '-';
+
+            const sessionQPCodes = qpCodeMap[sessionKeyPipe] || {};
+
+            // --- Prepare Course Summary (UPDATED: No Bold, Smaller Font) ---
             let courseSummaryHtml = '';
+            const uniqueQPCodesInRoom = new Set();
+
             for (const [courseName, count] of Object.entries(session.courseCounts)) {
-                courseSummaryHtml += `<div style="font-weight: bold;">${courseName}: ${count} Student(s)</div>`; // V38: Show full course name
+                const courseKey = getBase64CourseKey(courseName);
+                const qpCode = sessionQPCodes[courseKey];
+                
+                // Add to QP List for Balance section
+                if (qpCode) uniqueQPCodesInRoom.add(qpCode);
+                else uniqueQPCodesInRoom.add(courseName.substring(0, 15)); 
+
+                const qpDisplay = qpCode ? ` (QP: ${qpCode})` : "";
+                
+                // *** FIX: Removed 'font-weight: bold' and set font-size to 9pt ***
+                courseSummaryHtml += `<div style="font-size: 9pt; margin-bottom: 2px;">${courseName}${qpDisplay}: <strong>${count}</strong></div>`; 
             }
             
-            // *** COLLEGE NAME IS CORRECTLY REFLECTED HERE ***
+            // Build the Balance Split-up HTML
+            let qpBalanceHtml = '';
+            uniqueQPCodesInRoom.forEach(code => {
+                qpBalanceHtml += `<span style="white-space: nowrap;">${code}: __________</span> &nbsp;&nbsp; `;
+            });
+            // --------------------------------------------
+            
             const pageHeaderHtml = `
                 <div class="print-header-group">
-                    <h1>${currentCollegeName}</h1> <h2>${session.Date} &nbsp;|&nbsp; ${session.Time} &nbsp;|&nbsp; ${session.Room}</h2>
-                    ${locationHtml} </div>
+                    <h1>${currentCollegeName}</h1> 
+                    <h2>${serialNo} &nbsp;|&nbsp; ${session.Date} &nbsp;|&nbsp; ${session.Time} &nbsp;|&nbsp; ${session.Room}</h2>
+                    ${locationHtml} 
+                </div>
             `;
             
-            // *** FIX: Changed "Sl No" to "Seat No" and swapped Remarks/Signature ***
             const tableHeaderHtml = `
                 <table class="print-table">
                     <thead>
@@ -822,62 +883,55 @@ generateReportButton.addEventListener('click', async () => {
                     <tbody>
             `; 
             
-            // *** NEW: Check for scribes on this page to add footnote ***
             const hasScribe = session.students.some(s => s.isPlaceholder);
             const scribeFootnote = hasScribe ? '<div class="scribe-footnote">* = Scribe Assistance</div>' : '';
 
             const invigilatorFooterHtml = `
-                <div class="invigilator-footer">
-                    <div class="course-summary-footer">
-                        <strong>Course Summary:</strong>
-                        ${courseSummaryHtml}
+                <div class="invigilator-footer" style="margin-top: 1.5rem;"> <div class="course-summary-footer" style="padding: 6px;">
+                        <strong style="font-size: 10pt;">Course Summary:</strong>
+                        <div style="margin-top: 4px;">${courseSummaryHtml}</div>
                     </div>
-                    <div><strong>Answer Booklets Received:</strong> _________________</div>
-                    <div><strong>Answer Booklets Used:</strong> _________________</div>
-                    <div><strong>Answer Booklets Returned (Balance):</strong> _________________</div>
-                    <div class="signature">
-                        Chief Superintendent
+                    
+                    <div style="font-size: 9pt; line-height: 1.4;"> <div><strong>Answer Booklets Received:</strong> _________________</div>
+                        <div><strong>Answer Booklets Used:</strong> _________________</div>
+                        
+                        <div style="margin-top: 4px; margin-bottom: 4px;">
+                            <strong>Answer Booklets Returned (Balance):</strong><br>
+                            <div style="margin-top: 4px;">
+                                ${qpBalanceHtml}
+                                <span style="font-weight: bold; white-space: nowrap;">Total: __________</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="signature" style="margin-left: auto; text-align: center;">
+                        Name and Dated Signature of the Invigilator
                     </div>
                     ${scribeFootnote}
                 </div>
             `;
 
-            // --- START OF MODIFIED SECTION ---
             let previousCourseName = ""; 
-            let previousRegNoPrefix = ""; // <-- ADDED
-            const regNoRegex = /^([A-Z]+)(\d+)$/; // <-- ADDED
+            let previousRegNoPrefix = ""; 
+            const regNoRegex = /^([A-Z]+)(\d+)$/; 
 
             function generateTableRows(studentList) {
                 let rowsHtml = '';
                 studentList.forEach((student) => { 
-                    // *** FIX: Use student.seatNumber and add asterisk ***
                     const seatNumber = student.seatNumber;
                     const asterisk = student.isPlaceholder ? '*' : '';
                     
-                    // *** NEW: Get QP Code ***
-                    const sessionKey = `${student.Date} | ${student.Time}`;
-                    const sessionQPCodes = qpCodeMap[sessionKey] || {};
-                    
-                    // --- MODIFIED TO USE Base64 KEY ---
                     const courseKey = getBase64CourseKey(student.Course);
                     const qpCode = sessionQPCodes[courseKey] || "";
-                    // --- END MODIFICATION ---
+                    const qpCodePrefix = qpCode ? `(${qpCode}) ` : ""; 
                     
-                    // *** FIX: QP Code first, then course name ***
-                    const qpCodePrefix = qpCode ? `(${qpCode}) ` : ""; // e.g., "(QP123) "
-                    
-                    // Truncate the course name (student.Course)
                     const courseWords = student.Course.split(/\s+/);
                     const truncatedCourse = courseWords.slice(0, 4).join(' ') + (courseWords.length > 4 ? '...' : '');
-                    
-                    // Combine them
                     const tableCourseName = qpCodePrefix + truncatedCourse;
-                    // ************************
                     
                     let displayCourseName = (tableCourseName === previousCourseName) ? '"' : tableCourseName;
                     if (tableCourseName !== previousCourseName) previousCourseName = tableCourseName;
 
-                    // --- NEW Register Number Logic ---
                     const regNo = student['Register Number'];
                     let displayRegNo = regNo;
                     const match = regNo.match(regNoRegex);
@@ -886,19 +940,16 @@ generateReportButton.addEventListener('click', async () => {
                         const prefix = match[1];
                         const number = match[2];
                         if (prefix === previousRegNoPrefix) {
-                            displayRegNo = number; // Show only the number
+                            displayRegNo = number; 
                         }
-                        previousRegNoPrefix = prefix; // Set for next loop
+                        previousRegNoPrefix = prefix; 
                     } else {
-                        previousRegNoPrefix = ""; // Reset if no match
+                        previousRegNoPrefix = ""; 
                     }
-                    // --- END NEW Logic ---
 
-                    // *** FIX: Use class for highlighting ***
                     const rowClass = student.isPlaceholder ? 'class="scribe-row-highlight"' : '';
+                    const remarkText = student.remark || ''; 
                     
-                    // *** FIX: Added Remarks Column Data, Swapped Remarks/Signature ***
-                    const remarkText = student.remark || ''; // Get remark or empty string
                     rowsHtml += `
                         <tr ${rowClass}>
                             <td class="sl-col">${seatNumber}${asterisk}</td>
@@ -912,18 +963,15 @@ generateReportButton.addEventListener('click', async () => {
                 });
                 return rowsHtml;
             }
-            // --- END OF MODIFIED SECTION ---
             
-            // *** FIX: Use student.seatNumber for sorting ***
             const studentsWithIndex = session.students.sort((a, b) => a.seatNumber - b.seatNumber);
             
-            const studentsPage1 = studentsWithIndex.slice(0, 20); // Keep 20 per page for A4 portrait
+            const studentsPage1 = studentsWithIndex.slice(0, 20); 
             const studentsPage2 = studentsWithIndex.slice(20);
 
             previousCourseName = ""; 
-            previousRegNoPrefix = ""; // <-- ADDED
+            previousRegNoPrefix = ""; 
             const tableRowsPage1 = generateTableRows(studentsPage1);
-            // V92 FIX: Ensure table is properly closed on every page
             allPagesHtml += `<div class="print-page">${pageHeaderHtml}${tableHeaderHtml}${tableRowsPage1}</tbody></table>`; 
             if (studentsPage2.length === 0) allPagesHtml += invigilatorFooterHtml;
             allPagesHtml += `</div>`; 
@@ -931,21 +979,18 @@ generateReportButton.addEventListener('click', async () => {
             
             if (studentsPage2.length > 0) {
                 previousCourseName = ""; 
-                previousRegNoPrefix = ""; // <-- ADDED
+                previousRegNoPrefix = ""; 
                 const tableRowsPage2 = generateTableRows(studentsPage2);
-                // V92 FIX: Ensure table is properly closed on every page
                 allPagesHtml += `<div class="print-page">${tableHeaderHtml}${tableRowsPage2}</tbody></table>${invigilatorFooterHtml}</div>`; 
                 totalPagesGenerated++;
             }
         });
 
-        // 6. Show report and controls
         reportOutputArea.innerHTML = allPagesHtml;
         reportOutputArea.style.display = 'block'; 
         reportStatus.textContent = `Generated ${totalPagesGenerated} total pages for ${sortedSessionKeys.length} room sessions.`;
         reportControls.classList.remove('hidden');
         
-        // 7. Add download button
         roomCsvDownloadContainer.innerHTML = `
             <button id="download-room-csv-button" class="w-full inline-flex justify-center items-center rounded-md border border-gray-300 bg-white py-3 px-4 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50">
                 Download Room Allocation Report (.csv)
@@ -962,36 +1007,31 @@ generateReportButton.addEventListener('click', async () => {
         generateReportButton.textContent = "Generate Room-wise Seating Report";
     }
 });
+    
 // --- (V29) Event listener for the "Day-wise Student List" button ---
 generateDaywiseReportButton.addEventListener('click', async () => {
     const sessionKey = reportsSessionSelect.value; if (filterSessionRadio.checked && !checkManualAllotment(sessionKey)) { return; }
     generateDaywiseReportButton.disabled = true;
-    // V49: Button text updated
     generateDaywiseReportButton.textContent = "Generating...";
     reportOutputArea.innerHTML = "";
     reportControls.classList.add('hidden');
     roomCsvDownloadContainer.innerHTML = "";
-    lastGeneratedRoomData = []; // This report doesn't use the room CSV
-    lastGeneratedReportType = ""; // V91: Reset report type
+    lastGeneratedRoomData = []; 
+    lastGeneratedReportType = ""; 
     await new Promise(resolve => setTimeout(resolve, 50));
 
     try {
-        // *** V95 FIX: Refresh college name from local storage BEFORE generation ***
         currentCollegeName = localStorage.getItem(COLLEGE_NAME_KEY) || "University of Calicut";
-        getRoomCapacitiesFromStorage(); // <-- ADD THIS LINE
-        // 1. Get FILTERED RAW student data
+        getRoomCapacitiesFromStorage(); 
+        
         const data = getFilteredReportData('day-wise');
-
         if (data.length === 0) {
             alert("No data found for the selected filter/session.");
             return;
         }
         
-        // 2. Perform Room Allocation (V29 - uses central function)
-        // *** THIS NOW CORRECTLY HANDLES SCRIBES AND SHOWS THEIR NEW ROOM ***
-        const processed_rows_with_rooms = performOriginalAllocation(data); // <-- FIX: Use original allocation
+        const processed_rows_with_rooms = performOriginalAllocation(data); 
 
-        // 3. Group by Day/Session
         const daySessions = {};
         processed_rows_with_rooms.forEach(student => {
             const key = `${student.Date}_${student.Time}`;
@@ -1005,29 +1045,23 @@ generateDaywiseReportButton.addEventListener('click', async () => {
             daySessions[key].students.push(student);
         });
 
-        // *** NEW: Get scribe allotments ***
         const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
         
-        // 7. Build the HTML
         let allPagesHtml = '';
         let totalPagesGenerated = 0;
-        // *** FIX: Changed to 35 rows per column for A4 fit ***
-        const STUDENTS_PER_COLUMN = 25; 
-        const COLUMNS_PER_PAGE = 2; 
+        const STUDENTS_PER_COLUMN = 40; 
+        const COLUMNS_PER_PAGE = 1; 
         const STUDENTS_PER_PAGE = STUDENTS_PER_COLUMN * COLUMNS_PER_PAGE; 
 
-        // (V30) Helper to build a table for a column, NOW WITH COURSE GROUPING
         function buildColumnTable(studentChunk) {
             let rowsHtml = '';
-            let currentCourse = ""; // Track the current course
-            let previousRoomDisplay = ""; // V48: Track previous room
+            let currentCourse = ""; 
+            let previousRoomDisplay = ""; 
 
             studentChunk.forEach(student => {
-                // Check if the course has changed
                 if (student.Course !== currentCourse) {
                     currentCourse = student.Course;
-                    previousRoomDisplay = ""; // V48: Reset for new course
-                    // Add a course heading row
+                    previousRoomDisplay = ""; 
                     rowsHtml += `
                         <tr>
                             <td colspan="4" style="background-color: #ddd; font-weight: bold; padding: 4px 2px; border: 1px solid #999;">
@@ -1037,28 +1071,21 @@ generateDaywiseReportButton.addEventListener('click', async () => {
                     `;
                 }
 
-                // *** FIX: Get correct room and seat no for scribes ***
                 let roomName = student['Room No'];
-                let seatNo = student.seatNumber; // Use the original seat number
+                let seatNo = student.seatNumber; 
                 let rowStyle = '';
 
                 if (student.isScribe) {
                     const sessionKeyPipe = `${student.Date} | ${student.Time}`;
                     const sessionScribeAllotment = allScribeAllotments[sessionKeyPipe] || {};
-                    roomName = sessionScribeAllotment[student['Register Number']] || 'N/A'; // Get new scribe room
-                    seatNo = 'Scribe'; // Scribes don't have a seat number in the new room
-                    rowStyle = 'font-weight: bold; color: #c2410c;'; // Style for scribe
+                    roomName = sessionScribeAllotment[student['Register Number']] || 'N/A'; 
+                    seatNo = 'Scribe'; 
+                    rowStyle = 'font-weight: bold; color: #c2410c;'; 
                 }
-                // *****************************************************
 
-                // Add the student row
                 const roomInfo = currentRoomConfig[roomName];
-                const location = (roomInfo && roomInfo.location) ? roomInfo.location : "";
-                const roomDisplay = location ? `${roomName} (${location})` : roomName;
-
-                // V48: Check if same as above
-                const displayRoom = (roomDisplay === previousRoomDisplay) ? '"' : roomDisplay;
-                previousRoomDisplay = roomDisplay; // Update for next iteration
+                const roomDisplay = (roomInfo && roomInfo.location) ? roomInfo.location : roomName;
+                const displayRoom = roomDisplay;
                 
                 rowsHtml += `
                     <tr style="${rowStyle}">
@@ -1070,16 +1097,13 @@ generateDaywiseReportButton.addEventListener('click', async () => {
                 `;
             });
 
-            // (V30) Updated table header to remove Course
-            // (V32) Updated widths
-            // *** FIX: Changed Sl to Seat No ***
             return `
                 <table class="daywise-report-table">
                     <thead>
                         <tr>
-                            <th style="width: 25%;">Register No</th>
-                            <th style="width: 35%;">Name</th>
-                            <th style="width: 30%;">Room (Location)</th>
+                            <th style="width: 15%;">Register No</th>
+                            <th style="width: 25%;">Name</th>
+                            <th style="width: 60%;">Location</th>
                             <th style="width: 10%;">Seat No</th>
                         </tr>
                     </thead>
@@ -1093,7 +1117,6 @@ generateDaywiseReportButton.addEventListener('click', async () => {
         sortedSessionKeys.forEach(key => {
             const session = daySessions[key];
             
-            // *** FIX: Sort students by Course, then Reg No for this report ***
             session.students.sort((a, b) => {
                 if (a.Course !== b.Course) return a.Course.localeCompare(b.Course);
                 return a['Register Number'].localeCompare(b['Register Number']);
@@ -1108,44 +1131,80 @@ generateDaywiseReportButton.addEventListener('click', async () => {
                 
                 let columnHtml = '';
                 if (col1Students.length > 0 && col2Students.length === 0) {
-                    // Only column 1 needed
                     columnHtml = `<div class="column">${buildColumnTable(col1Students)}</div>`;
                 } else if (col1Students.length > 0 && col2Students.length > 0) {
-                    // Two columns needed
                     columnHtml = `
                         <div class="column-container">
-                            <div class="column">
-                                ${buildColumnTable(col1Students)}
-                            </div>
-                            <div class="column">
-                                ${buildColumnTable(col2Students)}
-                            </div>
+                            <div class="column">${buildColumnTable(col1Students)}</div>
+                            <div class="column">${buildColumnTable(col2Students)}</div>
                         </div>
                     `;
                 }
                 
-                // *** NEW: Scribe summary logic ***
+                // *** NEW: Scribe Summary Logic (Location Wise) ***
                 let scribeListHtml = '';
-                // Check if this is the last page for the session
                 if (i + STUDENTS_PER_PAGE >= session.students.length) {
                     const sessionScribes = session.students.filter(s => s.isScribe);
                     if (sessionScribes.length > 0) {
-                        scribeListHtml = '<div class="scribe-summary-box" style="margin-top: 2rem; padding: 1rem; border: 2px solid #f97316; background: #fffbeb; border-radius: 8px;">';
-                        scribeListHtml += '<h3 style="font-size: 14pt; font-weight: bold; margin-bottom: 0.5rem; color: #c2410c;">Scribe Assistance Summary</h3>';
                         
+                        // 1. Group Scribes by their Allocated Scribe Room
+                        const scribesByRoom = {};
                         sessionScribes.forEach(scribe => {
                             const sessionKeyPipe = `${scribe.Date} | ${scribe.Time}`;
                             const sessionScribeAllotment = allScribeAllotments[sessionKeyPipe] || {};
-                            const newRoom = sessionScribeAllotment[scribe['Register Number']] || 'N/A';
+                            const newRoom = sessionScribeAllotment[scribe['Register Number']] || 'Not Allotted';
                             
-                            scribeListHtml += `<p style="font-size: 9pt; margin-bottom: 4px;"><strong>${scribe.Name}</strong> (${scribe['Register Number']})<br>Original: ${scribe['Room No']} (Seat ${scribe.seatNumber}) &rarr; <strong>New Room: ${newRoom}</strong></p>`;
+                            if (!scribesByRoom[newRoom]) {
+                                scribesByRoom[newRoom] = [];
+                            }
+                            scribesByRoom[newRoom].push(scribe);
                         });
+
+                        // 2. Build the HTML Structure
+                        scribeListHtml = '<div class="scribe-summary-box" style="margin-top: 2rem; padding: 1.5rem; border: 3px solid #ea580c; background: #fff7ed; border-radius: 8px;">';
+                        scribeListHtml += '<h1 style="font-size: 18pt; font-weight: bold; margin-bottom: 1.5rem; color: #9a3412; text-align: center; text-transform: uppercase; border-bottom: 2px solid #ea580c; padding-bottom: 0.5rem;">Scribe Assistance Summary (Location Wise)</h1>';
+
+                        // Sort the rooms numerically
+                        const sortedRooms = Object.keys(scribesByRoom).sort((a, b) => {
+                             const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
+                             const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
+                             return numA - numB;
+                        });
+
+                        sortedRooms.forEach(roomName => {
+                            // Get Location Info for the Scribe Room
+                            const roomInfo = currentRoomConfig[roomName];
+                            const location = (roomInfo && roomInfo.location) ? roomInfo.location : "";
+                            const locationDisplay = location ? ` <span style="font-weight: normal; font-style: italic;">(${location})</span>` : "";
+
+                            // Room Header (Large and Conspicuous)
+                            scribeListHtml += `
+                                <div style="margin-bottom: 1.5rem; page-break-inside: avoid;">
+                                    <h2 style="font-size: 16pt; font-weight: bold; color: #000; background-color: #fed7aa; padding: 8px; border-left: 6px solid #ea580c; margin-bottom: 10px;">
+                                        ${roomName}${locationDisplay}
+                                    </h2>
+                                    <div style="padding-left: 1rem;">
+                            `;
+
+                            // List Students for this Room
+                            scribesByRoom[roomName].forEach(s => {
+                                scribeListHtml += `
+                                    <div style="font-size: 11pt; margin-bottom: 6px; border-bottom: 1px dashed #ccc; padding-bottom: 4px;">
+                                        <strong>${s.Name}</strong> &nbsp; [${s['Register Number']}] 
+                                        &nbsp;&nbsp; 
+                                        <span style="font-weight: bold; color: #555;">(Original: ${s['Room No']}, Seat: ${s.seatNumber})</span>
+                                    </div>
+                                `;
+                            });
+
+                            scribeListHtml += `</div></div>`;
+                        });
+
                         scribeListHtml += '</div>';
                     }
                 }
                 // ******************************
 
-                // Add the main content page
             allPagesHtml += `
                 <div class="print-page print-page-daywise">
                     <div class="print-header-group">
@@ -1156,7 +1215,6 @@ generateDaywiseReportButton.addEventListener('click', async () => {
                 </div>
             `;
 
-            // If scribeListHtml has content, add it on a NEW page
             if (scribeListHtml) {
                 allPagesHtml += `
                     <div class="print-page">
@@ -1167,18 +1225,17 @@ generateDaywiseReportButton.addEventListener('click', async () => {
                         ${scribeListHtml} 
                     </div>
                 `;
-                totalPagesGenerated++; // Increment total page count
+                totalPagesGenerated++; 
             }
         }
     });
 
-        // 8. Show report and controls
         reportOutputArea.innerHTML = allPagesHtml;
         reportOutputArea.style.display = 'block'; 
         reportStatus.textContent = `Generated ${totalPagesGenerated} compact pages for ${sortedSessionKeys.length} sessions.`;
         reportControls.classList.remove('hidden');
-        roomCsvDownloadContainer.innerHTML = ""; // This report has no CSV
-        lastGeneratedReportType = "Daywise_Seating_Details"; // V91: Set report type
+        roomCsvDownloadContainer.innerHTML = ""; 
+        lastGeneratedReportType = "Daywise_Seating_Details"; 
 
     } catch (e) {
         console.error("Error generating day-wise report:", e);
@@ -1186,7 +1243,6 @@ generateDaywiseReportButton.addEventListener('click', async () => {
         reportControls.classList.remove('hidden');
     } finally {
         generateDaywiseReportButton.disabled = false;
-        // V49: Button text updated
         generateDaywiseReportButton.textContent = "Generate Seating Details for Candidates (Compact)";
     }
 });
@@ -1299,8 +1355,12 @@ generateQPaperReportButton.addEventListener('click', async () => {
 });
 
 // *** NEW: Event listener for QP Distribution by QP-Code Report ***
+
+// *** UPDATED: Event listener for QP Distribution by QP-Code Report (With Serial No) ***
 generateQpDistributionReportButton.addEventListener('click', async () => {
-    const sessionKey = reportsSessionSelect.value; if (filterSessionRadio.checked && !checkManualAllotment(sessionKey)) { return; }
+    const sessionKey = reportsSessionSelect.value; 
+    if (filterSessionRadio.checked && !checkManualAllotment(sessionKey)) { return; }
+    
     generateQpDistributionReportButton.disabled = true;
     generateQpDistributionReportButton.textContent = "Generating...";
     reportOutputArea.innerHTML = "";
@@ -1310,10 +1370,9 @@ generateQpDistributionReportButton.addEventListener('click', async () => {
     await new Promise(resolve => setTimeout(resolve, 50));
     
     try {
-        // 1. Get College Name
         currentCollegeName = localStorage.getItem(COLLEGE_NAME_KEY) || "University of Calicut";
-        getRoomCapacitiesFromStorage(); // <-- ADD THIS LINE
-        // 2. Get FILTERED RAW student data
+        getRoomCapacitiesFromStorage(); 
+        
         const data = getFilteredReportData('qp-distribution');
         if (data.length === 0) {
             alert("No data found for the selected filter/session.");
@@ -1322,29 +1381,21 @@ generateQpDistributionReportButton.addEventListener('click', async () => {
             return;
         }
 
-        // 3. Get ORIGINAL allocation. This is key, as it includes scribes in their original rooms.
         const processed_rows_with_rooms = performOriginalAllocation(data);
+        loadQPCodes(); 
 
-        // 4. Load QP Codes
-        loadQPCodes(); // populates qpCodeMap
-
-        // 5. Aggregate data (NEW LOGIC: Group by QP Code first)
         const sessions = {};
         for (const student of processed_rows_with_rooms) {
             const sessionKey = `${student.Date}_${student.Time}`;
             const roomName = student['Room No'];
             const courseName = student.Course;
 
-            // --- MODIFIED TO USE Base64 KEY ---
+            // Use Base64 Key
             const courseKey = getBase64CourseKey(courseName);
-            // --- END MODIFICATION ---
-
-            // Get QP Code
             const sessionKeyPipe = `${student.Date} | ${student.Time}`;
             const sessionQPCodes = qpCodeMap[sessionKeyPipe] || {};
-            const qpCode = sessionQPCodes[courseKey] || 'N/A'; // <-- Use Base64 key for lookup
+            const qpCode = sessionQPCodes[courseKey] || 'N/A'; 
 
-            // Initialize nested objects
             if (!sessions[sessionKey]) {
                 sessions[sessionKey] = { Date: student.Date, Time: student.Time, qps: {} };
             }
@@ -1359,12 +1410,10 @@ generateQpDistributionReportButton.addEventListener('click', async () => {
                 sessions[sessionKey].qps[qpCode].rooms[roomName] = 0;
             }
             
-            // Increment counts
             sessions[sessionKey].qps[qpCode].rooms[roomName]++;
             sessions[sessionKey].qps[qpCode].total++;
         }
         
-        // 6. Build HTML
         let allPagesHtml = '';
         const sortedSessionKeys = Object.keys(sessions).sort();
         
@@ -1378,7 +1427,11 @@ generateQpDistributionReportButton.addEventListener('click', async () => {
         for (const sessionKey of sortedSessionKeys) {
             const session = sessions[sessionKey];
             
-            // Start a new page for each session
+            // --- NEW: Get Room Serial Numbers for this specific session ---
+            const sessionKeyPipe = `${session.Date} | ${session.Time}`;
+            const roomSerialMap = getRoomSerialMap(sessionKeyPipe);
+            // ------------------------------------------------------------
+
             allPagesHtml += `
                 <div class="print-page">
                     <div class="print-header-group">
@@ -1388,17 +1441,13 @@ generateQpDistributionReportButton.addEventListener('click', async () => {
                     </div>
             `;
             
-            // Sort QP codes
             const sortedQPCodes = Object.keys(session.qps).sort();
 
-            // Loop through each QP Code and create a table
             for (const qpCode of sortedQPCodes) {
                 const qpData = session.qps[qpCode];
                 
-                // Add QP Header
                 allPagesHtml += `<h4 class="qp-header">QP Code: ${qpCode} &nbsp; (Course: ${qpData.courseName})</h4>`;
                 
-                // Add Table
                 allPagesHtml += `
                     <table class="qp-distribution-table">
                         <thead>
@@ -1410,7 +1459,6 @@ generateQpDistributionReportButton.addEventListener('click', async () => {
                         <tbody>
                 `;
                 
-                // Sort rooms numerically
                 const sortedRoomKeys = Object.keys(qpData.rooms).sort((a, b) => {
                     const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
                     const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
@@ -1420,20 +1468,21 @@ generateQpDistributionReportButton.addEventListener('click', async () => {
                 for (const roomName of sortedRoomKeys) {
                     const count = qpData.rooms[roomName];
                     
-                    // --- NEW: Get Location ---
                     const roomInfo = currentRoomConfig[roomName];
                     const location = (roomInfo && roomInfo.location) ? ` <span style="font-size: 0.85em; color: #555;">(${roomInfo.location})</span>` : "";
-                    // -------------------------
+                    
+                    // --- NEW: Add Serial Number ---
+                    const serialNo = roomSerialMap[roomName] || '-';
+                    // ------------------------------
 
                     allPagesHtml += `
                         <tr>
-                            <td><strong>${roomName}</strong>${location}</td>
+                            <td><strong>${serialNo} | ${roomName}</strong>${location}</td>
                             <td>${count}</td>
                         </tr>
                     `;
                 }
                 
-                // Add total row
                 allPagesHtml += `
                     </tbody>
                     <tfoot>
@@ -1445,11 +1494,9 @@ generateQpDistributionReportButton.addEventListener('click', async () => {
                     </table>
                 `;
             }
-            
-            allPagesHtml += `</div>`; // Close print-page
+            allPagesHtml += `</div>`; 
         }
         
-        // 7. Show report
         reportOutputArea.innerHTML = allPagesHtml;
         reportOutputArea.style.display = 'block'; 
         reportStatus.textContent = `Generated QP Distribution Report for ${sortedSessionKeys.length} sessions.`;
@@ -1675,9 +1722,14 @@ generateAbsenteeReportButton.addEventListener('click', async () => {
         generateAbsenteeReportButton.textContent = "Generate Absentee Statement";
     }
 });
-// *** NEW: Event listener for "Generate Scribe Report" ***
+
+// *** UPDATED: Event listener for "Generate Scribe Report" ***
+
+// *** CORRECTED: Event listener for "Generate Scribe Report" ***
 generateScribeReportButton.addEventListener('click', async () => {
-    const sessionKey = reportsSessionSelect.value; if (filterSessionRadio.checked && !checkManualAllotment(sessionKey)) { return; }
+    const sessionKey = reportsSessionSelect.value; 
+    if (filterSessionRadio.checked && !checkManualAllotment(sessionKey)) { return; }
+    
     generateScribeReportButton.disabled = true;
     generateScribeReportButton.textContent = "Generating...";
     reportOutputArea.innerHTML = "";
@@ -1688,11 +1740,12 @@ generateScribeReportButton.addEventListener('click', async () => {
     
     try {
         currentCollegeName = localStorage.getItem(COLLEGE_NAME_KEY) || "University of Calicut";
-        getRoomCapacitiesFromStorage(); // <-- ADD THIS LINE
-        // 1. Get all data
-        const allData = JSON.parse(jsonDataStore.innerHTML || '[]');
-        if (allData.length === 0) {
-            alert("No data loaded.");
+        getRoomCapacitiesFromStorage(); 
+        
+        // 1. Get FILTERED data
+        const data = getFilteredReportData('scribe-report'); 
+        if (!data || data.length === 0) {
+            alert("No data found for the selected filter/session.");
             return;
         }
         
@@ -1704,40 +1757,71 @@ generateScribeReportButton.addEventListener('click', async () => {
         }
         const scribeRegNos = new Set(globalScribeList.map(s => s.regNo));
         
-        // 3. Get all scribe students from the main data
-        const allScribeStudents = allData.filter(s => scribeRegNos.has(s['Register Number']));
+        // 3. Get all scribe students from the filtered data
+        const allScribeStudents = data.filter(s => scribeRegNos.has(s['Register Number']));
+        if (allScribeStudents.length === 0) {
+            alert("No scribe students found in the selected data.");
+            return;
+        }
         
-        // 4. Get Original Room Allotments (by running the "original" allocation logic)
-        const originalAllotments = performOriginalAllocation(allData); // Use the central function
+        // 4. Get Original Room Allotments
+        // We use 'data' here (which is already filtered by session) to generate correct seat numbers
+        const originalAllotments = performOriginalAllocation(data); 
+        
+        // *** FIX 1: Use COMPOSITE KEY (Date|Time|RegNo) to prevent overwriting ***
         const originalRoomMap = originalAllotments.reduce((map, s) => {
-            map[s['Register Number']] = s['Room No'];
+            const key = `${s.Date}|${s.Time}|${s['Register Number']}`;
+            map[key] = { room: s['Room No'], seat: s.seatNumber };
             return map;
         }, {});
 
         // 5. Load Scribe Allotments and QP Codes
         const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
-        loadQPCodes(); // populates qpCodeMap
+        loadQPCodes(); 
 
-        // 6. Collate all data for the report
+        // 6. Collate all data
         const reportRows = [];
         for (const s of allScribeStudents) {
             const sessionKey = `${s.Date} | ${s.Time}`;
             const sessionScribeRooms = allScribeAllotments[sessionKey] || {};
             const sessionQPCodes = qpCodeMap[sessionKey] || {};
-
-            // --- MODIFIED TO USE Base64 KEY ---
-            const courseKey = getBase64CourseKey(s.Course);
-            // --- END MODIFICATION ---
             
+            // Use Base64 Key
+            const courseKey = getBase64CourseKey(s.Course);
+            
+            // *** FIX 2: Look up using the COMPOSITE KEY ***
+            const lookupKey = `${s.Date}|${s.Time}|${s['Register Number']}`;
+            const originalRoomData = originalRoomMap[lookupKey] || { room: 'N/A', seat: 'N/A' };
+            
+            // --- Get Room Serial Map for this session ---
+            const roomSerialMap = getRoomSerialMap(sessionKey);
+            
+            // --- Format Original Room with Serial ---
+            const orgSerial = roomSerialMap[originalRoomData.room] || '-';
+            const originalRoomDisplay = `${orgSerial} - ${originalRoomData.room} (Seat: ${originalRoomData.seat})`;
+            
+            // --- Format Scribe Room with Serial & Location ---
+            const rawScribeRoom = sessionScribeRooms[s['Register Number']];
+            let scribeRoomDisplay = 'Not Allotted';
+            
+            if (rawScribeRoom) {
+                const rInfo = currentRoomConfig[rawScribeRoom];
+                const rLoc = (rInfo && rInfo.location) ? ` (${rInfo.location})` : ""; 
+                
+                // Get Serial for Scribe Room
+                const scribeSerial = roomSerialMap[rawScribeRoom] || '-';
+                scribeRoomDisplay = `${scribeSerial} - ${rawScribeRoom}${rLoc}`;
+            }
+
             reportRows.push({
                 Date: s.Date,
                 Time: s.Time,
                 RegisterNumber: s['Register Number'],
                 Name: s.Name,
                 Course: s.Course,
-                OriginalRoom: originalRoomMap[s['Register Number']] || 'N/A',
-                ScribeRoom: sessionScribeRooms[s['Register Number']] || 'Not Allotted',
-                QPCode: sessionQPCodes[courseKey] || 'N/A' // <-- Use Base64 key for lookup
+                OriginalRoom: originalRoomDisplay, // Correct Data
+                ScribeRoom: scribeRoomDisplay,     // Correct Data
+                QPCode: sessionQPCodes[courseKey] || 'N/A'
             });
         }
         
@@ -1746,11 +1830,7 @@ generateScribeReportButton.addEventListener('click', async () => {
         for (const row of reportRows) {
             const key = `${row.Date}_${row.Time}`;
             if (!sessions[key]) {
-                sessions[key] = {
-                    Date: row.Date,
-                    Time: row.Time,
-                    students: []
-                };
+                sessions[key] = { Date: row.Date, Time: row.Time, students: [] };
             }
             sessions[key].students.push(row);
         }
@@ -1759,11 +1839,6 @@ generateScribeReportButton.addEventListener('click', async () => {
         let allPagesHtml = '';
         let totalPages = 0;
         const sortedSessionKeys = Object.keys(sessions).sort();
-
-        if (sortedSessionKeys.length === 0) {
-            alert("No scribe students found for any session with loaded data.");
-            return;
-        }
 
         sortedSessionKeys.forEach(key => {
             const session = sessions[key];
@@ -1791,22 +1866,19 @@ generateScribeReportButton.addEventListener('click', async () => {
                         <h2>Scribe Assistance Report</h2>
                         <h3>${session.Date} &nbsp;|&nbsp; ${session.Time}</h3>
                     </div>
-                    
                     <table class="scribe-report-table">
                         <thead>
                             <tr>
                                 <th style="width: 5%;">Sl</th>
                                 <th style="width: 15%;">Register No</th>
                                 <th style="width: 20%;">Name</th>
-                                <th style="width: 25%;">Course / Paper</th>
+                                <th style="width: 20%;">Course / Paper</th>
                                 <th style="width: 10%;">QP Code</th>
-                                <th style="width: 10%;">Original Room</th>
+                                <th style="width: 15%;">Original Room</th>
                                 <th style="width: 15%;">Scribe Room</th>
                             </tr>
                         </thead>
-                        <tbody>
-                            ${tableRowsHtml}
-                        </tbody>
+                        <tbody>${tableRowsHtml}</tbody>
                     </table>
                 </div>
             `;
@@ -1821,97 +1893,97 @@ generateScribeReportButton.addEventListener('click', async () => {
 
     } catch (e) {
         console.error("Error generating scribe report:", e);
-        reportStatus.textContent = "An error occurred generating the report.";
+        alert("Error generating report: " + e.message);
+        reportStatus.textContent = "Generation failed.";
         reportControls.classList.remove('hidden');
     } finally {
         generateScribeReportButton.disabled = false;
         generateScribeReportButton.textContent = "Generate Scribe Assistance Report";
     }
 });
+
 // *******************************************************
 
-// *** NEW: Event listener for Scribe Proforma Report ***
+// --- ROBUST VERSION: Scribe Proforma Report (With Serial Numbers) ---
+
+// --- ROBUST VERSION: Scribe Proforma Report (With Serial Numbers) ---
 generateScribeProformaButton.addEventListener('click', async () => {
-    const sessionKey = reportsSessionSelect.value; if (filterSessionRadio.checked && !checkManualAllotment(sessionKey)) { return; }
     generateScribeProformaButton.disabled = true;
     generateScribeProformaButton.textContent = "Generating...";
     reportOutputArea.innerHTML = "";
     reportControls.classList.add('hidden');
     roomCsvDownloadContainer.innerHTML = "";
     lastGeneratedReportType = "";
+    
     await new Promise(resolve => setTimeout(resolve, 50));
     
     try {
-        // 1. Get College Name
-        currentCollegeName = localStorage.getItem(COLLEGE_NAME_KEY) || "University of Calicut";
-        getRoomCapacitiesFromStorage(); // <-- ADD THIS LINE
-        // 2. Get FILTERED RAW student data
-        const data = getFilteredReportData('scribe-proforma');
-        if (data.length === 0) {
-            alert("No data found for the selected filter/session.");
-            return;
-        }
+        if (typeof getRoomCapacitiesFromStorage === 'function') getRoomCapacitiesFromStorage(); 
+        if (typeof loadQPCodes === 'function') loadQPCodes(); 
         
-        // 3. Get global scribe list
+        currentCollegeName = localStorage.getItem(COLLEGE_NAME_KEY) || "University of Calicut";
+        const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
+        
+        const data = getFilteredReportData('scribe-proforma');
+        if (!data || data.length === 0) throw new Error("No student data found for the selected session.");
+        
         const globalScribeList = JSON.parse(localStorage.getItem(SCRIBE_LIST_KEY) || '[]');
-        if (globalScribeList.length === 0) {
-            alert("No students have been added to the Scribe List in Scribe Assistance.");
-            generateScribeProformaButton.disabled = false;
-            generateScribeProformaButton.textContent = "Generate Scribe Proforma (One Page Per Scribe)";
-            return;
-        }
+        if (globalScribeList.length === 0) throw new Error("Scribe List is empty.");
         const scribeRegNos = new Set(globalScribeList.map(s => s.regNo));
         
-        // 4. Filter data to only include scribe students *in the filtered sessions*
         const allScribeStudents = data.filter(s => scribeRegNos.has(s['Register Number']));
+        if (allScribeStudents.length === 0) throw new Error("No scribe students found in the selected session.");
         
-        // 5. Get Original Room Allotments (by running the "original" allocation logic)
-        const originalAllotments = performOriginalAllocation(data); // Use the central function
+        const originalAllotments = performOriginalAllocation(data); 
         const originalRoomMap = originalAllotments.reduce((map, s) => {
-            // Store room and seat number
             map[s['Register Number']] = { room: s['Room No'], seat: s.seatNumber };
             return map;
         }, {});
 
-        // 6. Load Scribe Allotments and QP Codes
-        const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
-        loadQPCodes(); // populates qpCodeMap
-
-        // 7. Collate all data for the report (similar to the summary report)
         const reportRows = [];
+        
         for (const s of allScribeStudents) {
             const sessionKey = `${s.Date} | ${s.Time}`;
             const sessionScribeRooms = allScribeAllotments[sessionKey] || {};
             const sessionQPCodes = qpCodeMap[sessionKey] || {};
-
-            // --- MODIFIED TO USE Base64 KEY ---
+            
+            // *** FIX: Use getBase64CourseKey (No cleanCourseKey) ***
             const courseKey = getBase64CourseKey(s.Course);
-            // --- END MODIFICATION ---
             
             const originalRoomData = originalRoomMap[s['Register Number']] || { room: 'N/A', seat: 'N/A' };
+            const roomSerialMap = getRoomSerialMap(sessionKey);
+
+            // --- Format Original Room ---
+            const orgSerial = roomSerialMap[originalRoomData.room] || '-';
+            const originalRoomDisplay = `${orgSerial} - ${originalRoomData.room} (Seat: ${originalRoomData.seat})`;
+
+            // --- Format Scribe Room ---
+            const rawScribeRoom = sessionScribeRooms[s['Register Number']];
+            let scribeRoomDisplay = '<span style="color:red;">Not Allotted</span>';
             
+            if (rawScribeRoom) {
+                let locText = "";
+                if (typeof currentRoomConfig !== 'undefined' && currentRoomConfig[rawScribeRoom]) {
+                    const rLoc = currentRoomConfig[rawScribeRoom].location;
+                    if (rLoc) locText = ` (${rLoc})`;
+                }
+                const scribeSerial = roomSerialMap[rawScribeRoom] || '-';
+                scribeRoomDisplay = `<strong>${scribeSerial} - ${rawScribeRoom}</strong>${locText}`;
+            }
+
             reportRows.push({
                 Date: s.Date,
                 Time: s.Time,
                 RegisterNumber: s['Register Number'],
                 Name: s.Name,
                 Course: s.Course,
-                OriginalRoom: `${originalRoomData.room} (Seat: ${originalRoomData.seat})`,
-                ScribeRoom: sessionScribeRooms[s['Register Number']] || 'Not Allotted',
-                QPCode: sessionQPCodes[courseKey] || 'N/A' // <-- Use Base64 key for lookup
+                OriginalRoom: originalRoomDisplay,
+                ScribeRoom: scribeRoomDisplay,
+                QPCode: sessionQPCodes[courseKey] || 'N/A'
             });
         }
         
-        if (reportRows.length === 0) {
-            alert("No scribe students found for the selected filter/session.");
-            generateScribeProformaButton.disabled = false;
-            generateScribeProformaButton.textContent = "Generate Scribe Proforma (One Page Per Scribe)";
-            return;
-        }
-        
-        // 8. Build HTML - ONE PAGE PER STUDENT
         let allPagesHtml = '';
-
         reportRows.forEach(student => {
             allPagesHtml += `
                 <div class="print-page">
@@ -1945,7 +2017,7 @@ generateScribeProformaButton.addEventListener('click', async () => {
                             </tr>
                             <tr>
                                 <td class="label">Scribe Allotted Room:</td>
-                                <td class="data">${student.ScribeRoom}</td>
+                                <td class="data" style="font-size: 1.1em;">${student.ScribeRoom}</td>
                             </tr>
                             <tr>
                                 <td class="label">Sign or Thumb Impression of Candidate:</td>
@@ -1973,7 +2045,6 @@ generateScribeProformaButton.addEventListener('click', async () => {
             `;
         });
         
-        // 9. Show report
         reportOutputArea.innerHTML = allPagesHtml;
         reportOutputArea.style.display = 'block'; 
         reportStatus.textContent = `Generated ${reportRows.length} Scribe Proforma pages.`;
@@ -1981,9 +2052,9 @@ generateScribeProformaButton.addEventListener('click', async () => {
         lastGeneratedReportType = "Scribe_Proforma";
 
     } catch (e) {
-        console.error("Error generating scribe proforma report:", e);
-        reportStatus.textContent = "An error occurred generating the report.";
-        reportControls.classList.remove('hidden');
+        console.error("Scribe Report Error:", e);
+        alert("Error generating report: " + e.message); 
+        reportStatus.textContent = "Generation failed.";
     } finally {
         generateScribeProformaButton.disabled = false;
         generateScribeProformaButton.textContent = "Generate Scribe Proforma (One Page Per Scribe)";
@@ -2502,9 +2573,22 @@ window.real_populate_session_dropdown = function() {
             }
         });
         
-        if (defaultSession) {
+if (defaultSession) {
+            // 1. Default Absentee Tab
             sessionSelect.value = defaultSession;
-            sessionSelect.dispatchEvent(new Event('change')); // Trigger change to load list
+            sessionSelect.dispatchEvent(new Event('change')); 
+            
+            // 2. Default Search Tab (NEW)
+            if (searchSessionSelect) {
+                searchSessionSelect.value = defaultSession;
+                searchSessionSelect.dispatchEvent(new Event('change')); // Load students for search immediately
+            }
+            
+            // 3. Default Edit Data Tab (Optional, good for UX)
+            if (editSessionSelect) {
+                editSessionSelect.value = defaultSession;
+                // We don't trigger 'change' here to avoid auto-loading the edit table unnecessarily
+            }
         }
         
         // V68: Ensure report filters are visible and default set
@@ -3178,10 +3262,14 @@ function updateAllotmentDisplay() {
     }
 }
 
-// Render the list of allotted rooms
+// Render the list of allotted rooms (WITH SERIAL NUMBER)
 function renderAllottedRooms() {
     allottedRoomsList.innerHTML = '';
     
+    // --- NEW: Get Serial Map ---
+    const roomSerialMap = getRoomSerialMap(currentSessionKey);
+    // ---------------------------
+
     if (currentSessionAllotment.length === 0) {
         allottedRoomsList.innerHTML = '<p class="text-gray-500 text-sm">No rooms allotted yet.</p>';
         return;
@@ -3194,10 +3282,13 @@ function renderAllottedRooms() {
         const roomInfo = currentRoomConfig[room.roomName];
         const location = (roomInfo && roomInfo.location) ? ` (${roomInfo.location})` : '';
         
+        // --- NEW: Get Serial Number ---
+        const serialNo = roomSerialMap[room.roomName] || '-';
+        
         roomDiv.innerHTML = `
             <div class="flex justify-between items-start">
                 <div class="flex-grow">
-                    <h4 class="font-semibold text-gray-800">${room.roomName}${location}</h4>
+                    <h4 class="font-semibold text-gray-800">${serialNo} | ${room.roomName}${location}</h4>
                     <p class="text-sm text-gray-600">Capacity: ${room.capacity} | Allotted: ${room.students.length}</p>
                 </div>
                 <button class="text-red-600 hover:text-red-800 font-medium text-sm" onclick="deleteRoom(${index})">
@@ -3473,6 +3564,12 @@ function clearScribeSearch() {
 
 // NEW FUNCTION: This loads the scribe allotment data for the session
 function loadScribeAllotment(sessionKey) {
+    // *** FIX: Ensure global scribe list is loaded before checking length ***
+    if (globalScribeList.length === 0) {
+        globalScribeList = JSON.parse(localStorage.getItem(SCRIBE_LIST_KEY) || '[]');
+    }
+    // **********************************************************************
+
     if (sessionKey && globalScribeList.length > 0) {
         // Load the allotments for this session
         const allAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
@@ -3487,10 +3584,9 @@ function loadScribeAllotment(sessionKey) {
 }
 
 
-// Render the list of scribe students for the selected session
+// Render the list of scribe students for the selected session (WITH SERIAL NUMBER)
 function renderScribeAllotmentList(sessionKey) {
     const [date, time] = sessionKey.split(' | ');
-    // Get all students for this session
     const sessionStudents = allStudentData.filter(s => s.Date === date && s.Time === time);
     
     // Filter to get only scribe students *in this session*
@@ -3503,7 +3599,6 @@ function renderScribeAllotmentList(sessionKey) {
         return;
     }
 
-    // Get unique students for this session (in case of multiple papers)
     const uniqueSessionScribeStudents = [];
     const seenRegNos = new Set();
     for (const student of sessionScribeStudents) {
@@ -3515,6 +3610,10 @@ function renderScribeAllotmentList(sessionKey) {
     
     uniqueSessionScribeStudents.sort((a,b) => a['Register Number'].localeCompare(b['Register Number']));
 
+    // --- NEW: Get Serial Map (Needed to look up serial number when rendering) ---
+    const roomSerialMap = getRoomSerialMap(sessionKey);
+    // ---------------------------------------------------------------------------
+
     uniqueSessionScribeStudents.forEach(student => {
         const regNo = student['Register Number'];
         const allottedRoom = currentScribeAllotment[regNo];
@@ -3524,10 +3623,17 @@ function renderScribeAllotmentList(sessionKey) {
         
         let roomHtml = '';
         if (allottedRoom) {
+            // --- NEW: Format Room Display with Serial Number ---
+            const serialNo = roomSerialMap[allottedRoom] || '-';
+            const roomInfo = currentRoomConfig[allottedRoom];
+            const location = (roomInfo && roomInfo.location) ? ` (${roomInfo.location})` : '';
+            const displayRoom = `${serialNo} | ${allottedRoom}${location}`;
+            // ----------------------------------------------------
+
             roomHtml = `
                 <div>
                     <span class="text-sm font-medium text-gray-700">Allotted Room:</span>
-                    <span class="font-bold text-blue-600 ml-2">${allottedRoom}</span>
+                    <span class="font-bold text-blue-600 ml-2">${displayRoom}</span>
                 </div>
                 <button class="ml-4 inline-flex justify-center items-center rounded-md border border-gray-300 bg-white py-2 px-3 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50"
                         onclick="openScribeRoomModal('${regNo}', '${student.Name}')">
@@ -3555,6 +3661,7 @@ function renderScribeAllotmentList(sessionKey) {
         scribeAllotmentList.appendChild(item);
     });
 }
+
 // Find available rooms for scribes
 async function findAvailableRooms(sessionKey) {
     
