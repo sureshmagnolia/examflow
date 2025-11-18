@@ -37,6 +37,7 @@
 /* --- REPLACEMENT CSS FOR PRINT SECTION --- */
 
 /* 1. Hide Navigation, Modals, PyScript, and Sibling Views */
+header,
 #main-nav,
 #student-edit-modal,
 #room-selection-modal,
@@ -251,6 +252,7 @@ main, #report-controls {
     /* Day-wise Report */
     .print-header-group {
         break-inside: avoid;
+        break-after: avoid; /* <-- ADD THIS LINE */
     }
     
     .print-page-daywise h1 { font-size: 14pt; }
@@ -885,5 +887,11 @@ tr.scribe-row-highlight {
 #search-result-scribe-block .detail-value {
     font-weight: 700;
     color: #c2410c; /* orange-700 */
+}
+
+/* --- NEW: Sidebar transition --- */
+#main-nav {
+    transition: width 0.3s ease-in-out, padding 0.3s ease-in-out;
+    overflow-x: hidden; /* Prevents text from spilling during animation */
 }
 /* --- END OF  Search Result Modal Styles --- */
