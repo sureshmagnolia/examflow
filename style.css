@@ -225,10 +225,24 @@ main, #report-controls {
         background-color: #eee;
     }
 
+/* --- FIND THIS BLOCK AND REPLACE IT --- */
+   /* --- INVERTED SCRIBE ROW STYLES (Print) --- */
     tr.scribe-row-highlight {
-        background-color: #f0f0f0 !important;
-        -webkit-print-color-adjust: exact;
-        color-adjust: exact;
+        background-color: #000000 !important; /* Black Background */
+        color: #ffffff !important;             /* White Text */
+        -webkit-print-color-adjust: exact; 
+        print-color-adjust: exact;
+    }
+    
+    /* Standard cells get white borders */
+    tr.scribe-row-highlight td {
+        border: 1px solid #ffffff !important;
+    }
+
+    /* EXCEPTION: Make Signature Cell White */
+    tr.scribe-row-highlight td.signature-col {
+        background-color: #ffffff !important; /* White Background */
+        border: 1px solid #000000 !important; /* Black Border (to see the box) */
     }
     
     .print-table {
@@ -272,12 +286,13 @@ main, #report-controls {
         table-layout: auto; 
         break-before: avoid;
     }
-    .daywise-report-table th,
+.daywise-report-table th,
     .daywise-report-table td {
         border: 1px solid #999;
-        padding: 3px;
+        padding: 1px 2px; /* Top/Bottom: 1px, Left/Right: 2px */
         text-align: left;
         word-wrap: break-word;
+        line-height: 1.1; /* Optional: Compresses text height slightly */
     }
     .daywise-report-table th {
         background: #eee;
@@ -518,8 +533,18 @@ main, #report-controls {
     background-color: #eee;
 }
 
+/* --- INVERTED SCRIBE ROW STYLES (Screen) --- */
 tr.scribe-row-highlight {
-    background-color: #f0f0f0;
+    background-color: #000000;
+    color: #ffffff;
+}
+tr.scribe-row-highlight td {
+    border-color: #ffffff;
+}
+/* EXCEPTION: Make Signature Cell White on Screen too */
+tr.scribe-row-highlight td.signature-col {
+    background-color: #ffffff;
+    border: 1px solid #000000;
 }
 
 .edit-data-table {
@@ -893,5 +918,13 @@ tr.scribe-row-highlight {
 #main-nav {
     transition: width 0.3s ease-in-out, padding 0.3s ease-in-out;
     overflow-x: hidden; /* Prevents text from spilling during animation */
+}
+/* At the bottom of style.css */
+.daywise-report-table th,
+.daywise-report-table td {
+    border: 1px solid #ccc;
+    padding: 1px 2px; /* <--- MATCH THE PRINT SETTING */
+    text-align: left;
+    word-wrap: break-word;
 }
 /* --- END OF  Search Result Modal Styles --- */
