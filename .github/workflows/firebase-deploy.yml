@@ -1,0 +1,23 @@
+# This is the workflow file that GitHub Actions runs to deploy your code.
+# It is customized to use your project ID and skip the build step.
+
+name: Deploy to Firebase Hosting on push
+
+on:
+  push:
+    branches:
+      - scr5 # Your publishing branch
+
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Firebase
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: '${{ secrets.GITHUB_TOKEN }}'
+          firebaseServiceAccount: '${{ secrets.FIREBASE_SERVICE_ACCOUNT_EXAMFLOW_DE08F }}'
+          projectId: examflow-de08f
+          channelId: live # Deploy to the main live channel
