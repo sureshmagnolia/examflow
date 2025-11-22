@@ -1426,7 +1426,7 @@ function initCalendar() {
     }
 }
 
-// --- Calendar Render Logic (V2: Scribe Aware) ---
+// --- Calendar Render Logic (V5: Big Circles + Fixed Tooltip Colors) ---
 function renderCalendar() {
     const grid = document.getElementById('calendar-days-grid');
     const title = document.getElementById('cal-month-display');
@@ -1469,7 +1469,6 @@ function renderCalendar() {
                 const stats = monthData[dayKey][sessionKey];
                 stats.students++;
                 
-                // Separate Scribes from Regular Halls
                 if (scribeRegNos.has(s['Register Number'])) {
                     stats.scribeCount++;
                 } else {
@@ -1487,79 +1486,80 @@ function renderCalendar() {
         const data = monthData[day];
         const isToday = (day === new Date().getDate() && month === new Date().getMonth() && year === new Date().getFullYear());
         
-        const baseClass = "min-h-[90px] bg-white border-r border-b border-gray-200 flex flex-col relative hover:bg-blue-50 transition group";
-        const dayNumClass = isToday 
-            ? "bg-blue-600 text-white w-6 h-6 rounded-full flex items-center justify-center shadow-md text-xs" 
-            : "text-gray-700 text-sm";
+        // Base Cell Style
+        const baseClass = "min-h-[90px] bg-white border-r border-b border-gray-200 flex flex-col items-center justify-center relative hover:bg-blue-50 transition group";
+        
+        // Today's Circle Style
+        const todayClass = isToday 
+            ? "bg-blue-600 text-white shadow-md" 
+            : "";
 
-        let topClass = "bg-transparent";
-        let botClass = "bg-transparent";
-        let topLabel = "";
-        let botLabel = "";
+        let circleClass = "bg-transparent text-gray-700";
+        let badgesHtml = "";
         let tooltipHtml = "";
-        const activeColor = "bg-[#D32F2F] text-white"; 
+        
+        // Exam Day Circle Style (Light Red)
+        const activeColor = "bg-red-100 text-red-900 border border-red-200"; 
 
         if (data) {
-            // FN (Morning)
-            if (data.am.students > 0) {
-                topClass = activeColor;
-                topLabel = `<span class="absolute top-1 right-1 text-[9px] font-bold opacity-80 tracking-wider">FN</span>`;
+            const hasFN = data.am.students > 0;
+            const hasAN = data.pm.students > 0;
+            
+            if (hasFN || hasAN) {
+                circleClass = activeColor;
+            }
+
+            // FN Badge (Top Right)
+            if (hasFN) {
+                badgesHtml += `<span class="absolute -top-1 -right-1 text-[9px] font-bold bg-white border border-red-200 text-red-600 rounded-full px-1.5 py-0.5 shadow-sm">FN</span>`;
                 
                 const regHalls = Math.ceil(data.am.regCount / 30);
                 const othHalls = Math.ceil(data.am.othCount / 30);
                 let details = `Reg: ${regHalls} | Oth: ${othHalls}`;
-                
-                if (data.am.scribeCount > 0) {
-                    const scrHalls = Math.ceil(data.am.scribeCount / 5);
-                    details += ` | <span class="text-orange-300 font-bold">Scribe: ${scrHalls}</span>`;
-                }
+                if (data.am.scribeCount > 0) details += ` | Scribe: ${Math.ceil(data.am.scribeCount / 5)}`;
 
+                // *** FIX: Updated Text Colors for White Background ***
                 tooltipHtml += `
-                    <div class='mb-2 pb-2 border-b border-gray-600'>
-                        <strong class='text-red-300 uppercase text-[10px]'>Morning (FN)</strong><br>
-                        <span class='text-white'>${data.am.students} Candidates</span><br>
-                        <span class='text-gray-300 text-[10px]'>${details} Halls</span>
+                    <div class='mb-2 pb-2 border-b border-gray-200'>
+                        <strong class='text-red-600 uppercase text-[10px]'>Morning (FN)</strong><br>
+                        <span class='text-gray-900 font-bold'>${data.am.students} Students</span><br>
+                        <span class='text-gray-500 text-[10px]'>${details}</span>
                     </div>`;
             }
 
-            // AN (Afternoon)
-            if (data.pm.students > 0) {
-                botClass = activeColor;
-                botLabel = `<span class="absolute bottom-1 right-1 text-[9px] font-bold opacity-80 tracking-wider">AN</span>`;
+            // AN Badge (Bottom Right)
+            if (hasAN) {
+                badgesHtml += `<span class="absolute -bottom-1 -right-1 text-[9px] font-bold bg-white border border-red-200 text-red-600 rounded-full px-1.5 py-0.5 shadow-sm">AN</span>`;
                 
                 const regHalls = Math.ceil(data.pm.regCount / 30);
                 const othHalls = Math.ceil(data.pm.othCount / 30);
                 let details = `Reg: ${regHalls} | Oth: ${othHalls}`;
+                if (data.pm.scribeCount > 0) details += ` | Scribe: ${Math.ceil(data.pm.scribeCount / 5)}`;
 
-                if (data.pm.scribeCount > 0) {
-                    const scrHalls = Math.ceil(data.pm.scribeCount / 5);
-                    details += ` | <span class="text-orange-300 font-bold">Scribe: ${scrHalls}</span>`;
-                }
-
+                // *** FIX: Updated Text Colors for White Background ***
                 tooltipHtml += `
                     <div>
-                        <strong class='text-red-300 uppercase text-[10px]'>Afternoon (AN)</strong><br>
-                        <span class='text-white'>${data.pm.students} Candidates</span><br>
-                        <span class='text-gray-300 text-[10px]'>${details} Halls</span>
+                        <strong class='text-red-600 uppercase text-[10px]'>Afternoon (AN)</strong><br>
+                        <span class='text-gray-900 font-bold'>${data.pm.students} Students</span><br>
+                        <span class='text-gray-500 text-[10px]'>${details}</span>
                     </div>`;
             }
         }
 
         const tooltip = tooltipHtml ? `
-            <div class="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 w-48 bg-gray-800 text-white text-xs rounded p-2 shadow-xl z-50 hidden group-hover:block pointer-events-none text-center border border-gray-700">
+            <div class="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 w-48 bg-white text-gray-800 text-xs rounded-lg p-2 shadow-xl z-50 hidden group-hover:block pointer-events-none text-center border border-red-200 ring-1 ring-red-100">
                 ${tooltipHtml}
-                <div class="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-800"></div>
+                <div class="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-white"></div>
             </div>
         ` : "";
 
+        let finalCircleClass = `w-20 h-20 text-3xl rounded-full flex items-center justify-center relative font-bold ${todayClass || circleClass}`;
+
         html += `
             <div class="${baseClass}">
-                <div class="h-1/2 w-full ${topClass} p-1 border-b-2 border-white relative">
-                    <span class="font-bold ${dayNumClass} relative z-10">${day}</span>
-                    ${topLabel}
-                </div>
-                <div class="h-1/2 w-full ${botClass} relative">
-                    ${botLabel}
+                <div class="${finalCircleClass}">
+                    ${day}
+                    ${badgesHtml}
                 </div>
                 ${tooltip}
             </div>
