@@ -3,18 +3,21 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>UOC Exam Management V11.8 (Cloud Sync)</title> 
-    
+    <title>UOC Exam Management V11.9 (Cloud Sync)</title> 
+
     <script src="https://cdn.tailwindcss.com"></script>
 
     <link rel="stylesheet" href="https://pyscript.net/releases/2024.1.1/core.css">
     <script type="module" src="https://pyscript.net/releases/2024.1.1/core.js"></script>
-    
+
     <link rel="stylesheet" href="style.css">
+    
+    <script src="remuneration.js"></script> 
+
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
         import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
-        
+
         // *** UPDATED: Added 'orderBy' to imports ***
         import { 
             getFirestore, doc, getDoc, setDoc, 
@@ -50,9 +53,32 @@
         };
         console.log("Firebase Initialized (Full Suite Ready)");
     </script>
-    
+
 </head>
+
 <body class="bg-gray-100 font-sans flex flex-col h-screen">
+
+<div id="initial-app-loader" class="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-white transition-opacity duration-500">
+
+    <div class="relative flex h-16 w-16 mb-6">
+        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+        <span class="relative inline-flex rounded-full h-16 w-16 bg-indigo-600"></span>
+    </div>
+
+    <h2 class="text-2xl font-bold text-gray-800 mb-2">ExamFlow is Loading...</h2>
+    <p id="loader-message" class="text-indigo-600 font-medium italic animate-pulse">Summoning the Exam Spirits... 👻</p>
+
+    <div class="w-64 h-1 bg-gray-200 rounded-full mt-6 overflow-hidden">
+        <div class="h-full bg-indigo-600 animate-[loading_1.5s_ease-in-out_infinite]" style="width: 50%"></div>
+    </div>
+
+    <style>
+        @keyframes loading {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+    </style>
+</div>
 
 <header class="w-full bg-gray-900 text-white p-4 shadow-lg flex items-center justify-between shrink-0 z-50">
     <div class="flex items-center gap-4">
@@ -61,13 +87,13 @@
               <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
             </svg>
         </button>
-        
+
         <div class="flex items-center gap-3">
             <img src="logo.png" class="h-11 w-auto rounded bg-white p-1" alt="College Logo">
-            
+
             <div>
                 <h1 class="text-2xl font-bold text-white leading-none">
-                    ExamFlow <span class="text-xs font-normal text-gray-400 ml-1">v11.8 Cloud</span>
+                    ExamFlow <span class="text-xs font-normal text-gray-400 ml-1">v11.9 Cloud</span>
                 </h1>
                 <p class="text-[10px] text-gray-400 font-medium tracking-wide mt-0.5">
                     Developed and Maintained by Exam Wing, Government Victoria College Palakkad
@@ -81,21 +107,21 @@
             <div id="user-name" class="font-bold text-white">User</div>
             <div id="sync-status" class="text-xs text-green-400">Synced</div>
         </div>
-        
+
         <button id="admin-btn" class="hidden bg-purple-600 hover:bg-purple-700 text-white text-sm px-3 py-2 rounded transition flex items-center gap-1">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" />
             </svg>
             Team
         </button>
-        
+
         <button id="super-admin-btn" class="hidden bg-red-600 hover:bg-red-700 text-white text-sm px-3 py-2 rounded transition flex items-center gap-1 border border-red-800 shadow-lg">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 0 1-1.043 3.296 3.745 3.745 0 0 1-3.296 1.043A3.745 3.745 0 0 1 12 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 0 1-3.296-1.043 3.745 3.745 0 0 1-1.043-3.296A3.745 3.745 0 0 1 3 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 0 1 1.043-3.296 3.746 3.746 0 0 1 3.296-1.043A3.746 3.746 0 0 1 12 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 0 1 3.296 1.043 3.746 3.746 0 0 1 1.043 3.296A3.745 3.745 0 0 1 21 12Z" />
             </svg>
             Super Admin
         </button>
-        
+
         <button id="login-btn" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-2 rounded transition">
             Google Login
         </button>
@@ -108,7 +134,7 @@
 <div class="flex flex-1 overflow-hidden">
 
 <nav id="main-nav" class="w-64 bg-gray-900 text-gray-300 p-4 space-y-2 overflow-y-auto shadow-lg shrink-0 transition-all duration-300">
-        
+
         <button id="nav-home" class="nav-button nav-button-active">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
                 <path d="M10.707 2.293a1 1 0 00-1.414 0l-7 7a1 1 0 001.414 1.414L4 10.414V17a1 1 0 001 1h2a1 1 0 001-1v-2a1 1 0 011-1h2a1 1 0 011 1v2a1 1 0 001 1h2a1 1 0 001-1v-6.586l.293.293a1 1 0 001.414-1.414l-7-7z" />
@@ -141,7 +167,7 @@
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5"><path fill-rule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z" clip-rule="evenodd" /></svg>
             <span>Search</span>
         </button>
-    
+
         <button id="nav-reports" class="nav-button nav-button-inactive">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5"><path fill-rule="evenodd" d="M4 2a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H4Zm2 5.25a.75.75 0 0 1 .75-.75h7.5a.75.75 0 0 1 0 1.5H6.75a.75.75 0 0 1-.75-.75Zm0 3.5a.75.75 0 0 1 .75-.75h7.5a.75.75 0 0 1 0 1.5H6.75a.75.75 0 0 1-.75-.75Z" clip-rule="evenodd" /></svg>
             <span>Reports</span>
@@ -235,7 +261,7 @@
                     <div id="calendar-days-grid" class="grid grid-cols-7 bg-gray-200 gap-px border-gray-200">
                         </div>
                 </div>
-                
+
                 <div class="flex gap-4 mt-3 text-xs text-gray-500 justify-end">
                     <div class="flex items-center gap-1"><div class="w-3 h-3 bg-red-500 rounded-sm opacity-80"></div> Exam Session</div>
                     <div class="flex items-center gap-1"><div class="w-3 h-3 bg-white border border-gray-300 rounded-sm"></div> No Exam</div>
@@ -276,7 +302,7 @@
             <p class="text-sm text-gray-500">Name your sessions (e.g., "S1 B.Sc"). Max 15 chars. Appears on reports.</p>
         </div>
     </div>
-    
+
     <div id="exam-names-grid" class="grid grid-cols-1 gap-3">
         </div>
 </div>
@@ -298,7 +324,7 @@
                         <p id="data-tab-status-text" class="text-base font-medium text-blue-700">No data loaded.</p>
                     </div>
                 </div>
-                
+
                 <button id="btn-download-current-csv" class="hidden bg-blue-600 text-white px-4 py-2 rounded-md shadow hover:bg-blue-700 text-sm font-medium flex items-center gap-2 transition-colors">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
                       <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M12 12.75l-3-3m0 0 3-3m-3 3h7.5" />
@@ -358,13 +384,13 @@
                         <label class="block text-sm font-medium text-gray-700 mb-1">Select Stream for this File:</label>
                         <select id="pdf-stream-select" class="block w-full p-2 border border-gray-300 rounded-md shadow-sm text-sm bg-white">
                             </select>
-                        
+
                         </div>
                         <div>
                             <label for="pdf-file" class="block text-sm font-medium text-gray-700">Select PDF Files:</label>
                             <input type="file" id="pdf-file" accept=".pdf" multiple class="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"/>
                         </div>
-                        
+
                         <button id="run-button" 
                                 py-click="start_extraction" 
                                 class="w-full inline-flex justify-center items-center rounded-md border border-transparent bg-indigo-600 py-2 px-4 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-50">
@@ -428,9 +454,9 @@
             Unlock to Edit
         </button>
     </div>
-    
+
 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 items-end opacity-50 pointer-events-none transition-opacity" id="bulk-inputs-wrapper">
-    
+
     <div>
         <label class="block text-xs font-bold text-red-600 uppercase mb-1">Danger Zone</label>
         <button id="delete-course-btn" disabled class="w-full inline-flex justify-center items-center rounded-md border border-transparent bg-red-100 py-2 px-2 text-sm font-medium text-red-700 shadow-sm hover:bg-red-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-400">
@@ -450,7 +476,7 @@
             <input type="date" id="bulk-new-date" disabled class="block w-full p-2 border border-gray-300 rounded-md shadow-sm text-sm focus:border-yellow-500 focus:ring-yellow-500 cursor-pointer bg-gray-50" onclick="this.showPicker()">
         </div>
     </div>
-    
+
     <div>
         <label class="block text-xs font-bold text-gray-600 uppercase mb-1">New Time</label>
         <div class="relative">
@@ -488,7 +514,7 @@
                         Next &rarr;
                     </button>
                 </div>
-                
+
                 <div id="edit-save-section" class="hidden">
                     <button id="save-edit-data-button" class="w-full inline-flex justify-center items-center rounded-md border border-transparent bg-green-600 py-3 px-4 text-sm font-medium text-white shadow-sm hover:bg-green-700">
                         Save All Changes to Local Storage
@@ -497,14 +523,14 @@
                 </div>
 
             </div>
-            
+
             <div id="edit-data-loader" class="text-center text-gray-600">
                 <p>Please run a data extraction or load a corrected CSV on the "Data" tab to enable this feature.</p>
             </div>
 
         </div>
     </div>
-    
+
     <div id="view-settings" class="container max-w-2xl mx-auto p-4 min-h-screen hidden">
         <div class="bg-white p-8 rounded-lg shadow-xl w-full">
             <h1 class="text-3xl font-bold text-gray-800 mb-6">Application Settings</h1>
@@ -516,11 +542,11 @@
                 <p class="text-gray-600 mb-4 text-sm">
                     Define the streams (e.g., Regular, Distance, Supplementary). You will select one of these when uploading data.
                 </p>
-                
+
                 <div class="space-y-3">
                     <div id="stream-config-container" class="space-y-2">
                         </div>
-                    
+
                     <div class="flex gap-2">
                         <input type="text" id="new-stream-input" class="block flex-grow p-2 border border-gray-300 rounded-md text-sm" placeholder="Enter Stream Name (e.g., Distance)">
                         <button id="add-stream-btn" class="bg-purple-600 text-white px-4 py-2 rounded-md text-sm hover:bg-purple-700 font-medium">Add</button>
@@ -528,7 +554,7 @@
                 </div>
             </div>
 
-            
+
             <div class="bg-blue-50 border border-blue-200 p-4 rounded-lg mb-6">
                 <h2 class="text-xl font-bold text-gray-800 mb-4 pb-2 border-b border-gray-300">
                     Room Capacity & Location
@@ -537,23 +563,23 @@
                     Define the number of students per room. This list is automatically saved to your browser.
                     If a capacity is left blank, it will default to 30 when saved.
                 </p>
-                
+
                 <div class="space-y-4">
                     <div class="flex items-center gap-3 px-2">
                         <label class="font-semibold text-gray-700 w-24 shrink-0">Room Name</label>
                         <label class="font-semibold text-gray-700 w-20">Capacity</label>
                         <label class="font-semibold text-gray-700 flex-grow">Location (e.g., 101 - Commerce Block)</label>
                     </div>
-                    
+
                     <div id="room-config-container" class="space-y-2 max-h-96 overflow-y-auto pr-2">
                         </div>
-                    
+
                     <button id="add-room-button" class="w-full inline-flex justify-center items-center rounded-md border border-dashed border-gray-400 bg-gray-50 py-2 px-4 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-100">
                         + Add New Room
                     </button>
-                    
+
                     <hr class="my-4">
-                    
+
                     <button id="save-room-config-button" class="w-full inline-flex justify-center items-center rounded-md border border-transparent bg-indigo-600 py-3 px-4 text-sm font-medium text-white shadow-sm hover:bg-indigo-700">
                         Save Room Settings
                     </button>
@@ -572,7 +598,7 @@
                              <input type="text" id="college-name-input" disabled 
                                     class="block w-full p-2 border border-gray-300 rounded-md shadow-sm text-sm disabled:bg-gray-100 disabled:text-gray-500" 
                                     placeholder="e.g., University of Calicut">
-                             
+
                              <button id="edit-college-name-btn" class="inline-flex items-center justify-center rounded-md border border-gray-300 bg-white py-2 px-3 text-gray-700 shadow-sm hover:bg-gray-50" title="Edit Name">
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
                                   <path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125" />
@@ -586,7 +612,7 @@
                 </div>
                 <div id="college-name-status" class="text-sm font-medium text-green-600 mt-2 block h-5"></div>
             </div>
-            
+
             <div class="bg-blue-50 border border-blue-200 p-4 rounded-lg mb-6">
                 <h2 class="text-xl font-bold text-blue-800 mb-4 pb-2 border-b border-blue-300">
                     Settings Management
@@ -595,7 +621,7 @@
                     Backup or Restore ONLY your configurations (Room Settings, Streams, College Name, and Global Scribe List). 
                     <strong>Student data and exam sessions are NOT included.</strong>
                 </p>
-                
+
                 <div class="flex gap-2 mb-4">
                     <button id="backup-settings-btn" class="flex-1 inline-flex justify-center items-center rounded-md border border-transparent bg-blue-600 py-2 px-4 text-sm font-medium text-white shadow-sm hover:bg-blue-700">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 mr-2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" /></svg>
@@ -618,12 +644,12 @@
                 <div class="absolute top-0 right-0 -mt-2 -mr-2 text-red-100 opacity-50 pointer-events-none">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24" class="w-32 h-32"><path d="M12 2L1 21h22L12 2zm0 3.45l8.27 14.55H3.73L12 5.45zM11 10v4h2v-4h-2zm0 6v2h2v-2h-2z"/></svg>
                 </div>
-                
+
                 <h2 class="text-xl font-bold text-red-800 mb-4 pb-2 border-b border-red-300 flex items-center gap-2">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
                     Danger Zone
                 </h2>
-                
+
                 <p class="text-sm text-red-800 mb-4 font-medium">
                     <strong>NUKE IT ALL:</strong> This will strictly wipe all <u>Student Data</u>, <u>Exam Sessions</u>, <u>Allotments</u>, and <u>Absentees</u> from both your Browser and the Cloud Database. <br><br>
                     <em class="text-gray-600">Your Settings (Rooms, Streams, College Name, Scribe List) will remain safe.</em>
@@ -632,22 +658,31 @@
                 <button id="nuke-it-all-btn" class="w-full inline-flex justify-center items-center rounded-md border border-red-800 bg-red-600 py-4 px-4 text-lg font-bold text-white shadow-lg hover:bg-red-700 hover:shadow-xl transition-all transform hover:scale-[1.01]">
                     ☢️ NUKE IT ALL (MASTER RESET) ☢️
                 </button>
-                
+
                 <div class="mt-4 pt-4 border-t border-red-200">
-                     <h3 class="text-sm font-bold text-gray-700 mb-2">Full Backup/Restore (Everything)</h3>
-                     <div class="flex gap-2">
-                        <button id="backup-data-button" class="flex-1 bg-white border border-gray-300 text-gray-700 px-3 py-1.5 rounded text-xs hover:bg-gray-50">Download Full Backup</button>
-                        <button id="restore-data-button-trigger" class="flex-1 bg-white border border-gray-300 text-gray-700 px-3 py-1.5 rounded text-xs hover:bg-gray-50" onclick="document.getElementById('restore-file-input').click()">Restore Full Backup</button>
-                        <input type="file" id="restore-file-input" accept=".json" class="hidden"/>
-                     </div>
-                </div>
+                     <h3 class="text-sm font-bold text-gray-700 mb-2">Full Data Export & Recovery</h3>
+                    <div class="flex flex-col gap-2">
+                       <button id="master-download-csv-btn" class="w-full flex items-center justify-center gap-2 bg-indigo-600 text-white px-3 py-2 rounded text-sm font-bold hover:bg-indigo-700 shadow-sm transition-all">
+                       <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5">
+                         <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M12 12.75l-3-3m0 0 3-3m-3 3h7.5" />
+                       </svg>
+                       Download MASTER CSV (The One Ring 💍)
+                       </button>
+
+                   <div class="flex gap-2">
+                       <button id="backup-data-button" class="flex-1 bg-white border border-gray-300 text-gray-700 px-3 py-1.5 rounded text-xs hover:bg-gray-50">Download Backup (JSON)</button>
+                       <button id="restore-data-button-trigger" class="flex-1 bg-white border border-gray-300 text-gray-700 px-3 py-1.5 rounded text-xs hover:bg-gray-50" onclick="document.getElementById('restore-file-input').click()">Restore Backup</button>
+                       <input type="file" id="restore-file-input" accept=".json" class="hidden"/>
+                   </div>
+            </div>
+        </div>
             </div> </div>     </div>         <div id="view-room-settings" class="container max-w-2xl mx-auto p-4 min-h-screen hidden">
         </div>
-    
+
     <div id="view-qpcodes" class="container max-w-2xl mx-auto p-4 min-h-screen hidden">
         <div class="bg-white p-8 rounded-lg shadow-xl w-full">
             <h1 class="text-3xl font-bold text-gray-800 mb-6">QP Code Settings</h1>
-            
+
             <div id="qpcode-content-wrapper" class="hidden">
                 <div class="mb-4">
                     <label for="session-select-qp" class="block text-sm font-medium text-gray-700 mb-1">Select Exam Session:</label>
@@ -661,36 +696,36 @@
                         Assign a Question Paper (QP) Code to each course. This code will be used in the Absentee Statement.
                         **Click 'Save QP Codes' below to commit changes to local memory.**
                     </p>
-                
+
                     <div class="space-y-4">
                         <div class="flex items-center gap-3 px-2">
                             <label class="font-semibold text-gray-700 w-2/3">Course Name</label>
                             <label class="font-semibold text-gray-700 w-1/3">QP Code</label>
                         </div>
-                        
+
                         <div id="qp-code-container" class="space-y-2 max-h-96 overflow-y-auto pr-2">
                             </div>
                     </div>
                     <div id="qp-code-status" class="text-sm text-green-600 font-medium text-center h-5 mt-4"></div>
-                    
+
                     <button id="save-qp-codes-button" class="w-full inline-flex justify-center items-center rounded-md border border-transparent bg-indigo-600 py-3 px-4 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 mt-4">
                         Save QP Codes
                     </button>
                 </div>
 
             </div>
-            
+
             <div id="qpcode-loader" class="text-center text-gray-600">
                 <p>Please run a data extraction or load a corrected CSV to enable this feature.</p>
             </div>
-            
+
         </div>
     </div>
 
 <div id="view-search" class="container max-w-2xl mx-auto p-4 hidden">
         <div class="bg-white p-8 rounded-lg shadow-xl w-full">
             <h1 class="text-3xl font-bold text-gray-800 mb-6">Search Student Details</h1>
-            
+
             <div id="search-content-wrapper">
                 <div class="bg-gray-100 p-3 rounded-lg mb-5">
                     <h4 class="font-semibold text-gray-700 mb-2 text-sm">Search Mode:</h4>
@@ -725,11 +760,11 @@
         </div>
     </div>
 
-            
+
     <div id="view-reports" class="container max-w-2xl mx-auto p-4 min-h-screen hidden">
         <div class="bg-white p-8 rounded-lg shadow-xl w-full">
             <h1 class="text-3xl font-bold text-gray-800 mb-6">Reports</h1>
-            
+
             <p class="text-gray-600 mb-4">
                 Generate reports based on the last loaded data. (Buttons are enabled after extraction or CSV load.)
             </p>
@@ -770,9 +805,9 @@
                 <button id="generate-report-button" class="w-full inline-flex justify-center items-center rounded-md border border-transparent bg-blue-600 py-3 px-4 text-sm font-medium text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50" disabled>
                     Generate Room-wise Seating Report
                 </button>
-                
+
 <div class="flex flex-col sm:flex-row gap-3 items-end">
-    
+
     <div class="flex gap-2 shrink-0">
         <div>
             <label class="block text-xs font-bold text-gray-500 uppercase mb-1">Rows</label>
@@ -825,7 +860,7 @@
                 <button id="generate-scribe-report-button" class="w-full inline-flex justify-center items-center rounded-md border border-transparent bg-orange-600 py-3 px-4 text-sm font-medium text-white shadow-sm hover:bg-orange-700 disabled:opacity-50" disabled>
                     Generate Scribe Assistance Report
                 </button>
-               
+
                 <button id="generate-scribe-proforma-button" class="w-full inline-flex justify-center items-center rounded-md border border-transparent bg-orange-600 py-3 px-4 text-sm font-medium text-white shadow-sm hover:bg-orange-700 disabled:opacity-50" disabled>
                     Generate Scribe Proforma (One Page Per Scribe)
                 </button>
@@ -841,15 +876,15 @@
                 <button id="generate-room-summary-button" class="w-full inline-flex justify-center items-center rounded-md border border-transparent bg-indigo-600 py-3 px-4 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50" disabled>
                     Generate Room Allotment Summary
                 </button>
-                
+
                 </div>
         </div>
     </div>
-    
+
     <div id="view-absentees" class="container max-w-2xl mx-auto p-4 min-h-screen hidden">
         <div class="bg-white p-8 rounded-lg shadow-xl w-full">
             <h1 class="text-3xl font-bold text-gray-800 mb-6">Mark Absentees</h1>
-            
+
             <div id="absentee-content-wrapper" class="hidden">
                 <div class="mb-4">
                     <label for="session-select" class="block text-sm font-medium text-gray-700 mb-1">Select Exam Session:</label>
@@ -864,7 +899,7 @@
                         <input type="text" id="absentee-search" class="block w-full p-2 border border-gray-300 rounded-md shadow-sm text-sm" placeholder="Type 3 chars...">
                         <div id="autocomplete-results" class="autocomplete-results hidden"></div>
                     </div>
-                    
+
                     <div id="selected-student-details" class="mt-3 p-3 bg-gray-50 border border-gray-200 rounded-md hidden">
                         <div class="font-medium text-gray-800" id="selected-student-name"></div>
                         <div class="text-sm text-gray-600" id="selected-student-course"></div>
@@ -874,18 +909,31 @@
                         </button>
                     </div>
                 </div>
-                
+
                 <div id="absentee-list-section" class="hidden">
-                    <h3 class="text-lg font-medium text-gray-900 mb-2">Current Absentee List for this Session:</h3>
-                    <div id="current-absentee-list" class="min-h-[50px] bg-gray-50 border border-gray-200 rounded-md p-3 space-y-2">
+                    <div class="flex justify-between items-center mb-2">
+                        <h3 class="text-lg font-medium text-gray-900 flex items-center gap-2">
+                            Current Absentee List 
+                            <span id="absentee-count-badge" class="bg-red-100 text-red-800 text-xs font-bold px-2 py-0.5 rounded-full border border-red-200">0</span>
+                        </h3>
+        
+                        <button id="toggle-absentee-lock-btn" class="text-xs flex items-center gap-1 bg-gray-100 text-gray-600 border border-gray-300 px-3 py-1 rounded hover:bg-gray-200 transition shadow-sm">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5">
+                              <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" />
+                            </svg>
+                            <span>List Locked</span>
+                        </button>
                         </div>
+    
+                    <div id="current-absentee-list" class="min-h-[50px] bg-gray-50 border border-gray-200 rounded-md p-3 space-y-2">
+                    </div>
                 </div>
-                
+
                 <button id="generate-absentee-report-button" class="mt-6 w-full inline-flex justify-center items-center rounded-md border border-transparent bg-blue-600 py-3 px-4 text-sm font-medium text-white shadow-sm hover:bg-blue-700 disabled:opacity-50" disabled>
                     Generate Absentee Statement
                 </button>
             </div>
-            
+
             <div id="absentee-loader" class="text-center text-gray-600">
                 <p>Please run a data extraction or load a corrected CSV on the "Reports" tab to enable this feature.</p>
             </div>
@@ -896,7 +944,7 @@
     <div id="view-scribe-settings" class="container max-w-2xl mx-auto p-4 min-h-screen hidden">
         <div class="bg-white p-8 rounded-lg shadow-xl w-full">
             <h1 class="text-3xl font-bold text-gray-800 mb-6">Scribe Assistance</h1>
-            
+
             <div id="scribe-content-wrapper" class="hidden">
                 <p class="text-gray-600 mb-4">
                     Add students who require scribe assistance. This list is global and will apply to all exam sessions.
@@ -907,7 +955,7 @@
                         <input type="text" id="scribe-search" class="block w-full p-2 border border-gray-300 rounded-md shadow-sm text-sm" placeholder="Type 2+ chars of Register Number or Name...">
                         <div id="scribe-autocomplete-results" class="autocomplete-results hidden"></div>
                     </div>
-                    
+
                     <div id="scribe-selected-student-details" class="mt-3 p-3 bg-gray-50 border border-gray-200 rounded-md hidden">
                         <div class="font-medium text-gray-800" id="scribe-selected-student-name"></div>
                         <div class="text-sm text-gray-600" id="scribe-selected-student-regno"></div>
@@ -916,7 +964,7 @@
                         </button>
                     </div>
                 </div>
-                
+
             <div>
                     <div class="flex justify-between items-center mb-2">
                         <h3 class="text-lg font-medium text-gray-900">Current Scribe List (Global):</h3>
@@ -931,13 +979,13 @@
                         </div>
                 </div>
             </div>
-            
+
             <div id="scribe-loader" class="text-center text-gray-600">
                 <p>Please run a data extraction or load a corrected CSV to enable this feature.</p>
             </div>
         </div>
     </div>
-    
+
     <div id="scribe-room-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
         <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
             <div class="mt-3">
@@ -958,7 +1006,7 @@
         <div class="relative top-10 mx-auto p-5 border w-full max-w-lg shadow-lg rounded-md bg-white">
             <div class="mt-3">
                 <h3 class="text-lg font-medium text-gray-900 mb-4" id="student-edit-modal-title">Edit Student Details</h3>
-                
+
                 <div class="space-y-4">
 
                     <div>
@@ -976,7 +1024,7 @@
 
 
 
-                    
+
                     <div>
                         <label for="modal-edit-course" class="block text-sm font-medium text-gray-700">Course</label>
                         <input type="text" id="modal-edit-course" class="mt-1 block w-full p-2 border border-gray-300 rounded-md shadow-sm text-sm">
@@ -1010,7 +1058,7 @@
     <div id="view-room-allotment" class="container max-w-2xl mx-auto p-4 min-h-screen hidden">
         <div class="bg-white p-8 rounded-lg shadow-xl w-full">
             <h1 class="text-3xl font-bold text-gray-800 mb-6">Room Allotment</h1>
-            
+
             <div id="room-allotment-content-wrapper" class="hidden">
                 <div class="mb-4">
                 <label for="allotment-session-select" class="block text-sm font-medium text-gray-700 mb-1">Select Exam Session:</label>
@@ -1074,7 +1122,7 @@
                 </div>
 
             </div>
-            
+
             <div id="room-selection-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
                 <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
                     <div class="mt-3">
@@ -1102,7 +1150,7 @@
     <div class="relative top-10 mx-auto p-5 border w-full max-w-2xl shadow-lg rounded-md bg-white">
         <div class="mt-3">
             <h3 class="text-lg leading-6 font-bold text-gray-900 border-b pb-2 mb-4" id="search-result-name">Student Name</h3>
-            
+
             <div class="grid grid-cols-2 gap-4 mb-4 text-sm">
                 <div>
                     <span class="text-gray-500 block">Register Number:</span>
@@ -1179,7 +1227,7 @@
     </div>
 </div>
 
-        
+
 
     <div id="report-controls" class="container max-w-2xl mx-auto p-4 bg-gray-100 rounded-lg hidden">
     <span id="report-status" class="text-sm font-medium text-gray-700"></span>
@@ -1196,7 +1244,7 @@
 
     <div id="report-output-area" class="mt-6 w-full" style="display: none;">
         </div>
-    
+
     <div id="json-data-store" class="hidden"></div>
     <div id="q-paper-data-store" class="hidden"></div>
 </main> 
@@ -1208,7 +1256,7 @@
 <div id="admin-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex justify-center items-center">
     <div class="relative bg-white rounded-lg shadow-xl p-6 w-96">
         <h3 class="text-lg font-bold text-gray-800 mb-4">Manage Team Access</h3>
-        
+
         <div class="mb-4">
             <label class="block text-sm font-medium text-gray-700 mb-1">Add User (Gmail):</label>
             <div class="flex gap-2">
@@ -1233,7 +1281,7 @@
     <div class="relative bg-white rounded-lg shadow-2xl p-6 w-96 border-t-4 border-red-600">
         <h3 class="text-lg font-bold text-gray-800 mb-2">Authorize New College</h3>
         <p class="text-xs text-gray-500 mb-4">Enter the Gmail ID of the Admin for the new college. They will be allowed to create a database.</p>
-        
+
         <div class="mb-4">
             <label class="block text-sm font-medium text-gray-700 mb-1">New College Admin Email:</label>
             <div class="flex gap-2">
@@ -1257,11 +1305,11 @@
 <div id="csv-conflict-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex justify-center items-center">
     <div class="relative bg-white rounded-lg shadow-xl p-6 w-[32rem]">
         <h3 class="text-lg font-bold text-gray-800 mb-4">Data Upload Options</h3>
-        
+
         <div class="mb-6 text-sm text-gray-600 space-y-2">
             <p>Current System Data: <strong id="conflict-existing-count">0</strong> records.</p>
             <p>New File Data: <strong id="conflict-total-new">0</strong> records.</p>
-            
+
             <div class="bg-blue-50 p-3 rounded text-blue-900 border border-blue-200 mt-2">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 inline-block mr-1 mb-0.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>
                 Found <strong><span id="conflict-unique-count" class="text-lg font-bold">0</span></strong> new records not in the system.
@@ -1272,17 +1320,16 @@
             <button id="btn-merge-data" class="w-full inline-flex justify-center items-center rounded-md border border-transparent bg-green-600 py-3 px-4 text-sm font-medium text-white shadow-sm hover:bg-green-700">
                 ✅ Add Only New Records (Merge)
             </button>
-            
+
             <button id="btn-replace-data" class="w-full inline-flex justify-center items-center rounded-md border border-red-100 bg-white py-3 px-4 text-sm font-medium text-red-600 shadow-sm hover:bg-red-50 border-red-300">
                 ⚠️ Replace Entire Database (Overwrite)
             </button>
-            
+
             <button id="btn-cancel-upload" class="w-full inline-flex justify-center items-center rounded-md border border-gray-300 bg-white py-2 px-4 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50">
                 Cancel
             </button>
         </div>
     </div>
 </div>    
-    
 </body>   
 </html>
