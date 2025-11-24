@@ -295,6 +295,9 @@ const closeAdminModal = document.getElementById('close-admin-modal');
 const newUserEmailInput = document.getElementById('new-user-email');
 const addUserBtn = document.getElementById('add-user-btn');
 const userListContainer = document.getElementById('user-list');
+// *** MOVED HERE TO FIX ERROR ***
+const SUPER_ADMIN_EMAIL = "sureshmagnolia@gmail.com"; 
+// ******************************
 
 let currentUser = null;
 let currentCollegeId = null; // The shared document ID
@@ -381,9 +384,15 @@ async function createNewCollege(user) {
     // Prepare initial data from local storage
     const initialData = {};
     const keysToSync = [
-        'examRoomConfig', 'examCollegeName', 'examAbsenteeList', 
-        'examQPCodes', 'examBaseData', 'examRoomAllotment', 
-        'examScribeList', 'examScribeAllotment'
+        'examRoomConfig', 
+        'examCollegeName', 
+        'examAbsenteeList', 
+        'examQPCodes', 
+        'examBaseData', 
+        'examRoomAllotment', 
+        'examScribeList', 
+        'examScribeAllotment',
+        'examRulesConfig' // <--- ADD THIS LINE
     ];
     keysToSync.forEach(key => {
         const val = localStorage.getItem(key);
@@ -591,7 +600,8 @@ async function syncDataToCloud() {
             'examScribeList', 
             'examScribeAllotment', 
             'examAbsenteeList',
-            'examSessionNames'
+            'examSessionNames',
+            'examRulesConfig' // <--- ADD THIS LINE (To save to Cloud)
         ];
 
         const finalMainData = { lastUpdated: timestamp };
@@ -739,7 +749,11 @@ const QP_CODE_LIST_KEY = 'examQPCodes';
 const BASE_DATA_KEY = 'examBaseData';
 const ROOM_ALLOTMENT_KEY = 'examRoomAllotment';
  
-
+// *** MOVED HERE TO FIX ERROR ***
+const EXAM_RULES_KEY = 'examRulesConfig'; 
+let currentExamRules = []; 
+// ******************************
+    
 // *** NEW SCRIBE KEYS ***
 const SCRIBE_LIST_KEY = 'examScribeList';
 const SCRIBE_ALLOTMENT_KEY = 'examScribeAllotment';
@@ -754,7 +768,8 @@ const ALL_DATA_KEYS = [
     BASE_DATA_KEY,
     ROOM_ALLOTMENT_KEY,
     SCRIBE_LIST_KEY,
-    SCRIBE_ALLOTMENT_KEY
+    SCRIBE_ALLOTMENT_KEY,
+    EXAM_RULES_KEY // <--- ADD THIS LINE (To include in Backup/Restore)
 ];
 // **********************************
 // --- Global var to hold data from the last *report run* ---
@@ -1003,10 +1018,6 @@ let currentExamNames = {};
 // ==========================================
 // 🗓️ EXAM SCHEDULER (DATABASE MODE)
 // ==========================================
-
-// 1. NEW GLOBAL VARIABLES (Add these if missing at top, or keep here)
-const EXAM_RULES_KEY = 'examRulesConfig'; 
-let currentExamRules = []; 
 
 // Helper to determine if a time string is FN or AN
 function getSessionType(timeStr) {
@@ -8972,8 +8983,6 @@ Are you sure you want to delete this ENTIRE course?
 // ==========================================
 // 🚀 SUPER ADMIN LOGIC
 // ==========================================
-
-const SUPER_ADMIN_EMAIL = "sureshmagnolia@gmail.com"; 
 
 const superAdminBtn = document.getElementById('super-admin-btn');
 const superAdminModal = document.getElementById('super-admin-modal');
