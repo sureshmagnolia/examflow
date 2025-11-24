@@ -229,7 +229,42 @@ window.finalizeAppLoad = function() {
         setTimeout(() => { loader.remove(); }, 500); 
     }
 };
+
 // ------------------------------------
+
+// --- Global localStorage Key ---
+const STREAM_CONFIG_KEY = 'examStreamsConfig'; // <-- Add this definition
+const ROOM_CONFIG_KEY = 'examRoomConfig';
+const COLLEGE_NAME_KEY = 'examCollegeName';
+const ABSENTEE_LIST_KEY = 'examAbsenteeList';
+const QP_CODE_LIST_KEY = 'examQPCodes';
+const BASE_DATA_KEY = 'examBaseData';
+const ROOM_ALLOTMENT_KEY = 'examRoomAllotment';
+ 
+// *** MOVED HERE TO FIX ERROR ***
+const EXAM_RULES_KEY = 'examRulesConfig'; 
+let currentExamRules = []; 
+let isExamRulesLocked = true; // <--- ADD THIS NEW VARIABLE    
+// ******************************
+    
+// *** NEW SCRIBE KEYS ***
+const SCRIBE_LIST_KEY = 'examScribeList';
+const SCRIBE_ALLOTMENT_KEY = 'examScribeAllotment';
+// ***********************
+// *** NEW: All keys for backup/restore ***
+const ALL_DATA_KEYS = [
+    ROOM_CONFIG_KEY,
+    STREAM_CONFIG_KEY, // <-- Add this
+    COLLEGE_NAME_KEY,
+    ABSENTEE_LIST_KEY,
+    QP_CODE_LIST_KEY,
+    BASE_DATA_KEY,
+    ROOM_ALLOTMENT_KEY,
+    SCRIBE_LIST_KEY,
+    SCRIBE_ALLOTMENT_KEY,
+    EXAM_RULES_KEY // <--- ADD THIS LINE (To include in Backup/Restore)
+];
+// **********************************
     
 // --- Debounce Helper Function ---
 function debounce(func, delay) {
@@ -295,7 +330,9 @@ const closeAdminModal = document.getElementById('close-admin-modal');
 const newUserEmailInput = document.getElementById('new-user-email');
 const addUserBtn = document.getElementById('add-user-btn');
 const userListContainer = document.getElementById('user-list');
-// *** MOVED HERE TO FIX ERROR ***
+const absenteeQpFilter = document.getElementById('absentee-qp-filter');
+    
+    // *** MOVED HERE TO FIX ERROR ***
 const SUPER_ADMIN_EMAIL = "sureshmagnolia@gmail.com"; 
 // ******************************
 
@@ -478,7 +515,7 @@ function syncDataFromCloud(collegeId) {
             [
                 'examRoomConfig', 'examStreamsConfig', 'examCollegeName', 
                 'examQPCodes', 'examScribeList', 'examScribeAllotment', 
-                'examAbsenteeList', 'examSessionNames', 'lastUpdated'
+                'examAbsenteeList', 'examSessionNames', 'lastUpdated', 'examRulesConfig'
             ].forEach(key => {
                 if (mainData[key]) localStorage.setItem(key, mainData[key]);
             });
@@ -557,7 +594,7 @@ async function syncDataToCloud() {
             cloudData = cloudSnap.data();
         }
 
-        // --- STEP 2: Smart Merge Helpers ---
+// --- STEP 2: Smart Merge Helpers ---
         const isEmptyOrDefault = (key, val) => {
             if (!val) return true;
             if (key === 'examCollegeName') return val === "University of Calicut";
@@ -567,6 +604,7 @@ async function syncDataToCloud() {
             if (key === 'examQPCodes') return val === '{}';
             if (key === 'examAbsenteeList') return val === '{}';
             if (key === 'examSessionNames') return val === '{}';
+            // if (key === 'examRulesConfig') return val === '[]'; // <--- ADD THIS LINE
             if (key === 'examRoomAllotment' || key === 'examScribeAllotment') return val === '{}' || val.length < 5; 
             return false;
         };
@@ -740,38 +778,7 @@ function updateSyncStatus(status, type) {
     syncStatusDisplay.textContent = status;
     syncStatusDisplay.className = type === 'success' ? 'text-xs text-green-400' : (type === 'error' ? 'text-xs text-red-400' : 'text-xs text-yellow-400');
 }
-// --- Global localStorage Key ---
-const STREAM_CONFIG_KEY = 'examStreamsConfig'; // <-- Add this definition
-const ROOM_CONFIG_KEY = 'examRoomConfig';
-const COLLEGE_NAME_KEY = 'examCollegeName';
-const ABSENTEE_LIST_KEY = 'examAbsenteeList';
-const QP_CODE_LIST_KEY = 'examQPCodes';
-const BASE_DATA_KEY = 'examBaseData';
-const ROOM_ALLOTMENT_KEY = 'examRoomAllotment';
- 
-// *** MOVED HERE TO FIX ERROR ***
-const EXAM_RULES_KEY = 'examRulesConfig'; 
-let currentExamRules = []; 
-// ******************************
-    
-// *** NEW SCRIBE KEYS ***
-const SCRIBE_LIST_KEY = 'examScribeList';
-const SCRIBE_ALLOTMENT_KEY = 'examScribeAllotment';
-// ***********************
-// *** NEW: All keys for backup/restore ***
-const ALL_DATA_KEYS = [
-    ROOM_CONFIG_KEY,
-    STREAM_CONFIG_KEY, // <-- Add this
-    COLLEGE_NAME_KEY,
-    ABSENTEE_LIST_KEY,
-    QP_CODE_LIST_KEY,
-    BASE_DATA_KEY,
-    ROOM_ALLOTMENT_KEY,
-    SCRIBE_LIST_KEY,
-    SCRIBE_ALLOTMENT_KEY,
-    EXAM_RULES_KEY // <--- ADD THIS LINE (To include in Backup/Restore)
-];
-// **********************************
+
 // --- Global var to hold data from the last *report run* ---
 let lastGeneratedRoomData = [];
 let lastGeneratedReportType = "";
@@ -1083,7 +1090,7 @@ function getExamName(date, time, stream) {
     return ""; // No match found
 }
 
-// --- UI: Render the Scheduler Interface ---
+// --- UI: Render the Scheduler Interface (Updated with Lock) ---
 function renderExamNameSettings() {
     const container = document.getElementById('exam-names-grid');
     const section = document.getElementById('exam-names-section');
@@ -1094,21 +1101,27 @@ function renderExamNameSettings() {
 
     if (!container || !section) return;
 
-    // Always show section now
     section.classList.remove('hidden');
     container.innerHTML = '';
 
     // --- 1. ADD NEW ENTRY FORM ---
-    // Ensure currentStreamConfig is loaded, default to Regular if missing
     const streams = (typeof currentStreamConfig !== 'undefined') ? currentStreamConfig : ["Regular"];
     const streamOptions = streams.map(s => `<option value="${s}">${s}</option>`).join('');
     
     const formHtml = `
         <div class="bg-white p-5 rounded-lg border border-gray-200 shadow-sm mb-6">
-            <h3 class="text-base font-bold text-gray-800 mb-4 flex items-center gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-indigo-600"><path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5" /></svg>
-                Schedule New Exam
-            </h3>
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-base font-bold text-gray-800 flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-indigo-600"><path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5" /></svg>
+                    Schedule New Exam
+                </h3>
+                <button id="toggle-exam-rules-lock" class="text-xs flex items-center gap-1 px-3 py-1 rounded transition shadow-sm ${isExamRulesLocked ? 'bg-gray-100 text-gray-600 border border-gray-300 hover:bg-gray-200' : 'bg-red-50 text-red-600 border border-red-200 hover:bg-red-100'}">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="${isExamRulesLocked ? 'M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25 2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z' : 'M13.5 10.5V6.75a4.5 4.5 0 1 1 9 0v3.75M3.75 21.75h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H3.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z'}" />
+                    </svg>
+                    <span>${isExamRulesLocked ? 'List Locked' : 'Unlocked'}</span>
+                </button>
+            </div>
             
             <div class="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
                 <div class="md:col-span-4">
@@ -1158,16 +1171,21 @@ function renderExamNameSettings() {
     // --- 2. LIST EXISTING RULES (Database View) ---
     let listHtml = '';
     if (currentExamRules.length > 0) {
-        // Sort by Start Date
         const sortedRules = [...currentExamRules].sort((a, b) => {
             return new Date(a.startDate) - new Date(b.startDate);
         });
 
         let rows = '';
-        sortedRules.forEach((rule, idx) => {
-            // Format Dates for display (YYYY-MM-DD -> DD/MM)
+        sortedRules.forEach((rule) => {
             const fmt = (d) => d.split('-').reverse().slice(0, 2).join('/');
             
+            // CHECK LOCK STATE FOR DELETE BUTTON
+            const btnState = isExamRulesLocked 
+                ? 'disabled opacity-30 cursor-not-allowed text-gray-400' 
+                : 'text-red-500 hover:text-red-700 cursor-pointer';
+            
+            const onclickAction = isExamRulesLocked ? '' : `onclick="deleteExamRule('${rule.id}')"`;
+
             rows += `
                 <tr class="hover:bg-gray-50 border-b border-gray-100 last:border-0">
                     <td class="px-4 py-3 text-sm font-bold text-gray-800">${rule.examName}</td>
@@ -1180,7 +1198,7 @@ function renderExamNameSettings() {
                         ${fmt(rule.endDate)} <span class="text-xs font-bold text-indigo-600">${rule.endSession}</span>
                     </td>
                     <td class="px-4 py-3 text-right">
-                        <button class="text-red-500 hover:text-red-700 p-1" onclick="deleteExamRule('${rule.id}')" title="Delete">
+                        <button class="p-1 ${btnState}" ${onclickAction} title="${isExamRulesLocked ? 'Unlock list to delete' : 'Delete'}">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" /></svg>
                         </button>
                     </td>
@@ -1209,7 +1227,16 @@ function renderExamNameSettings() {
 
     container.innerHTML = formHtml + listHtml;
 
-    // --- ATTACH LISTENER TO ADD BUTTON ---
+    // --- ATTACH LOCK LISTENER ---
+    const lockBtn = document.getElementById('toggle-exam-rules-lock');
+    if(lockBtn) {
+        lockBtn.addEventListener('click', () => {
+            isExamRulesLocked = !isExamRulesLocked;
+            renderExamNameSettings(); // Re-render UI to reflect new state
+        });
+    }
+
+    // --- ATTACH ADD BUTTON LISTENER ---
     const addBtn = document.getElementById('add-rule-btn');
     if(addBtn) {
         addBtn.addEventListener('click', () => {
@@ -1232,7 +1259,7 @@ function renderExamNameSettings() {
 
             // Create Rule Object
             const newRule = {
-                id: Date.now().toString(), // Simple Unique ID
+                id: Date.now().toString(),
                 examName: name,
                 stream: stream,
                 startDate: sDate,
@@ -1244,7 +1271,7 @@ function renderExamNameSettings() {
             currentExamRules.push(newRule);
             localStorage.setItem(EXAM_RULES_KEY, JSON.stringify(currentExamRules));
             
-            renderExamNameSettings(); // Refresh UI
+            renderExamNameSettings();
             if (typeof syncDataToCloud === 'function') syncDataToCloud();
         });
     }
@@ -4775,11 +4802,13 @@ if (generateAbsenteeReportButton) {
             let totalPages = 0;
             
             const sortedKeys = Object.keys(qpStreamGroups).sort();
-            
+            const selectedFilterQP = absenteeQpFilter ? absenteeQpFilter.value : "all";
             for (const key of sortedKeys) {
                 totalPages++;
                 const data = qpStreamGroups[key];
-                
+                if (selectedFilterQP !== "all" && data.qpCode !== selectedFilterQP) {
+        continue;
+    }
                 const examName = getExamName(date, time, data.stream);
                 const examNameHtml = examName ? `<div style="font-size:14pt; font-weight:bold; margin-top:5px; text-transform:uppercase;">${examName}</div>` : "";
 
@@ -5934,6 +5963,46 @@ function loadAbsenteeList(sessionKey) {
     renderAbsenteeList();
 }
 
+// --- NEW: Populate QP Filter Dropdown for Absentee Tab ---
+function populateAbsenteeQpFilter(sessionKey) {
+    if (!absenteeQpFilter) return;
+    
+    absenteeQpFilter.innerHTML = '<option value="all">All QP Codes (Bulk)</option>';
+    
+    if (!sessionKey) {
+        absenteeQpFilter.disabled = true;
+        return;
+    }
+
+    const [date, time] = sessionKey.split(' | ');
+    const sessionStudents = allStudentData.filter(s => s.Date === date && s.Time === time);
+    loadQPCodes(); // Ensure map is fresh
+    
+    const uniqueQPs = new Set();
+    const sessionQPCodes = qpCodeMap[sessionKey] || {};
+
+    sessionStudents.forEach(student => {
+        const strm = student.Stream || "Regular";
+        const courseKey = getQpKey(student.Course, strm);
+        const code = sessionQPCodes[courseKey];
+        if (code) uniqueQPs.add(code);
+    });
+
+    if (uniqueQPs.size > 0) {
+        const sortedQPs = Array.from(uniqueQPs).sort();
+        sortedQPs.forEach(qp => {
+            const opt = document.createElement('option');
+            opt.value = qp;
+            opt.textContent = qp;
+            absenteeQpFilter.appendChild(opt);
+        });
+        absenteeQpFilter.disabled = false;
+    } else {
+        absenteeQpFilter.innerHTML = '<option value="all">No QP Codes Found</option>';
+        absenteeQpFilter.disabled = true;
+    }
+}
+
 function saveAbsenteeList(sessionKey) {
     const allAbsentees = JSON.parse(localStorage.getItem(ABSENTEE_LIST_KEY) || '{}');
     allAbsentees[sessionKey] = currentAbsenteeList;
@@ -6965,6 +7034,7 @@ for (const student of sessionStudentRecords) {
 // Event Listeners for Room Allotment
 allotmentSessionSelect.addEventListener('change', () => {
     const sessionKey = allotmentSessionSelect.value;
+    populateAbsenteeQpFilter(sessionKey);
     if (sessionKey) {
         loadRoomAllotment(sessionKey);
         loadScribeAllotment(sessionKey); // <-- ADDED: Load scribe data at the same time
@@ -9971,7 +10041,8 @@ if (backupSettingsBtn) {
             ROOM_CONFIG_KEY,     // Room Settings
             STREAM_CONFIG_KEY,   // Stream Settings
             COLLEGE_NAME_KEY,    // College Name
-            SCRIBE_LIST_KEY      // Global Scribe List
+            SCRIBE_LIST_KEY,     // Global Scribe List
+            EXAM_RULES_KEY       // <--- ADD THIS LINE (Exam Schedule)
         ];
 
         settingsKeys.forEach(key => {
@@ -10008,7 +10079,13 @@ if (restoreSettingsBtn && restoreSettingsInput) {
                 let loadedCount = 0;
 
                 // Keys we accept for settings restore
-                const validKeys = [ROOM_CONFIG_KEY, STREAM_CONFIG_KEY, COLLEGE_NAME_KEY, SCRIBE_LIST_KEY];
+                const validKeys = [
+                    ROOM_CONFIG_KEY, 
+                    STREAM_CONFIG_KEY, 
+                    COLLEGE_NAME_KEY, 
+                    SCRIBE_LIST_KEY,
+                    EXAM_RULES_KEY   // <--- ADD THIS LINE
+                ];
 
                 validKeys.forEach(key => {
                     if (settingsData[key]) {
@@ -10018,12 +10095,13 @@ if (restoreSettingsBtn && restoreSettingsInput) {
                 });
 
                 if (loadedCount > 0) {
-                    alert(`Successfully restored ${loadedCount} settings configurations.\n\nSyncing to cloud...`);
+                    alert(`Successfully restored settings configurations.\n\nSyncing to cloud...`);
                     
                     // Update Runtime Variables
-                    loadRoomConfig();
-                    loadStreamConfig();
+                    if (typeof loadRoomConfig === 'function') loadRoomConfig();
+                    if (typeof loadStreamConfig === 'function') loadStreamConfig();
                     if (typeof loadGlobalScribeList === 'function') loadGlobalScribeList();
+                    if (typeof renderExamNameSettings === 'function') renderExamNameSettings(); // Refresh UI
 
                     // Sync
                     if (typeof syncDataToCloud === 'function') await syncDataToCloud();
@@ -10060,14 +10138,20 @@ if (triggerFullRestore) {
 }
     
 // --- V65: Initial Data Load on Startup (Clean Version) ---
+
+// --- V65: Initial Data Load on Startup (Clean Version) ---
 function loadInitialData() {
     try {
         console.log("Loading Local Data...");
 
-        // 1. Load configurations
+        // 1. Load configurations (ALWAYS RUN THESE)
         if (typeof loadRoomConfig === 'function') loadRoomConfig(); 
         if (typeof loadStreamConfig === 'function') loadStreamConfig(); 
         if (typeof initCalendar === 'function') initCalendar();
+        
+        // *** MOVED HERE: Always render Exam Settings, even if no student data exists ***
+        if (typeof renderExamNameSettings === 'function') renderExamNameSettings();
+        // ******************************************************************************
 
         // 2. Check for base student data persistence
         const savedDataJson = localStorage.getItem(BASE_DATA_KEY);
@@ -10090,7 +10174,8 @@ function loadInitialData() {
                     if(typeof populate_room_allotment_session_dropdown === 'function') populate_room_allotment_session_dropdown();
                     if(typeof loadGlobalScribeList === 'function') loadGlobalScribeList();
                     if(typeof updateDashboard === 'function') updateDashboard();
-                    if(typeof renderExamNameSettings === 'function') renderExamNameSettings();
+                    
+                    // NOTE: renderExamNameSettings was removed from here because it's now in Step 1
 
                     console.log(`Successfully loaded ${savedData.length} records.`);
                     const statusLog = document.getElementById("status-log");
@@ -10102,13 +10187,9 @@ function loadInitialData() {
         }
     } catch (criticalError) {
         console.error("CRITICAL APP STARTUP ERROR:", criticalError);
-        // Even on error, we try to finalize so the user isn't stuck
         if (typeof finalizeAppLoad === 'function') finalizeAppLoad();
     }
-    // NOTE: We DO NOT dismiss the loader here anymore. 
-    // 'finalizeAppLoad' will be called by the Cloud Sync logic or Auth logic when ready.
 }
-
 
     // --- NEW: Restore Last Active Tab ---
     function restoreActiveTab() {
