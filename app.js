@@ -1057,29 +1057,50 @@ const restoreFileInput = document.getElementById('restore-file-input');
 const restoreDataButton = document.getElementById('restore-data-button');
 const restoreStatus = document.getElementById('restore-status');
 // *********************************
-// --- NEW: Sidebar Toggle Logic ---
+// --- NEW: Responsive Sidebar Toggle Logic ---
 const toggleButton = document.getElementById('sidebar-toggle');
 const sidebar = document.getElementById('main-nav');
 
 if (toggleButton && sidebar) {
     toggleButton.addEventListener('click', () => {
-        // Toggle sidebar width
-        sidebar.classList.toggle('w-64'); // Full width
-        sidebar.classList.toggle('w-20'); // Collapsed width
+        // Check if we are on Mobile (window width < 768px)
+        const isMobile = window.innerWidth < 768;
 
-        // Toggle padding
-        sidebar.classList.toggle('p-4');
-        sidebar.classList.toggle('p-2'); // Use smaller padding when collapsed
+        if (isMobile) {
+            // On Mobile: Slide the sidebar IN or OUT
+            // We toggle the class that hides it off-screen
+            sidebar.classList.toggle('-translate-x-full');
+            
+            // Optional: Add a click-outside listener to close it
+            if (!sidebar.classList.contains('-translate-x-full')) {
+                // Sidebar is open on mobile, adding a simple close logic could be added here
+            }
+        } else {
+            // On Desktop: Do the existing Collapse/Expand logic
+            sidebar.classList.toggle('w-64'); // Full width
+            sidebar.classList.toggle('w-20'); // Collapsed width
+            
+            sidebar.classList.toggle('p-4');
+            sidebar.classList.toggle('p-2');
 
-        // Toggle visibility of all text spans inside the nav buttons
-        sidebar.querySelectorAll('.nav-button span').forEach(span => {
-            span.classList.toggle('hidden');
-        });
+            // Toggle text visibility
+            sidebar.querySelectorAll('.nav-button span').forEach(span => {
+                span.classList.toggle('hidden');
+            });
 
-        // Toggle centering for the icons
-        sidebar.querySelectorAll('.nav-button').forEach(button => {
-            button.classList.toggle('justify-center');
-        });
+            // Toggle centering icons
+            sidebar.querySelectorAll('.nav-button').forEach(button => {
+                button.classList.toggle('justify-center');
+            });
+        }
+    });
+}
+// --- NEW: Close Sidebar Button Logic ---
+const closeSidebarBtn = document.getElementById('close-sidebar-btn');
+if (closeSidebarBtn) {
+    closeSidebarBtn.addEventListener('click', () => {
+        // Always hide sidebar when X is clicked
+        sidebar.classList.add('-translate-x-full');
     });
 }
 // --- END: Sidebar Toggle Logic ---
@@ -1820,22 +1841,28 @@ function renderCalendar() {
         const rowIndex = Math.floor(cellIndex / 7);
         const isTopRow = rowIndex === 0; 
 
-        const baseClass = "min-h-[90px] bg-white border-r border-b border-gray-200 flex flex-col items-center justify-center relative hover:bg-blue-50 transition group";
-        let circleClass = "w-20 h-20 text-3xl rounded-full flex flex-col items-center justify-center relative font-bold text-gray-700 bg-transparent border border-transparent overflow-hidden";
-        let circleStyle = "";
-        let tooltipHtml = "";
+        // --- FIX: Responsive Classes (Small on Mobile, Big on Desktop) ---
+    const baseClass = "min-h-[60px] md:min-h-[90px] bg-white border-r border-b border-gray-200 flex flex-col items-center justify-center relative hover:bg-blue-50 transition group";
+    
+    // Changed: w-10 h-10 text-sm (Mobile) -> md:w-20 md:h-20 md:text-3xl (Desktop)
+    let circleClass = "w-10 h-10 text-sm md:w-20 md:h-20 md:text-3xl rounded-full flex flex-col items-center justify-center relative font-bold text-gray-700 bg-transparent border border-transparent overflow-hidden";
+    
+    let circleStyle = "";
+    let tooltipHtml = "";
 
-        let dateNumberHtml = `<span class="z-10">${day}</span>`;
-        if (isToday) {
-            dateNumberHtml = `<span class="w-10 h-10 flex items-center justify-center rounded-full bg-blue-600 text-white shadow-md z-20 text-2xl">${day}</span>`;
-        }
+    let dateNumberHtml = `<span class="z-10">${day}</span>`;
+    if (isToday) {
+        // Changed: w-8 h-8 text-sm (Mobile) -> md:w-12 md:h-12 md:text-2xl (Desktop)
+        dateNumberHtml = `<span class="w-8 h-8 md:w-12 md:h-12 flex items-center justify-center rounded-full bg-blue-600 text-white shadow-md z-20 text-sm md:text-2xl">${day}</span>`;
+    }
 
-        if (data) {
-            const hasFN = data.am.students > 0;
-            const hasAN = data.pm.students > 0;
-            
-            if (hasFN || hasAN) {
-                circleClass = "w-20 h-20 text-3xl rounded-full flex flex-col items-center justify-center relative font-bold text-red-900 border border-red-200 overflow-hidden shadow-sm";
+    if (data) {
+        const hasFN = data.am.students > 0;
+        const hasAN = data.pm.students > 0;
+        
+        if (hasFN || hasAN) {
+            // Update the colored circle class too
+            circleClass = "w-10 h-10 text-sm md:w-20 md:h-20 md:text-3xl rounded-full flex flex-col items-center justify-center relative font-bold text-red-900 border border-red-200 overflow-hidden shadow-sm";
                 const cLight = "#fee2e2"; 
                 const cDark = "#fca5a5"; 
 
@@ -1913,7 +1940,8 @@ function renderCalendar() {
                     </div>`;
             }
         } else if (isToday) {
-            circleClass = "w-20 h-20 text-3xl rounded-full flex flex-col items-center justify-center relative font-bold bg-blue-600 text-white shadow-md overflow-hidden";
+            // Update the "Empty Today" circle class
+            circleClass = "w-10 h-10 text-sm md:w-20 md:h-20 md:text-3xl rounded-full flex flex-col items-center justify-center relative font-bold bg-blue-600 text-white shadow-md overflow-hidden";
             dateNumberHtml = `<span class="z-10">${day}</span>`;
         }
 
@@ -5403,11 +5431,19 @@ function showView(viewToShow, buttonToActivate) {
     // 4. Clean up previous reports
     clearReport(); 
     
-    // 5. NEW: Save the active tab to LocalStorage
+    // 5. Save the active tab
     if(viewToShow.id && buttonToActivate.id) {
         localStorage.setItem('lastActiveViewId', viewToShow.id);
         localStorage.setItem('lastActiveNavId', buttonToActivate.id);
     }
+
+    // --- FIX: AUTO-CLOSE SIDEBAR ON MOBILE ---
+    const sidebar = document.getElementById('main-nav');
+    // Check if we are on mobile (width < 768px) AND sidebar is currently open (doesn't have the hide class)
+    if (window.innerWidth < 768 && sidebar && !sidebar.classList.contains('-translate-x-full')) {
+        sidebar.classList.add('-translate-x-full'); // Hide it
+    }
+    // -----------------------------------------
 }
 
 // --- (V48) Save from dynamic form (in Settings) ---
