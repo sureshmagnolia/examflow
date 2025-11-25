@@ -413,9 +413,13 @@ if (window.firebase && window.firebase.auth) {
 }
 // ------------------------------------------
 
-
-
 async function createNewCollege(user) {
+    // 1. ASK FOR NAME
+    let newName = prompt("Please enter the Official Name of your College/Institution:");
+    if (!newName || newName.trim() === "") {
+        newName = "My College Exam Database"; // Fallback
+    }
+
     const { db, collection, addDoc } = window.firebase;
     
     // Prepare initial data from local storage
@@ -429,28 +433,34 @@ async function createNewCollege(user) {
         'examRoomAllotment', 
         'examScribeList', 
         'examScribeAllotment',
-        'examRulesConfig' // <--- ADD THIS LINE
+        'examRulesConfig' 
     ];
     keysToSync.forEach(key => {
         const val = localStorage.getItem(key);
         if(val) initialData[key] = val;
     });
 
+    // 2. OVERWRITE NAME TO CLOUD DATA
+    initialData.examCollegeName = newName; 
+    localStorage.setItem('examCollegeName', newName); 
+
     // Metadata
     initialData.admins = [user.email];
-    initialData.allowedUsers = [user.email]; // CRITICAL for security rules
+    initialData.allowedUsers = [user.email]; 
     initialData.lastUpdated = new Date().toISOString();
 
     try {
         const docRef = await window.firebase.addDoc(window.firebase.collection(db, "colleges"), initialData);
         currentCollegeId = docRef.id;
-        alert("✅ New College Database Created! You are the Admin.");
-        syncDataFromCloud(currentCollegeId); // Reload to confirm
+        alert(`✅ Database Created for "${newName}"!\nYou are the Admin.`);
+        syncDataFromCloud(currentCollegeId); 
     } catch (e) {
         console.error("Creation failed:", e);
         alert("Failed to create database. " + e.message);
     }
 }
+
+
 // ==========================================
 // ☁️ CLOUD SYNC FUNCTIONS (Fixed & Updated)
 // ==========================================
@@ -519,7 +529,37 @@ function syncDataFromCloud(collegeId) {
             ].forEach(key => {
                 if (mainData[key]) localStorage.setItem(key, mainData[key]);
             });
+            updateHeaderCollegeName(); // <--- ADD THIS LINE HERE
 
+            // -------------------------------------------------------
+            // 🔄 LEGACY MIGRATION: Auto-Prompt for Missing Name
+            // -------------------------------------------------------
+            // Check if Name is missing OR is the default, AND if user is Admin
+            const currentName = mainData.examCollegeName || "University of Calicut";
+            const isDefault = (currentName === "University of Calicut");
+            const isAdmin = (currentUser && mainData.admins && mainData.admins.includes(currentUser.email));
+
+            if (isDefault && isAdmin) {
+                setTimeout(() => {
+                    const newName = prompt("⚠️ SYSTEM UPDATE ⚠️\n\nYour College Name is not set.\nPlease enter the Official Name of your College to display on the header and reports:");
+                    
+                    if (newName && newName.trim() !== "") {
+                        // 1. Save Locally
+                        localStorage.setItem(COLLEGE_NAME_KEY, newName);
+                        currentCollegeName = newName;
+                        
+                        // 2. Update UI
+                        updateHeaderCollegeName();
+                        if (typeof collegeNameInput !== 'undefined') collegeNameInput.value = newName;
+
+                        // 3. Force Sync to Cloud (Saves it forever)
+                        syncDataToCloud();
+                        alert("✅ Name Updated! It will now appear on all screens.");
+                    }
+                }, 1000); // Small delay to let the UI load first
+            }
+            // -------------------------------------------------------
+            
             // 2. FETCH CHUNKS
             try {
                 const dataColRef = collection(db, "colleges", collegeId, "data");
@@ -663,7 +703,29 @@ async function syncDataToCloud() {
         }
         
         const bulkString = JSON.stringify(bulkDataObj);
-        const chunks = chunkString(bulkString, 800000); 
+
+        // 🛑 LIMIT CHECK LOGIC STARTS HERE 🛑
+        // 1. Calculate Size (in Bytes)
+        const payloadSize = new Blob([bulkString]).size;
+        const payloadSizeMB = (payloadSize / (1024 * 1024)).toFixed(2);
+
+        // 2. Get Limit from Cloud Data (Default to 15MB if not set)
+        // 'storageLimitBytes' is the field Super Admin will set
+        const limitBytes = currentCollegeData.storageLimitBytes || (15 * 1024 * 1024); 
+        const limitMB = (limitBytes / (1024 * 1024)).toFixed(2);
+
+        console.log(`Data Size: ${payloadSizeMB} MB / Limit: ${limitMB} MB`);
+
+        if (payloadSize > limitBytes) {
+            alert(`⚠️ STORAGE LIMIT EXCEEDED ⚠️\n\nYour data size (${payloadSizeMB} MB) exceeds the allowed limit (${limitMB} MB) for your college.\n\nAction Required:\n1. Go to 'Danger Zone' or 'Settings'.\n2. Delete old student data or clear Absentees/Room Allotments.\n3. Try syncing again.`);
+            
+            updateSyncStatus("Over Limit", "error");
+            isSyncing = false;
+            return; // <--- STOP THE UPLOAD
+        }
+        // 🛑 LIMIT CHECK ENDS 🛑
+
+        const chunks = chunkString(bulkString, 800000);
 
         // --- STEP 5: Commit ---
         batch.update(mainRef, finalMainData);
@@ -1523,6 +1585,17 @@ function chunkString(str, size) {
     return chunks;
 }
 
+function updateHeaderCollegeName() {
+    const headerNameEl = document.getElementById('header-college-name');
+    // Read from local storage which is kept in sync
+    const storedName = localStorage.getItem(COLLEGE_NAME_KEY) || "University of Calicut";
+    
+    if (headerNameEl) {
+        headerNameEl.textContent = storedName;
+    }
+    // Also update global variable if needed
+    currentCollegeName = storedName;
+}
 // --- Update Dashboard Function (Global + Today + Smart Date Picker + Data Status) ---
 // [In app.js - Replace the existing updateDashboard function]
 
@@ -6882,7 +6955,7 @@ window.deleteRoom = function(index) {
     }
 };
 
-// Show room selection modal (Updated with Capacity Tags)
+// Show room selection modal (Updated: Excludes Scribe Rooms)
 function showRoomSelectionModal() {
     getRoomCapacitiesFromStorage();
     roomSelectionList.innerHTML = '';
@@ -6926,9 +6999,17 @@ function showRoomSelectionModal() {
     `;
     roomSelectionList.insertAdjacentHTML('beforeend', streamSelectHtml);
 
-    // 2. List Rooms
-    const allottedRoomNames = currentSessionAllotment.map(r => r.roomName);
+    // 2. List Rooms (Updated Logic)
     
+    // A. Regular Allotted Rooms
+    const allottedRoomNames = currentSessionAllotment.map(r => r.roomName);
+
+    // B. Scribe Allotted Rooms (NEW CHECK)
+    // We fetch the scribe data to ensure we don't double-book a room used by a scribe
+    const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
+    const sessionScribeMap = allScribeAllotments[currentSessionKey] || {};
+    const scribeRoomNames = Object.values(sessionScribeMap); // Array of rooms used by scribes
+
     const sortedRoomNames = Object.keys(currentRoomConfig).sort((a, b) => {
         const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
         const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
@@ -6938,9 +7019,13 @@ function showRoomSelectionModal() {
     sortedRoomNames.forEach(roomName => {
         const room = currentRoomConfig[roomName];
         const location = room.location ? ` (${room.location})` : '';
-        const isAllotted = allottedRoomNames.includes(roomName);
         
-        // --- NEW: Capacity Tag Logic ---
+        // Check Status: Is it used by Regular OR Scribe?
+        const isRegularAllotted = allottedRoomNames.includes(roomName);
+        const isScribeAllotted = scribeRoomNames.includes(roomName);
+        const isUnavailable = isRegularAllotted || isScribeAllotted;
+        
+        // Capacity Badge
         let capBadge = "";
         const capNum = parseInt(room.capacity) || 30;
         if (capNum > 30) {
@@ -6948,21 +7033,28 @@ function showRoomSelectionModal() {
         } else if (capNum < 30) {
             capBadge = `<span class="ml-2 text-[10px] font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200">▼ ${capNum}</span>`;
         }
-        // -------------------------------
         
         const roomOption = document.createElement('div');
-        roomOption.className = `p-3 border border-gray-300 rounded-md cursor-pointer hover:bg-blue-50 mb-2 ${isAllotted ? 'opacity-50 cursor-not-allowed' : ''}`;
+        roomOption.className = `p-3 border border-gray-300 rounded-md cursor-pointer hover:bg-blue-50 mb-2 ${isUnavailable ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`;
         
+        // Status Message Logic
+        let statusMsg = "";
+        if (isRegularAllotted) {
+            statusMsg = '<div class="text-xs text-red-600 mt-1 font-bold">Already Allotted</div>';
+        } else if (isScribeAllotted) {
+            statusMsg = '<div class="text-xs text-orange-600 mt-1 font-bold">Occupied by Scribe</div>';
+        }
+
         roomOption.innerHTML = `
             <div class="flex justify-between items-center">
                 <div class="font-medium text-gray-800">${roomName}${location}</div>
                 ${capBadge}
             </div>
             <div class="text-sm text-gray-600 mt-1">Standard Capacity: ${room.capacity}</div>
-            ${isAllotted ? '<div class="text-xs text-red-600 mt-1 font-bold">Already allotted</div>' : ''}
+            ${statusMsg}
         `;
         
-        if (!isAllotted) {
+        if (!isUnavailable) {
             roomOption.onclick = () => {
                 const selectedStream = document.getElementById('allotment-stream-select').value;
                 selectRoomForAllotment(roomName, room.capacity, selectedStream);
@@ -6975,7 +7067,7 @@ function showRoomSelectionModal() {
     roomSelectionModal.classList.remove('hidden');
 }
 
-// Select a room and allot students (Updated for Stream)
+// Select a room and allot students (Fixed: Adds Save Step)
 function selectRoomForAllotment(roomName, capacity, targetStream) {
     const [date, time] = currentSessionKey.split(' | ');
     
@@ -6989,9 +7081,6 @@ function selectRoomForAllotment(roomName, capacity, targetStream) {
     });
 
     // 3. Find unallotted students MATCHING THE TARGET STREAM
-    // Also exclude Scribes (they are handled separately)
-    const scribeRegNos = new Set((JSON.parse(localStorage.getItem(SCRIBE_LIST_KEY) || '[]')).map(s => s.regNo));
-
     const candidates = [];
     // Sort first to ensure consistent filling (Stream -> Course -> RegNo)
     sessionStudentRecords.sort((a, b) => {
@@ -6999,15 +7088,15 @@ function selectRoomForAllotment(roomName, capacity, targetStream) {
         return a['Register Number'].localeCompare(b['Register Number']);
     });
 
-for (const student of sessionStudentRecords) {
-    const regNo = student['Register Number'];
-    const studentStream = student.Stream || "Regular"; // Default
+    for (const student of sessionStudentRecords) {
+        const regNo = student['Register Number'];
+        const studentStream = student.Stream || "Regular"; // Default
 
-    // Condition: Not Allotted AND Matches Selected Stream (Scribes allowed)
-    if (!allottedRegNos.has(regNo) && studentStream === targetStream) {
-        candidates.push(regNo);
+        // Condition: Not Allotted AND Matches Selected Stream (Scribes allowed)
+        if (!allottedRegNos.has(regNo) && studentStream === targetStream) {
+            candidates.push(regNo);
+        }
     }
-}
     
     // 4. Allot up to capacity
     const newStudentRegNos = candidates.slice(0, capacity);
@@ -7025,11 +7114,16 @@ for (const student of sessionStudentRecords) {
         stream: targetStream // Save the stream tag for this room
     });
     
+    // --- FIX: SAVE TO LOCAL STORAGE IMMEDIATELY ---
+    saveRoomAllotment(); 
+    // ----------------------------------------------
+
     roomSelectionModal.classList.add('hidden');
     updateAllotmentDisplay();
     
     if (typeof syncDataToCloud === 'function') syncDataToCloud();
 }
+
 
 // Event Listeners for Room Allotment
 allotmentSessionSelect.addEventListener('change', () => {
@@ -7325,6 +7419,12 @@ function renderScribeAllotmentList(sessionKey) {
     
     uniqueSessionScribeStudents.sort((a,b) => a['Register Number'].localeCompare(b['Register Number']));
 
+    // --- NEW: Update Count Header with Badge ---
+    const headerEl = document.getElementById('scribe-session-header');
+    if (headerEl) {
+        headerEl.innerHTML = `Scribe Students for this Session: <span class="ml-2 bg-orange-100 text-orange-800 text-sm font-bold px-2 py-0.5 rounded-full border border-orange-200">${uniqueSessionScribeStudents.length}</span>`;
+    }
+    // -------------------------------------------
     // --- NEW: Get Serial Map (Needed to look up serial number when rendering) ---
     const roomSerialMap = getRoomSerialMap(sessionKey);
     // ---------------------------------------------------------------------------
@@ -9075,6 +9175,7 @@ if(superAdminBtn) {
     superAdminBtn.addEventListener('click', () => {
         superAdminModal.classList.remove('hidden');
         loadWhitelist();
+        loadAllCollegesForAdmin(); // <--- ADD THIS LINE
     });
 }
 
@@ -9121,6 +9222,42 @@ async function loadWhitelist() {
     }
 }
 
+// --- NEW: Fetch All Colleges for Dropdown ---
+async function loadAllCollegesForAdmin() {
+    const selectEl = document.getElementById('admin-college-select');
+    if (!selectEl) return;
+
+    selectEl.innerHTML = '<option>Loading...</option>';
+    const { db, collection, getDocs } = window.firebase;
+
+    try {
+        const colRef = collection(db, "colleges");
+        const snap = await getDocs(colRef);
+
+        if (snap.empty) {
+            selectEl.innerHTML = '<option value="">No colleges found</option>';
+            return;
+        }
+
+        selectEl.innerHTML = '<option value="">-- Select a College --</option>';
+        
+        snap.forEach(doc => {
+            const data = doc.data();
+            const name = data.examCollegeName || "Unnamed College";
+            const id = doc.id;
+            
+            // Show Name + ID for clarity
+            const opt = document.createElement('option');
+            opt.value = id;
+            opt.textContent = `${name} (${id})`;
+            selectEl.appendChild(opt);
+        });
+
+    } catch (e) {
+        console.error("Error fetching colleges:", e);
+        selectEl.innerHTML = '<option>Error loading list</option>';
+    }
+}
 // 4. ADD TO WHITELIST
 if(addWhitelistBtn) {
     addWhitelistBtn.addEventListener('click', async () => {
@@ -9160,7 +9297,45 @@ window.removeFromWhitelist = async function(email) {
         alert("Error: " + e.message);
     }
 };
+// 6. SET STORAGE LIMIT (SUPER ADMIN) - UPDATED
+const setLimitBtn = document.getElementById('set-limit-btn');
+const adminCollegeSelect = document.getElementById('admin-college-select'); // <--- UPDATED ID
+const adminStorageLimitInput = document.getElementById('admin-storage-limit');
 
+if(setLimitBtn) {
+    setLimitBtn.addEventListener('click', async () => {
+        // <--- UPDATED: Get value from Select, not Input
+        const targetCollegeId = adminCollegeSelect.value; 
+        const limitMB = parseFloat(adminStorageLimitInput.value);
+
+        if (!targetCollegeId) return alert("Please select a College from the list.");
+        if (!limitMB || limitMB <= 0) return alert("Please enter a valid MB limit.");
+
+        const bytes = Math.floor(limitMB * 1024 * 1024);
+        
+        const { db, doc, updateDoc } = window.firebase;
+        setLimitBtn.textContent = "Updating...";
+
+        try {
+            const collegeRef = doc(db, "colleges", targetCollegeId);
+            
+            await updateDoc(collegeRef, {
+                storageLimitBytes: bytes
+            });
+
+            // Get selected text for nicer alert
+            const selectedText = adminCollegeSelect.options[adminCollegeSelect.selectedIndex].text;
+            alert(`✅ Success! Limit for '${selectedText}' set to ${limitMB} MB.`);
+            
+            adminStorageLimitInput.value = '';
+        } catch (e) {
+            console.error(e);
+            alert("Failed to update limit. " + e.message);
+        } finally {
+            setLimitBtn.textContent = "Set Limit";
+        }
+    });
+}
 // --- REPLACEMENT FOR findMyCollege ---
 async function findMyCollege(user) {
     // Run Super Admin Check
@@ -10138,12 +10313,10 @@ if (triggerFullRestore) {
 }
     
 // --- V65: Initial Data Load on Startup (Clean Version) ---
-
-// --- V65: Initial Data Load on Startup (Clean Version) ---
 function loadInitialData() {
     try {
         console.log("Loading Local Data...");
-
+        updateHeaderCollegeName(); // <--- ADD THIS LINE HERE
         // 1. Load configurations (ALWAYS RUN THESE)
         if (typeof loadRoomConfig === 'function') loadRoomConfig(); 
         if (typeof loadStreamConfig === 'function') loadStreamConfig(); 
