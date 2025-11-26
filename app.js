@@ -187,6 +187,12 @@ function finalizeAppLoad() {
     dismissLoader(); // Safely remove the loader once all is done
 }
 
+let currentUser = null;
+let currentCollegeId = null; // The shared document ID
+let currentCollegeData = null; // Holds the full data including permissions
+let isSyncing = false;
+let cloudSyncUnsubscribe = null; // [NEW] To track the active listener
+
 // --- MAIN APP LOGIC ---
 document.addEventListener('DOMContentLoaded', () => {
 
@@ -337,11 +343,6 @@ const absenteeQpFilter = document.getElementById('absentee-qp-filter');
 const SUPER_ADMIN_EMAIL = "sureshmagnolia@gmail.com"; 
 // ******************************
 
-let currentUser = null;
-let currentCollegeId = null; // The shared document ID
-let currentCollegeData = null; // Holds the full data including permissions
-let isSyncing = false;
-let cloudSyncUnsubscribe = null; // [NEW] To track the active listener
 
 // [NEW] Network Connectivity Listeners
 window.addEventListener('online', () => {
@@ -611,15 +612,14 @@ function syncDataFromCloud(collegeId) {
         if (typeof finalizeAppLoad === 'function') finalizeAppLoad();
     });
 }
-// 4. CLOUD UPLOAD FUNCTION (Network Aware)
+
+// 4. CLOUD UPLOAD FUNCTION (Network Aware + Smart Filtering)
 async function syncDataToCloud() {
     if (!currentUser || !currentCollegeId) return;
     if (isSyncing) return;
     
-    // [NEW] Offline Check
     if (!navigator.onLine) {
         updateSyncStatus("Offline - Saved Locally", "error");
-        console.log("⚠️ Offline. Data saved to LocalStorage only.");
         return;
     }
     
@@ -632,14 +632,12 @@ async function syncDataToCloud() {
         const batch = writeBatch(db);
         const mainRef = doc(db, "colleges", currentCollegeId);
 
-        // --- STEP 1: Fetch Current Cloud State ---
+        // --- STEP 1: Fetch Cloud State ---
         const cloudSnap = await getDoc(mainRef);
         let cloudData = {};
-        if (cloudSnap.exists()) {
-            cloudData = cloudSnap.data();
-        }
+        if (cloudSnap.exists()) cloudData = cloudSnap.data();
 
-// --- STEP 2: Smart Merge Helpers ---
+        // --- STEP 2: Merge Settings ---
         const isEmptyOrDefault = (key, val) => {
             if (!val) return true;
             if (key === 'examCollegeName') return val === "University of Calicut";
@@ -649,97 +647,157 @@ async function syncDataToCloud() {
             if (key === 'examQPCodes') return val === '{}';
             if (key === 'examAbsenteeList') return val === '{}';
             if (key === 'examSessionNames') return val === '{}';
-            // if (key === 'examRulesConfig') return val === '[]'; // <--- ADD THIS LINE
+            if (key === 'examRemunerationConfig') return false; 
             if (key === 'examRoomAllotment' || key === 'examScribeAllotment') return val === '{}' || val.length < 5; 
             return false;
         };
 
         const pickRobusterValue = (key, localVal, cloudVal) => {
             if (!localVal) {
-                if (cloudVal) {
-                    localStorage.setItem(key, cloudVal); 
-                    return cloudVal;
-                }
+                if (cloudVal) { localStorage.setItem(key, cloudVal); return cloudVal; }
                 return null;
             }
             if (!cloudVal) return localVal;
-            
             if (isEmptyOrDefault(key, localVal) && !isEmptyOrDefault(key, cloudVal)) {
-                localStorage.setItem(key, cloudVal); 
-                return cloudVal;
+                localStorage.setItem(key, cloudVal); return cloudVal;
             }
             return localVal;
         };
 
-        // --- STEP 3: Prepare Main Data ---
         const timestamp = new Date().toISOString();
         localStorage.setItem('lastUpdated', timestamp);
 
         const settingsKeys = [
-            'examCollegeName', 
-            'examStreamsConfig', 
-            'examRoomConfig', 
-            'examQPCodes', 
-            'examScribeList', 
-            'examScribeAllotment', 
-            'examAbsenteeList',
-            'examSessionNames',
-            'examRulesConfig' // <--- ADD THIS LINE (To save to Cloud)
+            'examCollegeName', 'examStreamsConfig', 'examRoomConfig', 
+            'examQPCodes', 'examScribeList', 'examScribeAllotment', 
+            'examAbsenteeList', 'examSessionNames', 'examRulesConfig',
+            'examRemunerationConfig'
         ];
 
         const finalMainData = { lastUpdated: timestamp };
-
         settingsKeys.forEach(key => {
             const localVal = localStorage.getItem(key);
-            const cloudVal = cloudData[key];
-            const bestVal = pickRobusterValue(key, localVal, cloudVal);
+            const bestVal = pickRobusterValue(key, localVal, cloudData[key]);
             if (bestVal) finalMainData[key] = bestVal;
         });
 
-        // --- STEP 4: Prepare Bulk Data ---
+        // --- STEP 3: Bulk Data Handling ---
         const localBaseData = localStorage.getItem('examBaseData');
         let localAllotment = localStorage.getItem('examRoomAllotment');
-        
         const bulkDataObj = {};
         if (localBaseData) bulkDataObj['examBaseData'] = localBaseData;
-        
-        if (localAllotment && localAllotment !== '{}') {
-            bulkDataObj['examRoomAllotment'] = localAllotment;
-        }
+        if (localAllotment && localAllotment !== '{}') bulkDataObj['examRoomAllotment'] = localAllotment;
         
         const bulkString = JSON.stringify(bulkDataObj);
-
-        // 🛑 LIMIT CHECK LOGIC STARTS HERE 🛑
-        // 1. Calculate Size (in Bytes)
-        const payloadSize = new Blob([bulkString]).size;
-        const payloadSizeMB = (payloadSize / (1024 * 1024)).toFixed(2);
-
-        // 2. Get Limit from Cloud Data (Default to 15MB if not set)
-        // 'storageLimitBytes' is the field Super Admin will set
         const limitBytes = currentCollegeData.storageLimitBytes || (15 * 1024 * 1024); 
-        const limitMB = (limitBytes / (1024 * 1024)).toFixed(2);
-
-        console.log(`Data Size: ${payloadSizeMB} MB / Limit: ${limitMB} MB`);
-
-        if (payloadSize > limitBytes) {
-            alert(`⚠️ STORAGE LIMIT EXCEEDED ⚠️\n\nYour data size (${payloadSizeMB} MB) exceeds the allowed limit (${limitMB} MB) for your college.\n\nAction Required:\n1. Go to 'Danger Zone' or 'Settings'.\n2. Delete old student data or clear Absentees/Room Allotments.\n3. Try syncing again.`);
-            
+        
+        if (new Blob([bulkString]).size > limitBytes) {
+            alert(`⚠️ STORAGE LIMIT EXCEEDED ⚠️\n\nPlease delete old data.`);
             updateSyncStatus("Over Limit", "error");
             isSyncing = false;
-            return; // <--- STOP THE UPLOAD
+            return; 
         }
-        // 🛑 LIMIT CHECK ENDS 🛑
 
         const chunks = chunkString(bulkString, 800000);
-
-        // --- STEP 5: Commit ---
         batch.update(mainRef, finalMainData);
-
         chunks.forEach((chunkStr, index) => {
             const chunkRef = doc(db, "colleges", currentCollegeId, "data", `chunk_${index}`);
             batch.set(chunkRef, { payload: chunkStr, index: index, totalChunks: chunks.length });
         });
+
+        // ============================================================
+        // 🚀 SECURE PUBLIC SYNC (OPTIMIZED: TODAY & FUTURE ONLY)
+        // ============================================================
         
+        const collegeName = localStorage.getItem('examCollegeName') || "Exam Centre";
+        const roomConfigData = localStorage.getItem('examRoomConfig') || '{}';
+        
+        // 1. Prepare Filters
+        const todayMidnight = new Date();
+        todayMidnight.setHours(0,0,0,0);
+        
+        // Helper to parse "DD.MM.YYYY"
+        const parseDateKey = (dStr) => {
+            if (!dStr) return new Date(0);
+            const [d, m, y] = dStr.split('.');
+            return new Date(`${y}-${m}-${d}`);
+        };
+
+        // 2. Filter Allotment (Seating Data)
+        let publicAllotment = {};
+        const rawAllotment = JSON.parse(localAllotment || '{}');
+        const activeRegNos = new Set(); // Track students who have future exams
+
+        Object.keys(rawAllotment).forEach(sessionKey => {
+            const [dateStr] = sessionKey.split(' | ');
+            const examDate = parseDateKey(dateStr);
+            
+            // KEEP if Exam is Today or Future
+            if (examDate >= todayMidnight) {
+                publicAllotment[sessionKey] = rawAllotment[sessionKey];
+                
+                // Collect active students
+                rawAllotment[sessionKey].forEach(room => {
+                    room.students.forEach(regNo => activeRegNos.add(regNo));
+                });
+            }
+        });
+
+        // 3. Filter Names & Papers (Based on Active Students/Dates)
+        let nameMap = {};
+        let paperMap = {}; 
+        
+        if (localBaseData) {
+             try {
+                 const baseData = JSON.parse(localBaseData);
+                 baseData.forEach(s => {
+                     const r = s['Register Number'];
+                     
+                     // Optimization: Only process if this student has an upcoming exam
+                     if (r && activeRegNos.has(r)) {
+                         const n = s.Name;
+                         const c = s.Course;
+                         const d = s.Date;
+                         const t = s.Time;
+                         const cleanReg = r.toString().trim().toUpperCase();
+
+                         // Add Name
+                         if (n) nameMap[cleanReg] = n.toString().trim();
+                         
+                         // Add Paper (Only if date is valid)
+                         if (c && d && t) {
+                             const examDate = parseDateKey(d);
+                             if (examDate >= todayMidnight) {
+                                 const paperKey = `${cleanReg}_${d}_${t}`;
+                                 paperMap[paperKey] = c.toString().trim();
+                             }
+                         }
+                     }
+                 });
+             } catch (e) { console.error("Error filtering public data", e); }
+        }
+
+        // 4. Upload 3 Split Documents
+        const publicRef = doc(db, "public_seating", currentCollegeId);
+        const namesRef = doc(db, "public_seating", currentCollegeId + "_names");
+        const coursesRef = doc(db, "public_seating", currentCollegeId + "_courses");
+
+        // Doc A: Seating
+        batch.set(publicRef, {
+            collegeName: collegeName,
+            seatingData: JSON.stringify(publicAllotment), // Filtered JSON
+            roomData: roomConfigData,
+            lastUpdated: new Date().toISOString()
+        });
+
+        // Doc B: Names (Filtered)
+        batch.set(namesRef, { json: JSON.stringify(nameMap) });
+
+        // Doc C: Courses (Filtered)
+        batch.set(coursesRef, { json: JSON.stringify(paperMap) });
+        
+        // ============================================================
+
         await batch.commit();
         
         console.log(`Data synced!`);
@@ -749,21 +807,13 @@ async function syncDataToCloud() {
     } catch (e) {
         console.error("Sync Up Error:", e);
         if (e.code === 'not-found') {
-             try {
-                 await window.firebase.setDoc(window.firebase.doc(db, "colleges", currentCollegeId), { lastUpdated: new Date().toISOString() });
-             } catch (retryErr) {}
+             try { await window.firebase.setDoc(window.firebase.doc(db, "colleges", currentCollegeId), { lastUpdated: new Date().toISOString() }); } catch (retryErr) {}
         }
-        // Check if error is network related
-        if (e.code === 'unavailable' || !navigator.onLine) {
-             updateSyncStatus("Offline - Saved Locally", "error");
-        } else {
-             updateSyncStatus("Save Fail", "error");
-        }
+        updateSyncStatus(navigator.onLine ? "Save Fail" : "Offline - Saved Locally", "error");
     } finally {
         isSyncing = false;
     }
 }
-
 // --- 3. ADMIN / TEAM MANAGEMENT LOGIC ---
 
 adminBtn.addEventListener('click', () => {
@@ -902,6 +952,9 @@ const navSettings = document.getElementById('nav-settings');
 const navQPCodes = document.getElementById('nav-qpcodes');
 const navReports = document.getElementById('nav-reports');
 const navAbsentees = document.getElementById('nav-absentees');
+const navRemuneration = document.getElementById('nav-remuneration');
+const viewRemuneration = document.getElementById('view-remuneration');
+const btnAutoCalcBill = document.getElementById('btn-auto-calculate-bill');
 const navScribeSettings = document.getElementById('nav-scribe-settings');
 const navRoomAllotment = document.getElementById('nav-room-allotment');
 const viewRoomAllotment = document.getElementById('view-room-allotment');
@@ -934,8 +987,9 @@ const modalCloseSearchResult = document.getElementById('modal-close-search-resul
 // ***************************
 
 const viewEditData = document.getElementById('view-edit-data');
-const allNavButtons = [navHome, navExtractor, navEditData, navScribeSettings, navRoomAllotment, navQPCodes, navSearch, navReports, navAbsentees, navSettings];
-const allViews = [viewHome, viewExtractor, viewEditData, viewScribeSettings, viewRoomAllotment, viewQPCodes, viewSearch, viewReports, viewAbsentees, viewSettings];
+// Update these two lines to include 'navRemuneration' and 'viewRemuneration'
+const allNavButtons = [navHome, navExtractor, navEditData, navScribeSettings, navRoomAllotment, navQPCodes, navSearch, navReports, navAbsentees, navSettings, navRemuneration];
+const allViews = [viewHome, viewExtractor, viewEditData, viewScribeSettings, viewRoomAllotment, viewQPCodes, viewSearch, viewReports, viewAbsentees, viewSettings, viewRemuneration];
 
 // --- (V26) Get references to NEW Room Settings elements (Now in Settings Tab) ---
 const collegeNameInput = document.getElementById('college-name-input');
@@ -4644,7 +4698,7 @@ generateQPaperReportButton.addEventListener('click', async () => {
     }
 });
 
-// --- Event listener for "Generate QP Distribution Report" (Stream-Aware) ---
+// --- Event listener for "Generate QP Distribution Report" (Wider Boxes + 2-Word Loc) ---
 if (generateQpDistributionReportButton) {
     generateQpDistributionReportButton.addEventListener('click', async () => {
         const sessionKey = reportsSessionSelect.value; 
@@ -4667,98 +4721,171 @@ if (generateQpDistributionReportButton) {
             const processed_rows_with_rooms = performOriginalAllocation(data);
             const sessions = {};
             
+            // 1. Grouping Logic
             for (const student of processed_rows_with_rooms) {
                 const sessionKey = `${student.Date}_${student.Time}`;
                 const roomName = student['Room No'];
-                const courseName = student.Course;
-                const streamName = student.Stream || "Regular"; 
-
-                // *** FIX: Use Stream-Aware Key ***
-                const courseKey = getQpKey(courseName, streamName);
+                const streamName = student.Stream || "Regular";
+                const paperKey = getQpKey(student.Course, streamName); 
+                
                 const sessionKeyPipe = `${student.Date} | ${student.Time}`;
                 const sessionQPCodes = qpCodeMap[sessionKeyPipe] || {};
-                const qpCode = sessionQPCodes[courseKey] || 'N/A'; 
+                const qpCodeDisplay = sessionQPCodes[paperKey] || 'N/A'; 
 
                 if (!sessions[sessionKey]) {
-                    sessions[sessionKey] = { Date: student.Date, Time: student.Time, qpCodes: {} };
-                }
-                
-                if (!sessions[sessionKey].qpCodes[qpCode]) {
-                    sessions[sessionKey].qpCodes[qpCode] = {
-                        courseNames: new Set(),
-                        rooms: {},
-                        total: 0,
-                        streamTotals: {}
+                    sessions[sessionKey] = { 
+                        Date: student.Date, 
+                        Time: student.Time, 
+                        papers: {} 
                     };
                 }
                 
-                const qpEntry = sessions[sessionKey].qpCodes[qpCode];
-                qpEntry.courseNames.add(courseName);
-                qpEntry.total++;
+                let paperEntry = sessions[sessionKey].papers[paperKey];
                 
-                if (!qpEntry.streamTotals[streamName]) qpEntry.streamTotals[streamName] = 0;
-                qpEntry.streamTotals[streamName]++;
-
-                if (!qpEntry.rooms[roomName]) {
-                    qpEntry.rooms[roomName] = { total: 0, streams: {} };
+                if (!paperEntry) {
+                    paperEntry = {
+                        courseName: student.Course,
+                        stream: streamName,
+                        qpCode: qpCodeDisplay,
+                        total: 0,
+                        rooms: {}
+                    };
+                    sessions[sessionKey].papers[paperKey] = paperEntry;
                 }
                 
-                qpEntry.rooms[roomName].total++;
-                if (!qpEntry.rooms[roomName].streams[streamName]) {
-                    qpEntry.rooms[roomName].streams[streamName] = 0;
+                paperEntry.total++;
+                
+                if (!paperEntry.rooms[roomName]) {
+                    paperEntry.rooms[roomName] = 0;
                 }
-                qpEntry.rooms[roomName].streams[streamName]++;
+                paperEntry.rooms[roomName]++;
             }
             
-            // ... (Rest of the HTML generation logic remains same as V3) ...
-            // For brevity, reusing the existing HTML generation logic from V3 you have.
-            // Just ensure the loop above is replaced.
-            
+            // 2. Rendering Logic
             let allPagesHtml = '';
-            const sortedSessionKeys = Object.keys(sessions).sort();
+            const sortedSessionKeys = Object.keys(sessions).sort(compareSessionStrings);
             
             for (const sessionKey of sortedSessionKeys) {
                 const session = sessions[sessionKey];
                 const sessionKeyPipe = `${session.Date} | ${session.Time}`;
                 const roomSerialMap = getRoomSerialMap(sessionKeyPipe);
 
-                allPagesHtml += `<div class="print-page"><div class="print-header-group"><h1>${currentCollegeName}</h1><h2>Question Paper Distribution</h2><h3>${session.Date} &nbsp;|&nbsp; ${session.Time}</h3></div>`;
-                const sortedQPCodes = Object.keys(session.qpCodes).sort();
+                allPagesHtml += `
+                    <div class="print-page" style="padding: 5mm !important;">
+                        <div class="print-header-group text-center mb-3 border-b-2 border-black pb-1">
+                            <h1 class="text-lg font-bold uppercase leading-tight">${currentCollegeName}</h1>
+                            <h2 class="text-base font-semibold">QP Distribution Summary</h2>
+                            <h3 class="text-sm">${session.Date} &nbsp;|&nbsp; ${session.Time}</h3>
+                        </div>
+                `;
+                
+                const paperArray = Object.values(session.papers);
 
-                for (const qpCode of sortedQPCodes) {
-                    const qpData = session.qpCodes[qpCode];
-                    const courseList = Array.from(qpData.courseNames).sort().join(', ');
-                    const grandStreamParts = [];
-                    Object.entries(qpData.streamTotals).forEach(([strm, cnt]) => grandStreamParts.push(`${strm}: ${cnt}`));
+                // Sort Papers
+                paperArray.sort((a, b) => {
+                    const isRegA = a.stream === "Regular";
+                    const isRegB = b.stream === "Regular";
+                    if (isRegA && !isRegB) return -1;
+                    if (!isRegA && isRegB) return 1;
+                    if (a.stream !== b.stream) return a.stream.localeCompare(b.stream);
+                    return a.courseName.localeCompare(b.courseName);
+                });
 
-                    allPagesHtml += `
-                        <div style="margin-top: 1.5rem; border: 1px solid #000; padding: 10px; page-break-inside: avoid;">
-                            <h4 style="font-size: 12pt; font-weight: bold; margin: 0; border-bottom: 1px dotted #000; padding-bottom: 5px;">QP Code: <span style="background-color:#eee; padding:2px 5px;">${qpCode}</span></h4>
-                            <div style="font-size: 9pt; margin-top: 5px; font-style: italic; color: #444;">Courses: ${courseList}</div>
-                            <table class="qp-distribution-table" style="margin-top: 10px; width: 100%; border-collapse: collapse; font-size: 10pt;">
-                                <thead><tr style="background-color: #f9f9f9;"><th style="width: 50%; border: 1px solid #ccc; padding: 4px;">Room</th><th style="width: 35%; border: 1px solid #ccc; padding: 4px;">Stream Breakdown</th><th style="width: 15%; border: 1px solid #ccc; padding: 4px; text-align:center;">Count</th></tr></thead>
-                                <tbody>`;
-                    
-                    const sortedRoomKeys = Object.keys(qpData.rooms).sort((a, b) => (parseInt(a.replace(/\D/g, ''), 10) || 0) - (parseInt(b.replace(/\D/g, ''), 10) || 0));
-
-                    for (const roomName of sortedRoomKeys) {
-                        const rData = qpData.rooms[roomName];
-                        const roomInfo = currentRoomConfig[roomName];
-                        const displayLocation = (roomInfo && roomInfo.location) ? roomInfo.location : roomName;
-                        const serialNo = roomSerialMap[roomName] || '-';
-                        const streamParts = [];
-                        Object.entries(rData.streams).forEach(([strm, cnt]) => streamParts.push(`<span style="white-space:nowrap;">${strm}: <strong>${cnt}</strong></span>`));
+                // --- RENDER SECTION HELPER ---
+                const renderSection = (papers, title, bgClass, borderClass) => {
+                    let html = '';
+                    if (papers.length > 0) {
+                        html += `<div class="font-bold text-sm uppercase border-b-2 border-black mt-4 mb-2 pb-1">${title}</div>`;
                         
-                        allPagesHtml += `<tr><td style="border: 1px solid #ccc; padding: 4px;"><strong>${serialNo} | ${displayLocation}</strong> <span style="font-size:0.85em; color:#666;">(${roomName})</span></td><td style="border: 1px solid #ccc; padding: 4px; font-size: 0.9em;">${streamParts.join(', ')}</td><td style="border: 1px solid #ccc; padding: 4px; text-align: center; font-weight: bold;">${rData.total}</td></tr>`;
+                        for (const paper of papers) {
+                            const qpBadge = paper.qpCode !== 'N/A' 
+                                ? `<span class="bg-white text-black px-1.5 rounded text-xs font-bold border border-black shadow-sm">${paper.qpCode}</span>` 
+                                : `<span class="text-gray-400 text-[10px] italic">(QP Missing)</span>`;
+                            
+                            const streamBadgeClass = (title === 'Regular Stream') ? "text-blue-800 bg-blue-50" : "text-purple-800 bg-purple-50";
+                            const streamBadge = `<span class="${streamBadgeClass} px-1 rounded border border-gray-200 text-[9px] font-bold uppercase">${paper.stream}</span>`;
+
+                            html += `
+                                <div style="margin-top: 8px; padding: 4px; page-break-inside: avoid; border-radius: 4px; ${borderClass}; background: ${bgClass};">
+                                    <div class="flex justify-between items-start border-b border-dotted border-gray-400 pb-1 mb-1.5">
+                                        <div class="w-[90%]">
+                                            <div class="font-bold text-xs leading-tight text-gray-900 mb-0.5">${paper.courseName}</div>
+                                            <div class="flex items-center gap-2">
+                                                ${streamBadge}
+                                                <span class="text-[10px] font-semibold text-gray-600">QP: ${qpBadge}</span>
+                                            </div>
+                                        </div>
+                                        <div class="w-[10%] text-right">
+                                            <span class="text-xs font-black border border-black px-1.5 py-0.5 bg-white block text-center">${paper.total}</span>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="grid grid-cols-3 gap-2">
+                            `;
+                            
+                            const sortedRoomKeys = Object.keys(paper.rooms).sort((a, b) => {
+                                const sA = roomSerialMap[a] || 999;
+                                const sB = roomSerialMap[b] || 999;
+                                return sA - sB;
+                            });
+
+                            sortedRoomKeys.forEach(roomName => {
+                                const count = paper.rooms[roomName];
+                                const roomInfo = currentRoomConfig[roomName] || {};
+                                let loc = roomInfo.location || "";
+                                
+                                // --- NEW TRUNCATION LOGIC (First 2 Words) ---
+                                if (loc) {
+                                    const words = loc.split(' ');
+                                    if (words.length > 2) {
+                                        loc = words.slice(0, 2).join(' ') + "..";
+                                    }
+                                }
+                                const displayLoc = loc ? `(${loc})` : "";
+                                const serialNo = roomSerialMap[roomName] || '-';
+                                
+                                // --- BOX LAYOUT ---
+                                html += `
+                                    <div class="border border-gray-400 rounded px-1.5 py-0.5 bg-white h-[34px] flex items-center justify-between relative shadow-sm">
+                                        
+                                        <div class="flex items-baseline overflow-hidden w-full">
+                                            <span class="text-lg font-black text-black leading-none mr-0.5">${count}</span>
+                                            <span class="text-[9px] font-bold text-gray-500 mr-1.5">Nos</span>
+                                            
+                                            <span class="text-gray-300 mr-1.5 text-xs">|</span>
+
+                                            <div class="flex items-baseline min-w-0 truncate">
+                                                <span class="text-sm font-black text-black leading-none whitespace-nowrap mr-1">Room #${serialNo}</span>
+                                                <span class="text-[9px] font-bold text-gray-500 truncate">${displayLoc}</span>
+                                            </div>
+                                        </div>
+                                        
+                                        <span class="w-3.5 h-3.5 border-2 border-black bg-white rounded-sm shrink-0 ml-1"></span>
+                                    </div>
+                                `;
+                            });
+
+                            html += `
+                                    </div>
+                                </div>`;
+                        }
                     }
-                    allPagesHtml += `</tbody><tfoot style="background-color: #f0f0f0;"><tr><td style="border: 1px solid #ccc; padding: 6px; font-weight: bold; text-align: right;">Total:</td><td style="border: 1px solid #ccc; padding: 6px; font-size: 0.9em; font-weight:bold;">${grandStreamParts.join(', ')}</td><td style="border: 1px solid #ccc; padding: 6px; font-weight: bold; text-align: center; font-size: 1.1em;">${qpData.total}</td></tr></tfoot></table></div>`;
-                }
+                    return html;
+                };
+
+                // Render Sections
+                const regularPapers = paperArray.filter(p => p.stream === "Regular");
+                const otherPapers = paperArray.filter(p => p.stream !== "Regular");
+
+                allPagesHtml += renderSection(regularPapers, "Regular Stream", "#fff", "border: 1px solid #000");
+                allPagesHtml += renderSection(otherPapers, "Other Streams", "#fffbeb", "border: 2px dashed #000");
+
                 allPagesHtml += `</div>`; 
             }
             
             reportOutputArea.innerHTML = allPagesHtml;
             reportOutputArea.style.display = 'block'; 
-            reportStatus.textContent = `Generated QP Distribution Report.`;
+            reportStatus.textContent = `Generated QP Distribution Report (Wide Layout).`;
             reportControls.classList.remove('hidden');
             lastGeneratedReportType = "QP_Distribution_Report";
 
@@ -5414,36 +5541,43 @@ navAbsentees.addEventListener('click', () => showView(viewAbsentees, navAbsentee
 navSettings.addEventListener('click', () => showView(viewSettings, navSettings));
 
 function showView(viewToShow, buttonToActivate) {
-    // 1. Hide all views
-    allViews.forEach(view => view.classList.add('hidden'));
+    // 1. Hide all views (Safety Check Added)
+    allViews.forEach(view => {
+        if (view) view.classList.add('hidden');
+    });
     
-    // 2. Deactivate all buttons
+    // 2. Deactivate all buttons (Safety Check Added)
     allNavButtons.forEach(btn => {
-        btn.classList.add('nav-button-inactive');
-        btn.classList.remove('nav-button-active');
+        if (btn) {
+            btn.classList.add('nav-button-inactive');
+            btn.classList.remove('nav-button-active');
+        }
     });
     
     // 3. Show target view & activate button
-    viewToShow.classList.remove('hidden');
-    buttonToActivate.classList.remove('nav-button-inactive');
-    buttonToActivate.classList.add('nav-button-active');
+    if (viewToShow) {
+        viewToShow.classList.remove('hidden');
+    }
+    
+    if (buttonToActivate) {
+        buttonToActivate.classList.remove('nav-button-inactive');
+        buttonToActivate.classList.add('nav-button-active');
+    }
     
     // 4. Clean up previous reports
-    clearReport(); 
+    if (typeof clearReport === 'function') clearReport(); 
     
     // 5. Save the active tab
-    if(viewToShow.id && buttonToActivate.id) {
+    if(viewToShow && viewToShow.id && buttonToActivate && buttonToActivate.id) {
         localStorage.setItem('lastActiveViewId', viewToShow.id);
         localStorage.setItem('lastActiveNavId', buttonToActivate.id);
     }
 
     // --- FIX: AUTO-CLOSE SIDEBAR ON MOBILE ---
     const sidebar = document.getElementById('main-nav');
-    // Check if we are on mobile (width < 768px) AND sidebar is currently open (doesn't have the hide class)
     if (window.innerWidth < 768 && sidebar && !sidebar.classList.contains('-translate-x-full')) {
-        sidebar.classList.add('-translate-x-full'); // Hide it
+        sidebar.classList.add('-translate-x-full'); 
     }
-    // -----------------------------------------
 }
 
 // --- (V48) Save from dynamic form (in Settings) ---
@@ -7675,6 +7809,7 @@ let editCurrentPage = 1;
 const STUDENTS_PER_EDIT_PAGE = 10;
 let currentEditSession = '';
 let currentEditCourse = '';
+let currentEditStream = ''; // <--- ADD THIS NEW VARIABLE
 let currentCourseStudents = []; // This will hold the "working copy" of students
 let hasUnsavedEdits = false;
 let currentlyEditingIndex = null; // Store the index of the student being edited
@@ -7693,7 +7828,7 @@ const modalName = document.getElementById('modal-edit-name');
 const modalSaveBtn = document.getElementById('modal-save-student');
 const modalCancelBtn = document.getElementById('modal-cancel-student');
 
-// 1. Session selection (Same as before)
+// 1. Session selection (Updated: Splits Course by Stream)
 editSessionSelect.addEventListener('change', () => {
     currentEditSession = editSessionSelect.value;
     editDataContainer.innerHTML = '';
@@ -7701,52 +7836,94 @@ editSessionSelect.addEventListener('change', () => {
     editSaveSection.classList.add('hidden');
     addNewStudentBtn.classList.add('hidden');
     
+    // Hide Bulk Container
+    const bulkContainer = document.getElementById('bulk-course-update-container');
+    if(bulkContainer) bulkContainer.classList.add('hidden');
+
     if (currentEditSession) {
-        // Populate course dropdown
         const [date, time] = currentEditSession.split(' | ');
         const sessionStudents = allStudentData.filter(s => s.Date === date && s.Time === time);
-        const courses = [...new Set(sessionStudents.map(s => s.Course))].sort();
         
-    editCourseSelect.innerHTML = ''; // Clear it completely
-    // Add the default "Select" option
-    editCourseSelect.appendChild(new Option('-- Select a Course --', ''));
-    // Add each course option safely
-    courses.forEach(course => {
-        // new Option(text, value)
-        editCourseSelect.appendChild(new Option(course, course));
-    });
+        // Identify Unique Pairs: Course + Stream
+        const uniquePairs = [];
+        const seen = new Set();
+        
+        sessionStudents.forEach(s => {
+            const strm = s.Stream || "Regular";
+            const pairKey = `${s.Course}|${strm}`; // Composite Key
+            
+            if (!seen.has(pairKey)) {
+                seen.add(pairKey);
+                uniquePairs.push({
+                    course: s.Course,
+                    stream: strm,
+                    value: pairKey
+                });
+            }
+        });
+        
+        // Sort: Regular first, then Alphabetical
+        uniquePairs.sort((a, b) => {
+            if (a.stream === "Regular" && b.stream !== "Regular") return -1;
+            if (a.stream !== "Regular" && b.stream === "Regular") return 1;
+            if (a.course !== b.course) return a.course.localeCompare(b.course);
+            return a.stream.localeCompare(b.stream);
+        });
+        
+        editCourseSelect.innerHTML = '';
+        editCourseSelect.appendChild(new Option('-- Select a Course --', ''));
+        
+        uniquePairs.forEach(item => {
+            // Display Format: "Course Name (Stream)"
+            const label = `${item.course} (${item.stream})`;
+            editCourseSelect.appendChild(new Option(label, item.value));
+        });
 
-    editCourseSelectContainer.classList.remove('hidden');
+        editCourseSelectContainer.classList.remove('hidden');
     } else {
         editCourseSelectContainer.classList.add('hidden');
     }
 });
 
-// 2. Course selection (Updated with Student Count)
+// 2. Course selection (Updated: Parses Composite Key)
 editCourseSelect.addEventListener('change', () => {
-    currentEditCourse = editCourseSelect.value;
+    const selectedValue = editCourseSelect.value; // "CourseName|StreamName"
     editCurrentPage = 1;
     hasUnsavedEdits = false; 
 
-    // Get reference to count display or create it
     let countDisplay = document.getElementById('edit-student-count');
     if (!countDisplay && addNewStudentBtn) {
         countDisplay = document.createElement('div');
         countDisplay.id = 'edit-student-count';
         countDisplay.className = 'mb-2 font-bold text-blue-700 text-sm';
-        // Insert just before the "Add New Student" button
         addNewStudentBtn.parentNode.insertBefore(countDisplay, addNewStudentBtn);
     }
 
-    if (currentEditCourse) {
+    if (selectedValue) {
         const [date, time] = currentEditSession.split(' | ');
+        
+        // Split the key back to Course and Stream
+        const parts = selectedValue.split('|');
+        const selectedStream = parts.pop(); // Last part is Stream
+        const selectedCourse = parts.join('|'); // Rest is Course
+        
+        // Update Globals
+        currentEditCourse = selectedCourse;
+        currentEditStream = selectedStream; 
+
+        // Strict Filter
         currentCourseStudents = allStudentData
-            .filter(s => s.Date === date && s.Time === time && s.Course === currentEditCourse)
+            .filter(s => {
+                const sStream = s.Stream || "Regular";
+                return s.Date === date && 
+                       s.Time === time && 
+                       s.Course === selectedCourse && 
+                       sStream === selectedStream;
+            })
             .map(s => ({ ...s })); 
         
-        // Update Count Text
         if (countDisplay) {
-            countDisplay.textContent = `Total Students Mapped: ${currentCourseStudents.length}`;
+            countDisplay.textContent = `Students: ${currentCourseStudents.length} | Stream: ${selectedStream}`;
             countDisplay.classList.remove('hidden');
         }
         
@@ -7754,15 +7931,21 @@ editCourseSelect.addEventListener('change', () => {
         editSaveSection.classList.remove('hidden');
         addNewStudentBtn.classList.remove('hidden');
     } else {
+        // Reset
+        currentEditCourse = '';
+        currentEditStream = '';
         editDataContainer.innerHTML = '';
         editPaginationControls.classList.add('hidden');
         editSaveSection.classList.add('hidden');
         addNewStudentBtn.classList.add('hidden');
         if (countDisplay) countDisplay.classList.add('hidden');
+        
+        // Hide Bulk if open
+        const bulk = document.getElementById('bulk-course-update-container');
+        if(bulk) bulk.classList.add('hidden');
     }
 });
 
-// 3. Render Table (NEW: With Serial Number)
 // 3. Render Table (Updated with Stream Column)
 function renderStudentEditTable() {
     editDataContainer.innerHTML = '';
@@ -8022,7 +8205,7 @@ modalSaveBtn.addEventListener('click', () => {
     }
 });
 
-// 10. Save All Changes to LocalStorage (The "Master Save" - Unchanged)
+// 10. Save All Changes to LocalStorage
 saveEditDataButton.addEventListener('click', () => {
     if (!hasUnsavedEdits) {
         editDataStatus.textContent = 'No changes to save.';
@@ -8034,11 +8217,17 @@ saveEditDataButton.addEventListener('click', () => {
         
         const [date, time] = currentEditSession.split(' | ');
         const course = currentEditCourse;
+        const stream = currentEditStream; // <--- Use Global Stream
 
-        // 1. Filter out ALL students from the original data that match this session/course
-        const otherStudents = allStudentData.filter(s => 
-            !(s.Date === date && s.Time === time && s.Course === course)
-        );
+        // 1. Filter out matching records (STRICT STREAM CHECK)
+        // We keep everything that DOES NOT match our current view
+        const otherStudents = allStudentData.filter(s => {
+            const sStream = s.Stream || "Regular";
+            return !(s.Date === date && 
+                     s.Time === time && 
+                     s.Course === course && 
+                     sStream === stream);
+        });
 
         // 2. Create the new master list
         const updatedAllStudentData = [...otherStudents, ...currentCourseStudents];
@@ -8050,7 +8239,7 @@ saveEditDataButton.addEventListener('click', () => {
         editDataStatus.textContent = 'All changes saved successfully!';
         setUnsavedChanges(false);
         setTimeout(() => { editDataStatus.textContent = ''; }, 3000);
-        syncDataToCloud(); // <--- ADD THIS
+        if(typeof syncDataToCloud === 'function') syncDataToCloud();
         
         // 4. Reload other parts of the app
         jsonDataStore.innerHTML = JSON.stringify(allStudentData);
@@ -8061,7 +8250,13 @@ saveEditDataButton.addEventListener('click', () => {
 
         // 5. Reload the current view
         currentCourseStudents = allStudentData
-            .filter(s => s.Date === date && s.Time === time && s.Course === course)
+            .filter(s => {
+                const sStream = s.Stream || "Regular";
+                return s.Date === date && 
+                       s.Time === time && 
+                       s.Course === course && 
+                       sStream === stream;
+            })
             .map(s => ({ ...s }));
         
         renderStudentEditTable();
@@ -8112,20 +8307,22 @@ const bulkTimeToInput = (timeStr) => {
     return `${String(h).padStart(2, '0')}:${m}`;
 };
 
-// 2. Listener to Show/Hide Bulk Section & Pre-fill
+// 2. Listener to Show/Hide Bulk Section
 if (editCourseSelect) {
     editCourseSelect.addEventListener('change', () => {
         if (editCourseSelect.value) {
             // Show Section
-            bulkUpdateContainer.classList.remove('hidden');
-            bulkTargetCourseName.textContent = editCourseSelect.value;
+            if(bulkUpdateContainer) bulkUpdateContainer.classList.remove('hidden');
+            
+            // Use Global Variable for clean name display
+            if(bulkTargetCourseName) bulkTargetCourseName.textContent = `${currentEditCourse} (${currentEditStream})`;
             
             // RESET STATE: Lock Inputs
             if(bulkInputsWrapper) {
                 bulkInputsWrapper.classList.add('opacity-50', 'pointer-events-none');
             }
             
-            // Lock all inputs including the new Course Input
+            // Lock all inputs
             [bulkNewCourseInput, bulkNewDateInput, bulkNewTimeInput, bulkNewStreamSelect, btnBulkApply].forEach(el => {
                 if(el) {
                     el.disabled = true;
@@ -8135,6 +8332,7 @@ if (editCourseSelect) {
 
             if(bulkEditModeBtn) {
                 bulkEditModeBtn.classList.remove('hidden');
+                // Reset button text
                 bulkEditModeBtn.innerHTML = `
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
                       <path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125" />
@@ -8149,19 +8347,14 @@ if (editCourseSelect) {
                 if(bulkNewTimeInput) bulkNewTimeInput.value = bulkTimeToInput(currTime);
             }
             
-            // Pre-fill Course Name
-            if(bulkNewCourseInput) bulkNewCourseInput.value = editCourseSelect.value;
+            // Pre-fill Course Name (Use Global)
+            if(bulkNewCourseInput) bulkNewCourseInput.value = currentEditCourse;
             
-// Populate Stream Dropdown (UPDATED)
+            // Populate Stream Dropdown
             if (bulkNewStreamSelect) {
-                // Add a default "No Change" option first
-                const streamOptions = currentStreamConfig.map(s => 
-                    `<option value="${s}">${s}</option>`
-                ).join('');
-                
-                // Insert the "No Change" option at the start
+                const streamOptions = currentStreamConfig.map(s => `<option value="${s}">${s}</option>`).join('');
                 bulkNewStreamSelect.innerHTML = `<option value="">-- No Change --</option>` + streamOptions;
-                bulkNewStreamSelect.value = ""; // Default to empty (No Change)
+                bulkNewStreamSelect.value = ""; 
             }
         } else {
             if(bulkUpdateContainer) bulkUpdateContainer.classList.add('hidden');
@@ -9164,54 +9357,56 @@ if (editCourseSelect) {
 // 2. Handle Delete Click
 if (deleteCourseBtn) {
     deleteCourseBtn.addEventListener('click', async () => {
-        const targetCourse = editCourseSelect.value;
-        const sessionVal = editSessionSelect.value;
+        // Use Globals instead of parsing value again
+        const targetCourse = currentEditCourse;
+        const targetStream = currentEditStream;
+        const sessionVal = editSessionSelect.value; 
         
         if (!targetCourse || !sessionVal) return;
 
         const [date, time] = sessionVal.split(' | ');
         
-        // Count students to be deleted
-        const studentsToDelete = allStudentData.filter(s => 
-            s.Date === date && 
-            s.Time === time && 
-            s.Course === targetCourse
-        );
+        // Count students to be deleted (Strict Stream Check)
+        const studentsToDelete = allStudentData.filter(s => {
+            const sStream = s.Stream || "Regular";
+            return s.Date === date && 
+                   s.Time === time && 
+                   s.Course === targetCourse &&
+                   sStream === targetStream;
+        });
 
         if (studentsToDelete.length === 0) {
-            alert("No students found in this course to delete.");
+            alert("No students found in this course/stream to delete.");
             return;
         }
 
-        // Warning Confirmation
         const confirmMsg = `
 🛑 DANGER: DELETE COURSE 🛑
 
 Target: ${targetCourse}
+Stream: ${targetStream}
 Session: ${date} | ${time}
 Students: ${studentsToDelete.length} records will be removed.
 
 This action cannot be undone.
-Are you sure you want to delete this ENTIRE course?
+Are you sure?
         `;
 
         if (confirm(confirmMsg)) {
-            // Double Confirmation for safety
             if(!confirm("Are you absolutely sure?")) return;
 
-            // --- EXECUTE DELETE ---
-            
-            // Filter OUT the students of this course
-            allStudentData = allStudentData.filter(s => 
-                !(s.Date === date && s.Time === time && s.Course === targetCourse)
-            );
+            // --- EXECUTE DELETE (Strict Stream Check) ---
+            allStudentData = allStudentData.filter(s => {
+                const sStream = s.Stream || "Regular";
+                return !(s.Date === date && 
+                         s.Time === time && 
+                         s.Course === targetCourse && 
+                         sStream === targetStream);
+            });
 
-            // Save to Storage
             localStorage.setItem(BASE_DATA_KEY, JSON.stringify(allStudentData));
-            
             alert(`Deleted ${studentsToDelete.length} records.\nThe page will now reload.`);
             
-            // Sync to Cloud & Reload
             if (typeof syncDataToCloud === 'function') await syncDataToCloud();
             window.location.reload();
         }
@@ -9892,7 +10087,7 @@ window.handlePythonExtraction = function(jsonString) {
         });
     }
 
-// Populate Dropdowns (Smart Visibility)
+// Populate Dropdowns (Fixed: Variable Name Typo)
     function populateStreamDropdowns() {
         const streamsToRender = (currentStreamConfig && currentStreamConfig.length > 0) 
                                 ? currentStreamConfig 
@@ -9900,7 +10095,7 @@ window.handlePythonExtraction = function(jsonString) {
 
         const optionsHtml = streamsToRender.map(s => `<option value="${s}">${s}</option>`).join('');
         
-        // Logic: Only show if more than 1 stream exists
+        // Logic: Only show dropdown wrappers if more than 1 stream exists
         const shouldShow = streamsToRender.length > 1;
 
         // 1. CSV Dropdown
@@ -9929,11 +10124,31 @@ window.handlePythonExtraction = function(jsonString) {
         if (reportStreamSelect) {
              reportStreamSelect.innerHTML = `<option value="all">All Streams (Combined)</option>` + optionsHtml;
              if (reportWrapper) {
+                 // FIX: Changed 'wrapper' to 'reportWrapper'
                  if (shouldShow) reportWrapper.classList.remove('hidden');
                  else reportWrapper.classList.add('hidden');
              }
         }
+
+        // 4. Remuneration: Bill Stream Select
+        const billStreamSelect = document.getElementById('bill-stream-select');
+        if (billStreamSelect) {
+            billStreamSelect.innerHTML = optionsHtml;
+        }
+
+        // 5. Remuneration: Rate Card Selector
+        const rateStreamSelect = document.getElementById('rate-stream-selector');
+        if (rateStreamSelect) {
+            rateStreamSelect.innerHTML = optionsHtml;
+        }
     }
+    
+    // Expose globally
+    window.populateRemunerationDropdowns = populateStreamDropdowns;
+    
+    
+    // Also expose this function globally if needed by remuneration.js init
+    window.populateRemunerationDropdowns = populateStreamDropdowns;
 
     // Add Stream
     if (addStreamBtn) {
@@ -10392,7 +10607,7 @@ function loadInitialData() {
         // *** MOVED HERE: Always render Exam Settings, even if no student data exists ***
         if (typeof renderExamNameSettings === 'function') renderExamNameSettings();
         // ******************************************************************************
-
+        if (typeof initRemunerationModule === 'function') initRemunerationModule();
         // 2. Check for base student data persistence
         const savedDataJson = localStorage.getItem(BASE_DATA_KEY);
         if (savedDataJson) {
@@ -10431,6 +10646,344 @@ function loadInitialData() {
     }
 }
 
+   // ==========================================
+    // 💰 REMUNERATION LOGIC (FINAL - B&W + EXAM FILTER)
+    // ==========================================
+
+    // 1. Navigation Listener
+    if (navRemuneration) {
+        navRemuneration.addEventListener('click', () => {
+            showView(viewRemuneration, navRemuneration);
+            if (typeof initRemunerationModule === 'function') initRemunerationModule();
+            // Auto-populate exam names when tab opens
+            populateBillExamDropdown();
+        });
+    }
+
+    // 2. Elements
+    const billModeSelect = document.getElementById('bill-mode-select');
+    const billDateRange = document.getElementById('bill-date-range');
+    const billExamDropdownContainer = document.getElementById('bill-exam-dropdown-container');
+    const billExamSelect = document.getElementById('bill-exam-select');
+    const billStreamSelect = document.getElementById('bill-stream-select');
+
+    // Helper: Populate Exam Name Dropdown
+    function populateBillExamDropdown() {
+        if (!billExamSelect) return;
+        
+        const selectedStream = billStreamSelect ? billStreamSelect.value : "Regular";
+        
+        // 1. Find all unique exam names for the selected stream
+        const examNames = new Set();
+        
+        // We need to iterate unique sessions to get their exam names
+        const sessions = new Set();
+        if (allStudentData) {
+            allStudentData.forEach(s => {
+                // Stream Filter
+                const sStream = s.Stream || "Regular";
+                if (selectedStream === "Regular" && sStream !== "Regular") return;
+                if (selectedStream !== "Regular" && sStream === "Regular") return;
+
+                const sessionKey = `${s.Date} | ${s.Time}`;
+                if (!sessions.has(sessionKey)) {
+                    sessions.add(sessionKey);
+                    // Lookup Exam Name
+                    const name = getExamName(s.Date, s.Time, sStream);
+                    if (name) examNames.add(name);
+                }
+            });
+        }
+
+        // 2. Populate Select
+        billExamSelect.innerHTML = '<option value="">-- Generate All --</option>';
+        Array.from(examNames).sort().forEach(name => {
+            const opt = document.createElement('option');
+            opt.value = name;
+            opt.textContent = name;
+            billExamSelect.appendChild(opt);
+        });
+    }
+
+    // Listeners for Dropdown Population
+    if (billStreamSelect) {
+        billStreamSelect.addEventListener('change', populateBillExamDropdown);
+    }
+
+    // Handle Grouping Mode Change
+    if (billModeSelect) {
+        billModeSelect.addEventListener('change', () => {
+            if (billModeSelect.value === 'period') {
+                billDateRange.classList.remove('hidden');
+                billDateRange.classList.add('grid');
+                if (billExamDropdownContainer) billExamDropdownContainer.classList.add('hidden');
+            } else {
+                billDateRange.classList.add('hidden');
+                billDateRange.classList.remove('grid');
+                if (billExamDropdownContainer) billExamDropdownContainer.classList.remove('hidden');
+                populateBillExamDropdown(); // Refresh when switching to exam mode
+            }
+        });
+    }
+
+    // 3. Generate Bill Button
+    const btnGenerateBill = document.getElementById('btn-generate-bill');
+    const btnPrintBill = document.getElementById('btn-print-bill');
+
+    if (btnGenerateBill) {
+        btnGenerateBill.addEventListener('click', () => {
+            if (!allStudentData || allStudentData.length === 0) {
+                alert("No student data loaded.");
+                return;
+            }
+
+            const selectedStream = document.getElementById('bill-stream-select').value;
+            const mode = document.getElementById('bill-mode-select').value;
+            const selectedExamName = document.getElementById('bill-exam-select').value; // Specific filter
+            
+            if (!selectedStream) {
+                alert("Please select a stream.");
+                return;
+            }
+
+            // A. Filter Data by Stream
+            const filteredData = allStudentData.filter(s => {
+                const sStream = s.Stream || "Regular";
+                return sStream === selectedStream;
+            });
+
+            if (filteredData.length === 0) {
+                alert(`No students found for stream: "${selectedStream}"`);
+                return;
+            }
+
+            // B. Prepare Groups
+            const billGroups = {}; 
+
+            const parseDate = (dStr) => {
+                const [d, m, y] = dStr.split('.');
+                return new Date(`${y}-${m}-${d}`);
+            };
+
+            const startDateInput = document.getElementById('bill-start-date').valueAsDate;
+            const endDateInput = document.getElementById('bill-end-date').valueAsDate;
+
+            filteredData.forEach(s => {
+                if (mode === 'period' && (startDateInput || endDateInput)) {
+                    const sDate = parseDate(s.Date);
+                    if (startDateInput && sDate < startDateInput) return;
+                    if (endDateInput && sDate > endDateInput) return;
+                }
+
+                const sessionKey = `${s.Date} | ${s.Time}`;
+                let groupKey = "Consolidated Bill";
+
+                if (mode === 'exam') {
+                    // Get the Exam Name
+                    const foundName = getExamName(s.Date, s.Time, s.Stream) || "Unknown / Other Exams";
+                    
+                    // *** FILTER LOGIC ***
+                    if (selectedExamName && selectedExamName !== "" && foundName !== selectedExamName) {
+                        return; // Skip if it doesn't match selected exam
+                    }
+                    groupKey = foundName;
+                } else {
+                    const sStr = document.getElementById('bill-start-date').value || "Start";
+                    const eStr = document.getElementById('bill-end-date').value || "End";
+                    groupKey = `Period: ${sStr} to ${eStr}`;
+                }
+
+                if (!billGroups[groupKey]) billGroups[groupKey] = {};
+                
+                if (!billGroups[groupKey][sessionKey]) {
+                    billGroups[groupKey][sessionKey] = { 
+                        date: s.Date, time: s.Time, normalCount: 0, scribeCount: 0 
+                    };
+                }
+
+                const scribeListRaw = JSON.parse(localStorage.getItem(SCRIBE_LIST_KEY) || '[]');
+                const scribeRegNos = new Set(scribeListRaw.map(s => s.regNo));
+
+                if (scribeRegNos.has(s['Register Number'])) {
+                    billGroups[groupKey][sessionKey].scribeCount++;
+                } else {
+                    billGroups[groupKey][sessionKey].normalCount++;
+                }
+            });
+
+            // C. Process Groups
+            const outputContainer = document.getElementById('remuneration-output');
+            outputContainer.innerHTML = '';
+            outputContainer.classList.remove('hidden');
+
+            const groupKeys = Object.keys(billGroups).sort();
+            
+            if (groupKeys.length === 0) {
+                outputContainer.innerHTML = '<p class="text-red-500 text-center p-4">No data found for the selected criteria.</p>';
+                if(btnPrintBill) btnPrintBill.classList.add('hidden');
+                return;
+            }
+
+            groupKeys.forEach(title => {
+                const sessionMap = billGroups[title];
+                const sessionArray = Object.values(sessionMap).sort((a,b) => {
+                    const d1 = a.date.split('.').reverse().join('');
+                    const d2 = b.date.split('.').reverse().join('');
+                    return d1.localeCompare(d2) || a.time.localeCompare(b.time);
+                });
+
+                const bill = generateBillForSessions(title, sessionArray, selectedStream);
+                if (bill) renderBillHTML(bill, outputContainer);
+            });
+
+            if (btnPrintBill) btnPrintBill.classList.remove('hidden');
+        });
+    }
+
+    if (btnPrintBill) {
+        btnPrintBill.addEventListener('click', () => {
+            document.body.classList.add('printing-bill');
+            window.print();
+            setTimeout(() => {
+                document.body.classList.remove('printing-bill');
+            }, 500);
+        });
+    }
+
+    // 5. Render Function (Updated: CLEAN B&W - No Shading)
+    function renderBillHTML(bill, container) {
+        function numToWords(n) {
+            const a = ['','One ','Two ','Three ','Four ','Five ','Six ','Seven ','Eight ','Nine ','Ten ','Eleven ','Twelve ','Thirteen ','Fourteen ','Fifteen ','Sixteen ','Seventeen ','Eighteen ','Nineteen '];
+            const b = ['', '', 'Twenty','Thirty','Forty','Fifty','Sixty','Seventy','Eighty','Ninety'];
+            if ((n = n.toString()).length > 9) return 'Overflow';
+            const n_array = ('000000000' + n).slice(-9).match(/^(\d{2})(\d{2})(\d{2})(\d{1})(\d{2})$/);
+            if (!n_array) return; 
+            let str = '';
+            str += (n_array[1] != 0) ? (a[Number(n_array[1])] || b[n_array[1][0]] + ' ' + a[n_array[1][1]]) + 'Crore ' : '';
+            str += (n_array[2] != 0) ? (a[Number(n_array[2])] || b[n_array[2][0]] + ' ' + a[n_array[2][1]]) + 'Lakh ' : '';
+            str += (n_array[3] != 0) ? (a[Number(n_array[3])] || b[n_array[3][0]] + ' ' + a[n_array[3][1]]) + 'Thousand ' : '';
+            str += (n_array[4] != 0) ? (a[Number(n_array[4])] || b[n_array[4][0]] + ' ' + a[n_array[4][1]]) + 'Hundred ' : '';
+            str += (n_array[5] != 0) ? ((str != '') ? 'and ' : '') + (a[Number(n_array[5])] || b[n_array[5][0]] + ' ' + a[n_array[5][1]]) : '';
+            return str.trim();
+        }
+
+        const totalAmount = bill.grand_total.toFixed(2);
+        const [rupeesPart, paisePart] = totalAmount.split('.');
+        let amountInWords = numToWords(Number(rupeesPart));
+        if (Number(paisePart) > 0) {
+            const paiseWords = numToWords(Number(paisePart));
+            amountInWords += ` and ${paiseWords} Paise`;
+        }
+
+        const isRegular = bill.stream === "Regular";
+        const hasPeon = bill.has_peon;
+        let colGroup = isRegular 
+            ? `<col style="width: 16%;"><col style="width: 12%;"><col style="width: 10%;"><col style="width: 8%;"><col style="width: 8%;"><col style="width: 10%;"><col style="width: 10%;"><col style="width: 10%;"><col style="width: 12%;">`
+            : `<col style="width: 16%;"><col style="width: 12%;"><col style="width: 10%;"><col style="width: 8%;"><col style="width: 8%;"><col style="width: 8%;"><col style="width: 10%;"><col style="width: 10%;"><col style="width: 12%;">`;
+
+        const osHeader = isRegular ? '<th class="p-1 border border-black text-center text-black">OS</th>' : '';
+        const peonHeader = hasPeon ? '<th class="p-1 border border-black text-center text-black">Peon</th>' : '';
+        const osFooter = isRegular ? `<td class="p-2 border border-black text-black">₹${bill.supervision_breakdown.office.total}</td>` : '';
+        const peonFooter = hasPeon ? `<td class="p-2 border border-black text-black">₹${bill.peon}</td>` : '';
+        const tableTotal = bill.invigilation + bill.clerical + bill.sweeping + bill.peon + bill.supervision;
+
+        let supSummaryHTML = isRegular 
+            ? `CS: ₹${bill.supervision_breakdown.chief.total}, SAS: ₹${bill.supervision_breakdown.senior.total}, OS: ₹${bill.supervision_breakdown.office.total}, <strong class="text-black">Total: ₹${bill.supervision}</strong>`
+            : `Chief Supdt: ₹${bill.supervision_breakdown.chief.total}, Senior Supdt: ₹${bill.supervision_breakdown.senior.total}, <strong class="text-black">Total: ₹${bill.supervision}</strong>`;
+
+        const rows = bill.details.map(d => {
+            let studentDetail = `${d.total_students}`;
+            if (d.scribe_students > 0) studentDetail += ` <span class="text-black font-bold text-[10px]" style="white-space:nowrap;">(Incl ${d.scribe_students} Scr)</span>`;
+            let invigDetail = `${d.invig_count_normal}`;
+            if (d.invig_count_scribe > 0) invigDetail += ` + <span class="text-black font-bold">${d.invig_count_scribe}</span>`;
+
+            const lineTotal = d.invig_cost + d.clerk_cost + d.sweeper_cost + (d.peon_cost||0) + d.supervision_cost;
+            const osCell = isRegular ? `<td class="p-1 border align-middle text-xs text-black">₹${d.os_cost}</td>` : '';
+            const peonCell = hasPeon ? `<td class="p-1 border align-middle text-xs text-black">₹${d.peon_cost}</td>` : '';
+
+            return `
+                <tr class="border-b border-black text-center">
+                    <td class="p-1 border border-black text-left align-middle text-black">${d.date} <br><span class="text-[10px] text-black">${d.time}</span></td>
+                    <td class="p-1 border border-black align-middle font-bold text-xs text-black">${studentDetail}</td>
+                    <td class="p-1 border border-black align-middle text-xs text-black">${invigDetail}<br><span class="text-black text-[10px]">(₹${d.invig_cost})</span></td>
+                    <td class="p-1 border border-black align-middle text-xs text-black">₹${d.clerk_cost}</td>
+                    ${peonCell}
+                    <td class="p-1 border border-black align-middle text-xs text-black">₹${d.sweeper_cost}</td>
+                    <td class="p-1 border border-black align-middle text-xs text-black">₹${d.cs_cost}</td>
+                    <td class="p-1 border border-black align-middle text-xs text-black">₹${d.sas_cost}</td>
+                    ${osCell}
+                    <td class="p-1 border border-black align-middle text-xs font-bold text-black">₹${lineTotal}</td>
+                </tr>
+            `;
+        }).join('');
+
+        const html = `
+            <div class="bg-white border-2 border-gray-800 shadow-xl p-8 print-page mb-8 relative text-black">
+                <div class="text-center border-b-2 border-black pb-4 mb-4">
+                    <h2 class="text-xl font-bold uppercase leading-tight text-black">${currentCollegeName}</h2>
+                    <h3 class="text-lg font-semibold mt-1 text-black">Remuneration Bill: ${bill.title}</h3>
+                    <p class="text-sm text-black mt-1">Stream: ${bill.stream} | Generated on ${new Date().toLocaleDateString()}</p>
+                </div>
+                <table class="w-full border-collapse border border-black text-sm mb-4 table-fixed text-black">
+                    <colgroup>${colGroup}</colgroup>
+                    <thead>
+                        <tr>
+                            <th class="p-1 border border-black text-left text-black font-bold">Session</th>
+                            <th class="p-1 border border-black text-center text-black font-bold">Candidates</th>
+                            <th class="p-1 border border-black text-center text-black font-bold">Invig</th>
+                            <th class="p-1 border border-black text-center text-black font-bold">Clerk</th>
+                            ${peonHeader}
+                            <th class="p-1 border border-black text-center text-black font-bold">Swpr</th>
+                            <th class="p-1 border border-black text-center text-black font-bold">CS</th>
+                            <th class="p-1 border border-black text-center text-black font-bold">SAS</th>
+                            ${osHeader}
+                            <th class="p-1 border border-black text-center font-bold text-black">Total</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                    <tfoot class="font-bold text-xs text-center">
+                        <tr>
+                            <td colspan="2" class="p-2 border border-black text-right text-black">Subtotals:</td>
+                            <td class="p-2 border border-black text-black">₹${bill.invigilation}</td>
+                            <td class="p-2 border border-black text-black">₹${bill.clerical}</td>
+                            ${peonFooter}
+                            <td class="p-2 border border-black text-black">₹${bill.sweeping}</td>
+                            <td class="p-2 border border-black text-black">₹${bill.supervision_breakdown.chief.total}</td>
+                            <td class="p-2 border border-black text-black">₹${bill.supervision_breakdown.senior.total}</td>
+                            ${osFooter}
+                            <td class="p-2 border border-black text-lg text-black">₹${tableTotal}</td>
+                        </tr>
+                    </tfoot>
+                </table>
+                <div class="summary-box grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4 text-sm border-t-2 border-black pt-4 break-inside-avoid text-black">
+                    <div class="p-3 border border-black">
+                        <div class="font-bold text-black border-b border-black mb-2 pb-1">1. Supervision Breakdown</div>
+                        <div class="text-xs text-black leading-relaxed">${supSummaryHTML}</div>
+                    </div>
+                    <div class="space-y-2">
+                        <div class="flex justify-between border-b border-dotted border-black pb-1 font-bold text-black">2. Other Allowances</div>
+                        <div class="flex justify-between border-b border-dotted border-black pb-1 text-black"><span>Contingency:</span> <span class="font-mono font-bold">₹${bill.contingency.toFixed(2)}</span></div>
+                        <div class="flex justify-between border-b border-dotted border-black pb-1 text-black"><span>Data Entry Operator:</span> <span class="font-mono font-bold">₹${bill.data_entry}</span></div>
+                        <div class="flex justify-between border-b border-dotted border-black pb-1 text-black"><span>Accountant:</span> <span class="font-mono font-bold">₹${(allRates[bill.stream] ? allRates[bill.stream].accountant : 0)}</span></div>
+                    </div>
+                </div>
+                <div class="summary-box mt-6 p-3 border border-black flex flex-col items-end break-inside-avoid text-black">
+                    <div class="flex justify-between w-full items-center">
+                        <span class="text-lg font-bold uppercase">Grand Total Claim</span>
+                        <span class="text-2xl font-bold font-mono">₹${bill.grand_total.toFixed(2)}</span>
+                    </div>
+                    <div class="w-full text-right mt-1 border-t border-black pt-1">
+                        <span class="text-sm font-bold italic text-black">(Rupees ${amountInWords} Only)</span>
+                    </div>
+                </div>
+                <div class="summary-box mt-12 flex justify-end text-sm font-bold break-inside-avoid text-black">
+                    <div class="border-t border-black w-1/3 text-center pt-2">Chief Superintendent</div>
+                </div>
+            </div>
+        `;
+        container.insertAdjacentHTML('beforeend', html);
+    }
+    
     // --- NEW: Restore Last Active Tab ---
     function restoreActiveTab() {
         const savedViewId = localStorage.getItem('lastActiveViewId');
