@@ -635,8 +635,14 @@ function renderSlotsGridAdmin() {
                          <button onclick="openManualAllocationModal('${key}')" class="col-span-1 text-[10px] bg-indigo-50 text-indigo-700 border border-indigo-200 rounded py-1.5 hover:bg-indigo-100 font-bold transition" title="Manual Edit">Edit</button>
                          <button onclick="viewSlotHistory('${key}')" class="col-span-1 text-[10px] bg-orange-50 text-orange-700 border border-orange-200 rounded py-1.5 hover:bg-orange-100 font-bold transition ${hasLog}" title="View Logic">📜</button>
                     </div>
-                     <button onclick="toggleLock('${key}')" class="w-full mt-2 text-xs border border-gray-300 rounded py-1.5 hover:bg-gray-50 text-gray-700 font-medium transition shadow-sm bg-white">${slot.isLocked ? 'Unlock Slot' : 'Lock Slot'}</button>
-                </div>`;
+                        <div class="flex gap-2 mt-2">
+                            <button onclick="toggleLock('${key}')" class="flex-1 text-xs border border-gray-300 rounded py-1.5 hover:bg-gray-50 text-gray-700 font-medium transition shadow-sm bg-white">${slot.isLocked ? 'Unlock' : 'Lock'}</button>
+    
+                            <button onclick="openRescheduleModal('${key}')" class="px-3 text-xs border border-orange-200 rounded py-1.5 hover:bg-orange-50 text-orange-600 font-bold transition shadow-sm bg-white" title="Reschedule Exam">📅</button>
+    
+                            <button onclick="deleteSlot('${key}')" class="px-3 text-xs border border-red-200 rounded py-1.5 hover:bg-red-50 text-red-600 font-bold transition shadow-sm bg-white" title="Delete Slot">🗑️</button>
+                        </div>                
+                    </div>`;
         });
     });
 }
@@ -715,7 +721,6 @@ function renderStaffTable() {
         ui.staffTableBody.appendChild(row);
     });
 }
-
 function renderStaffRankList(myEmail) {
     // Target BOTH lists (Desktop & Mobile)
     const containers = [
@@ -726,10 +731,13 @@ function renderStaffRankList(myEmail) {
     // 1. Calculate and Sort
     const rankedStaff = staffData
         .filter(s => s.status !== 'archived')
-        .map(s => ({ 
-            ...s, 
-            pending: calculateStaffTarget(s) - getDutiesDoneCount(s.email) 
-        }))
+        .map(s => { 
+            const target = calculateStaffTarget(s);
+            const done = getDutiesDoneCount(s.email);
+            const pending = target - done;
+            // Return all stats so we can display them
+            return { ...s, done, pending }; 
+        })
         .sort((a, b) => {
             if (b.pending !== a.pending) return b.pending - a.pending;
             return a.name.localeCompare(b.name);
@@ -750,6 +758,7 @@ function renderStaffRankList(myEmail) {
             if (activeRole) roleBadge = `<span class="ml-1 text-[8px] uppercase font-bold bg-purple-100 text-purple-700 px-1 py-0.5 rounded border border-purple-200">${activeRole.role}</span>`;
         }
 
+        // New Format: Done (Green) / Pending (Red)
         return `
             <div class="flex items-center justify-between p-2 rounded border ${bgClass} text-xs transition mb-1">
                 <div class="flex items-center gap-2 overflow-hidden">
@@ -762,15 +771,24 @@ function renderStaffRankList(myEmail) {
                         <span class="text-[9px] text-gray-400 truncate">${s.dept}</span>
                     </div>
                 </div>
-                <span class="font-mono font-bold ${displayPending > 0 ? 'text-red-600' : 'text-green-600'} ml-2">${displayPending}</span>
+                
+                <div class="text-right flex items-center gap-1 bg-white px-1.5 py-0.5 rounded border border-gray-100 shadow-sm">
+                     <span class="font-mono font-bold text-green-600" title="Completed Duties">${s.done}</span>
+                     <span class="text-gray-300 text-[10px]">/</span>
+                     <span class="font-mono font-bold ${displayPending > 0 ? 'text-red-600' : 'text-gray-400'}" title="Pending Duties">${displayPending}</span>
+                </div>
             </div>`;
     }).join('');
 
-    // 3. Inject into DOM
+    // 3. Inject into DOM with BOTTOM SPACER
+    // The spacer ensures the last item is visible above mobile bottom bars
+    const spacer = `<div class="h-24 w-full shrink-0"></div>`;
+
     containers.forEach(container => {
-        if(container) container.innerHTML = html;
+        if(container) container.innerHTML = html + spacer;
     });
 }
+
 
 function renderStaffCalendar(myEmail) {
     const year = currentCalDate.getFullYear();
@@ -883,10 +901,9 @@ function renderExchangeMarket(myEmail) {
     const badge = document.getElementById('market-count-badge');
     if (!list) return;
 
-    // --- NEW: Get Search Query ---
+    // Get Search Query
     const searchInput = document.getElementById('exchange-search-input');
     const filterText = searchInput ? searchInput.value.toLowerCase() : "";
-    // -----------------------------
 
     list.innerHTML = '';
     
@@ -895,10 +912,8 @@ function renderExchangeMarket(myEmail) {
     Object.keys(invigilationSlots).forEach(key => {
         const slot = invigilationSlots[key];
         if (slot.exchangeRequests && slot.exchangeRequests.length > 0) {
-            // Filter: Don't show my own requests
-            const othersRequests = slot.exchangeRequests.filter(reqEmail => reqEmail !== myEmail);
-            
-            othersRequests.forEach(sellerEmail => {
+            // *** CHANGE: Show ALL requests, including my own ***
+            slot.exchangeRequests.forEach(sellerEmail => {
                 marketSlots.push({
                     key: key,
                     seller: sellerEmail,
@@ -915,31 +930,28 @@ function renderExchangeMarket(myEmail) {
         return dateA.localeCompare(dateB);
     });
 
-    // --- NEW: Filter List based on Search ---
+    // Filter List based on Search
     if (filterText) {
         marketSlots = marketSlots.filter(item => {
             const sellerName = getNameFromEmail(item.seller).toLowerCase();
             return sellerName.includes(filterText);
         });
     }
-    // ---------------------------------------
 
-    // 3. Update Badge (Total count, ignoring filter)
+    // 3. Update Badge
     if (badge) {
-        // Count total real items (re-calculate purely for badge if needed, or just use length)
-        // For UX, usually badge shows total available, list shows filtered. 
-        // Let's keep badge dynamic to view.
         badge.textContent = marketSlots.length; 
     }
 
     // 4. Render
     if (marketSlots.length === 0) {
-        list.innerHTML = `<p class="text-xs text-gray-400 italic text-center py-2">No duties found.</p>`;
+        list.innerHTML = `<p class="text-xs text-gray-400 italic text-center py-2">No duties available for exchange.</p>`;
         return;
     }
 
     marketSlots.forEach(item => {
-        const sellerName = getNameFromEmail(item.seller);
+        const isMe = (item.seller === myEmail);
+        const sellerName = isMe ? "You (Your Post)" : getNameFromEmail(item.seller);
         const [date, time] = item.key.split(' | ');
         
         const sameDaySessions = Object.keys(invigilationSlots).filter(k => k.startsWith(date) && k !== item.key);
@@ -947,12 +959,25 @@ function renderExchangeMarket(myEmail) {
         const amAlreadyAssigned = item.slotData.assigned.includes(myEmail);
 
         let actionBtn = "";
+        let bgClass = "bg-white border-indigo-100"; // Default style
+        let sellerColor = "bg-indigo-100 text-indigo-600";
         
-        if (amAlreadyAssigned) {
+        if (isMe) {
+             // *** MY POST: Show Withdraw Button ***
+             bgClass = "bg-orange-50 border-orange-200"; // Highlight my posts
+             sellerColor = "bg-orange-100 text-orange-700";
+             
+             actionBtn = `
+                <button onclick="withdrawExchange('${item.key}', '${myEmail}')" 
+                    class="bg-white text-red-600 border border-red-200 text-[10px] px-3 py-1.5 rounded font-bold hover:bg-red-50 shadow-sm transition flex items-center gap-1" title="Take back this duty">
+                    Withdraw
+                </button>`;
+        } else if (amAlreadyAssigned) {
              actionBtn = `<span class="text-[10px] text-gray-400 font-medium">You are on this duty</span>`;
         } else if (hasConflict) {
              actionBtn = `<span class="text-[10px] text-red-400 font-medium">Time Conflict</span>`;
         } else {
+             // Others' Post: Show Accept
              actionBtn = `
                 <button onclick="acceptExchange('${item.key}', '${myEmail}', '${item.seller}')" 
                     class="bg-indigo-600 text-white text-[10px] px-3 py-1.5 rounded font-bold hover:bg-indigo-700 shadow-sm transition flex items-center gap-1">
@@ -961,19 +986,19 @@ function renderExchangeMarket(myEmail) {
         }
 
         list.innerHTML += `
-            <div class="bg-white p-2.5 rounded border border-indigo-100 shadow-sm hover:shadow-md transition">
+            <div class="${bgClass} p-2.5 rounded border shadow-sm hover:shadow-md transition mb-2">
                 <div class="flex justify-between items-start mb-1">
                     <div class="font-bold text-gray-800 text-xs">${date}</div>
                     <div class="text-[10px] text-gray-500 bg-gray-100 px-1.5 rounded">${time}</div>
                 </div>
                 <div class="flex justify-between items-center mt-2">
                     <div class="flex items-center gap-1.5">
-                        <div class="w-5 h-5 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center text-[10px] font-bold">
+                        <div class="w-5 h-5 rounded-full ${sellerColor} flex items-center justify-center text-[10px] font-bold">
                             ${sellerName.charAt(0)}
                         </div>
                         <div class="flex flex-col">
                             <span class="text-[10px] text-gray-500 leading-none">Request by</span>
-                            <span class="text-xs font-bold text-gray-700 leading-none">${sellerName}</span>
+                            <span class="text-xs font-bold text-gray-700 leading-none truncate max-w-[100px]">${sellerName}</span>
                         </div>
                     </div>
                     ${actionBtn}
@@ -1270,6 +1295,27 @@ async function saveManualSlot() {
     window.closeModal('add-slot-modal');
     renderSlotsGridAdmin();
 }
+
+// --- NEW: Delete Slot Function ---
+window.deleteSlot = async function(key) {
+    // 1. Security Check
+    if (!confirm(`⚠️ DANGER ZONE ⚠️\n\nAre you sure you want to PERMANENTLY DELETE this slot?\n\nSlot: ${key}\n\nThis will remove all assigned staff and records for this session.`)) return;
+    
+    // 2. Delete from local object
+    if (invigilationSlots[key]) {
+        delete invigilationSlots[key];
+        
+        // 3. Save to Cloud
+        await syncSlotsToCloud();
+        
+        // 4. Refresh Grid
+        renderSlotsGridAdmin();
+        
+        // 5. Log it
+        if(typeof logActivity === 'function') logActivity("Slot Deleted", `Admin deleted slot: ${key}`);
+    }
+}
+
 // --- NEW: Toggle Advance Unavailability ---
 window.toggleAdvance = async function(dateStr, email, session) {
     // 1. Init date object if missing
@@ -2468,21 +2514,35 @@ function addAttendanceRow(email, isLocked) {
     if(!s) return;
     
     const div = document.createElement('div');
-    div.className = `flex justify-between items-center bg-white p-2 rounded border ${isLocked ? 'border-green-100 bg-green-50' : 'border-gray-200'}`;
+    // Responsive Layout: Column on Mobile (Card), Row on Desktop
+    div.className = `group flex flex-col md:flex-row justify-between items-start md:items-center p-3 rounded-lg border shadow-sm transition mb-2 gap-2 md:gap-4 ${isLocked ? 'border-green-200 bg-green-50' : 'bg-white border-gray-200'}`;
     
-    // Disable inputs if locked
+    // Checkbox State
     const chkState = isLocked ? "disabled" : "onchange='window.updateAttCount()'";
-    const removeBtn = isLocked ? "" : `<button class="text-red-400 hover:text-red-600 text-xs font-bold px-2" onclick="this.parentElement.remove(); window.updateAttCount();">&times; Remove</button>`;
+
+    // Render Action Button (Full width on mobile, Auto on desktop)
+    let actionHtml = "";
+    if (!isLocked) {
+        actionHtml = `
+            <div class="w-full md:w-auto pt-2 md:pt-0 border-t md:border-0 border-gray-100 md:border-transparent">
+                <button class="text-xs font-bold px-3 py-1.5 rounded border transition w-full md:w-auto text-center flex items-center justify-center gap-1 bg-white text-red-600 border-red-200 hover:bg-red-50 cursor-pointer" 
+                    onclick="this.closest('.group').remove(); window.updateAttCount();">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                    Remove
+                </button>
+            </div>
+        `;
+    }
 
     div.innerHTML = `
-        <div class="flex items-center gap-3">
-            <input type="checkbox" class="att-chk w-5 h-5 text-green-600 rounded focus:ring-green-500" value="${email}" checked ${chkState}>
-            <div>
-                <div class="font-bold text-gray-800 text-sm">${s.name}</div>
-                <div class="text-xs text-gray-500">${s.dept}</div>
+        <div class="flex items-center gap-3 w-full md:w-auto">
+            <input type="checkbox" class="att-chk w-5 h-5 text-green-600 rounded focus:ring-green-500 shrink-0" value="${email}" checked ${chkState}>
+            <div class="min-w-0 flex-1">
+                <div class="font-bold text-gray-800 text-sm truncate">${s.name}</div>
+                <div class="text-xs text-gray-500 truncate">${s.dept}</div>
             </div>
         </div>
-        ${removeBtn}
+        ${actionHtml}
     `;
     ui.attList.appendChild(div);
 }
@@ -2952,7 +3012,7 @@ window.printSessionReport = function(key) {
                         <th style="width: 50px;">Used<br>Script</th>
                         <th style="width: 50px;">Retd<br>Script</th>
                         <th>Remarks</th>
-                        <th style="width: 80px;">Signature</th>
+                        <th style="width: 80px;"></th>
                     </tr>
                 </thead>
                 <tbody>
@@ -3057,7 +3117,12 @@ function renderAdminTodayStats() {
                     
                     <button onclick="openSlotReminderModal('${key}')" class="bg-white text-orange-700 hover:bg-orange-50 font-bold py-1.5 px-3 rounded shadow-sm text-xs flex items-center gap-1 transition" title="Send Alerts (Email, WhatsApp, SMS)">
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" /></svg>
-                        Notify / Remind
+                        Notify
+                    </button>
+
+                    <button onclick="printDutyNotification('${key}')" class="bg-blue-600 text-white hover:bg-blue-700 font-bold py-1.5 px-3 rounded shadow-sm text-xs flex items-center gap-1 transition" title="Download Official Notification PDF">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                        PDF
                     </button>
                 </div>
             `;
@@ -3082,7 +3147,7 @@ function renderAdminTodayStats() {
             </div>
         `;
     }
-}
+} // <--- THIS BRACE WAS MISSING
 window.openCompletedDutiesModal = function(email) {
     const list = document.getElementById('completed-duties-list');
     if (!list) return;
@@ -4279,7 +4344,8 @@ function generateProfessionalEmail(name, dutiesArray, title) {
         </div>
 
         <p style="font-size: 13px; color: #666;">
-            <em>For any adjustments, please request via the <a href="http://www.gvc.ac.in/exam" style="color: #666;">Exam Portal</a> and inform the SAS/Exam Chief in advance.</em>
+            <em>For adjustments, please post in the <a href="http://www.gvc.ac.in/exam" style="color: #666;">Exam Portal</a>.</em><br>
+            <span style="color: #c0392b; font-weight: bold;">Important: If your Exchange Request is not picked up, you must arrange a replacement personally.</span>
         </p>
         
         <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
@@ -5344,6 +5410,633 @@ function updateSyncStatus(msg, type) {
     el.innerHTML = `<span class="w-1.5 h-1.5 rounded-full ${color}"></span> ${msg}`;
 }
 
+// ==========================================
+// 🗓️ RESCHEDULE & ALERT SYSTEM
+// ==========================================
+
+window.openRescheduleModal = function(key) {
+    if (!invigilationSlots[key]) return;
+    
+    document.getElementById('reschedule-old-key').value = key;
+    document.getElementById('reschedule-current-key').textContent = key;
+    
+    // Pre-fill current values for easier editing
+    const [datePart, timePart] = key.split(' | ');
+    
+    // Convert DD.MM.YYYY -> YYYY-MM-DD for input
+    const [d, m, y] = datePart.split('.');
+    document.getElementById('reschedule-new-date').value = `${y}-${m}-${d}`;
+    
+    // Convert Time (e.g., 09:30 AM -> 09:30)
+    // Basic parser (assuming standard format)
+    let time24 = "";
+    const match = timePart.match(/(\d+):(\d+)\s*(AM|PM)/i);
+    if (match) {
+        let [_, h, min, p] = match;
+        h = parseInt(h);
+        if (p.toUpperCase() === 'PM' && h < 12) h += 12;
+        if (p.toUpperCase() === 'AM' && h === 12) h = 0;
+        time24 = `${String(h).padStart(2,'0')}:${min}`;
+    }
+    document.getElementById('reschedule-new-time').value = time24;
+
+    window.openModal('reschedule-modal');
+}
+
+window.executeReschedule = async function() {
+    const oldKey = document.getElementById('reschedule-old-key').value;
+    const dateInput = document.getElementById('reschedule-new-date').value;
+    const timeInput = document.getElementById('reschedule-new-time').value;
+
+    if (!dateInput || !timeInput) return alert("Please select new Date and Time.");
+
+    // 1. Generate New Key
+    const [y, m, d] = dateInput.split('-');
+    const formattedDate = `${d}.${m}.${y}`;
+
+    let [hours, minutes] = timeInput.split(':');
+    hours = parseInt(hours);
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    hours = hours % 12;
+    hours = hours ? hours : 12;
+    const formattedTime = `${String(hours).padStart(2, '0')}:${minutes} ${ampm}`;
+
+    const newKey = `${formattedDate} | ${formattedTime}`;
+
+    if (newKey === oldKey) return alert("New time is the same as the old time.");
+    if (invigilationSlots[newKey]) {
+        if (!confirm(`Slot ${newKey} already exists! Merge staff into it?`)) return;
+    }
+
+    // 2. Move Data
+    const oldSlot = invigilationSlots[oldKey];
+    const affectedStaff = [...oldSlot.assigned]; // Copy list for notification
+
+    if (!invigilationSlots[newKey]) {
+        // Create new
+        invigilationSlots[newKey] = JSON.parse(JSON.stringify(oldSlot));
+    } else {
+        // Merge
+        const newSlot = invigilationSlots[newKey];
+        oldSlot.assigned.forEach(email => {
+            if (!newSlot.assigned.includes(email)) newSlot.assigned.push(email);
+        });
+        // Merge Scribes/Counts if needed logic here...
+    }
+
+    // 3. Delete Old
+    delete invigilationSlots[oldKey];
+
+    // 4. Save & Close
+    await syncSlotsToCloud();
+    window.closeModal('reschedule-modal');
+    renderSlotsGridAdmin();
+
+    // 5. Trigger Notification Modal
+    if (affectedStaff.length > 0) {
+        setTimeout(() => openRescheduleNotification(affectedStaff, oldKey, newKey), 500);
+    } else {
+        alert(`✅ Session moved to ${newKey}. (No staff were assigned).`);
+    }
+}
+
+// ==========================================
+// 📄 DUTY NOTIFICATION DOWNLOAD (Fixed Layout)
+// ==========================================
+
+// ==========================================
+// 📄 DUTY NOTIFICATION PREVIEW (Fixed Layout & No Blank Page)
+// ==========================================
+
+window.printDutyNotification = function(key) {
+    const slot = invigilationSlots[key];
+    if (!slot || slot.assigned.length === 0) return alert("No staff assigned to this session.");
+
+    // 1. DATA PREPARATION
+    const [dateStr, timeStr] = key.split(' | ');
+    const [d, m, y] = dateStr.split('.');
+    const examDate = new Date(`${y}-${m}-${d}`);
+    
+    const excelBaseDate = new Date(1899, 11, 30);
+    const dayDiff = Math.floor((examDate - excelBaseDate) / (1000 * 60 * 60 * 24));
+    
+    const isAN = (timeStr.includes("PM") || timeStr.startsWith("12:") || timeStr.startsWith("12."));
+    const sessionCode = isAN ? "AN" : "FN";
+    const reportTime = calculateReportTime(timeStr);
+    const logoUrl = "logo.png"; 
+
+    // 2. LAYOUT LOGIC
+    const totalStaff = slot.assigned.length;
+    const useTwoColumns = totalStaff > 20; 
+
+    // Row Generator (NO SIGNATURE COLUMN)
+    const generateRow = (email, idx) => {
+        const staff = staffData.find(s => s.email === email) || { name: getNameFromEmail(email), dept: "", phone: "" };
+        let phone = staff.phone || "-";
+        let nameDisplay = staff.name.length > 28 ? staff.name.substring(0, 26) + ".." : staff.name;
+        
+        return `
+            <tr>
+                <td style="text-align: center; width: 30px;">${idx + 1}</td>
+                <td>
+                    <div style="font-weight: bold;">${nameDisplay}</div>
+                    <div style="font-size: 9pt; color: #444;">${staff.dept}</div>
+                </td>
+                <td style="text-align: center; font-size: 9pt; width: 90px;">${phone}</td>
+            </tr>
+        `;
+    };
+
+    let tableContentHtml = "";
+
+    if (useTwoColumns) {
+        // --- 2 COLUMN LAYOUT ---
+        const mid = Math.ceil(totalStaff / 2);
+        const leftList = slot.assigned.slice(0, mid);
+        const rightList = slot.assigned.slice(mid);
+
+        const renderMiniTable = (list, startIdx) => `
+            <table class="staff-table">
+                <thead>
+                    <tr>
+                        <th>No</th>
+                        <th>Name & Dept</th>
+                        <th>Mobile</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${list.map((email, i) => generateRow(email, startIdx + i)).join('')}
+                </tbody>
+            </table>
+        `;
+
+        tableContentHtml = `
+            <div style="display: flex; gap: 15px; align-items: flex-start;">
+                <div style="flex: 1;">${renderMiniTable(leftList, 0)}</div>
+                <div style="flex: 1;">${renderMiniTable(rightList, mid)}</div>
+            </div>
+        `;
+    } else {
+        // --- 1 COLUMN LAYOUT ---
+        tableContentHtml = `
+            <table class="staff-table">
+                <thead>
+                    <tr>
+                        <th>SL. NO</th>
+                        <th>Name and Department of the Invigilator</th>
+                        <th>Mobile</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${slot.assigned.map((email, i) => generateRow(email, i)).join('')}
+                </tbody>
+            </table>
+        `;
+    }
+
+    // 3. GENERATE WINDOW
+    const w = window.open('', '_blank');
+    w.document.write(`
+        <html>
+        <head>
+            <title>Notification_${dateStr}_${sessionCode}</title>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"><\/script>
+            <style>
+                @import url('https://fonts.googleapis.com/css2?family=Times+New+Roman&display=swap');
+                
+                body { font-family: 'Times New Roman', serif; background: #f3f4f6; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+                
+                /* CONTROL BAR */
+                #controls {
+                    margin-bottom: 20px; background: white; padding: 10px 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+                }
+                .btn {
+                    padding: 10px 20px; font-weight: bold; border: none; border-radius: 4px; cursor: pointer; font-family: sans-serif; font-size: 14px; margin: 0 5px;
+                }
+                .btn-print { background-color: #374151; color: white; }
+                .btn-download { background-color: #2563eb; color: white; }
+                .btn:hover { opacity: 0.9; }
+
+                /* CONTENT CONTAINER */
+                .content-wrapper {
+                    width: 100%; 
+                    max-width: 200mm; /* Fits safely inside A4 (210mm) */
+                    background: white;
+                    padding: 10mm 15mm;
+                    box-sizing: border-box;
+                    box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+                }
+
+                /* TYPOGRAPHY & LAYOUT */
+                .header { text-align: center; margin-bottom: 15px; }
+                .header img { height: 60px; width: auto; margin-bottom: 5px; }
+                .college-name { font-size: 14pt; font-weight: bold; text-transform: uppercase; line-height: 1.2; }
+                .address { font-size: 9pt; }
+                .meta { font-size: 9pt; font-weight: bold; margin-top: 4px; border-bottom: 1px solid #000; padding-bottom: 8px; }
+                
+                .title-section { margin: 12px 0; display: flex; justify-content: space-between; align-items: flex-end; }
+                .designation { font-weight: bold; font-size: 11pt; text-align: left; line-height: 1.2; }
+                .doc-number { font-weight: bold; font-size: 11pt; text-align: right; line-height: 1.2; }
+                
+                .body-text { font-size: 11pt; text-align: justify; margin-bottom: 12px; line-height: 1.3; }
+                
+                .highlight-box { 
+                    font-weight: bold; margin: 12px 0; font-size: 10pt; 
+                    border: 1px solid #000; padding: 6px; text-align: center; background: #f9f9f9; 
+                }
+                
+                /* TABLE */
+                .staff-table { width: 100%; border-collapse: collapse; margin-top: 5px; }
+                .staff-table th, .staff-table td { border: 1px solid black; padding: 5px; vertical-align: middle; }
+                .staff-table th { background-color: #f0f0f0; text-align: center; font-weight: bold; font-size: 10pt; }
+                
+                .footer { margin-top: 40px; text-align: right; font-weight: bold; font-size: 11pt; }
+                .signature-line { display: inline-block; text-align: center; border-top: 0; } /* Clean signature area */
+
+                /* PRINT HIDING */
+                @media print {
+                    body { background: white; padding: 0; }
+                    #controls { display: none !important; }
+                    .content-wrapper { box-shadow: none; width: 100%; margin: 0; padding: 0; }
+                    @page { margin: 15mm; }
+                }
+            </style>
+        </head>
+        <body>
+            <div id="controls">
+                <button class="btn btn-print" onclick="window.print()">🖨️ Print</button>
+                <button class="btn btn-download" onclick="downloadPDF()">⬇️ Download PDF</button>
+            </div>
+
+            <div class="content-wrapper" id="pdf-content">
+                <div class="header">
+                    <img src="${logoUrl}" alt="Logo" onerror="this.style.display='none'"> 
+                    <div class="college-name">GOVERNMENT VICTORIA COLLEGE, PALAKKAD</div>
+                    <div class="address">Kerala, India, PIN 678001 | Affiliation: University of Calicut</div>
+                    <div class="meta">📞 0491 2576773 | ✉️ victoriapkd@gmail.com | 🌐 www.gvc.ac.in</div>
+                </div>
+
+                <div class="title-section">
+                    <div class="designation">Chief Superintendent,<br>University Examinations</div>
+                    <div class="doc-number">No: EXAM/${dayDiff}${sessionCode}<br>Date: ${new Date().toLocaleDateString('en-GB')}</div>
+                </div>
+
+                <div class="body-text">
+                    The following teachers have been assigned invigilation duty for the upcoming Calicut University examinations. 
+                    Invigilators are requested to report to the Chief Superintendent's office <strong>30 minutes before</strong> the commencement of the exam.
+                    In case of any inconvenience, invigilators must arrange for a substitute and inform the office accordingly.
+                </div>
+
+                <div class="highlight-box">
+                    EXAM DATE: ${dateStr} &nbsp;|&nbsp; SESSION: ${sessionCode} (${timeStr}) &nbsp;|&nbsp; REPORT BY: ${reportTime}
+                </div>
+
+                ${tableContentHtml}
+
+                <div class="footer">
+                    <div class="signature-line">Chief Superintendent</div>
+                </div>
+            </div>
+
+            <script>
+                function downloadPDF() {
+                    const element = document.getElementById('pdf-content');
+                    const btn = document.querySelector('.btn-download');
+                    btn.textContent = "Generating...";
+                    btn.disabled = true;
+
+                    const opt = {
+                        margin: 10, // 10mm margin ensures fit
+                        filename: 'Duty_Notification_${dateStr}.pdf',
+                        image: { type: 'jpeg', quality: 0.98 },
+                        html2canvas: { scale: 2, useCORS: true },
+                        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+                    };
+
+                    html2pdf().set(opt).from(element).save().then(() => {
+                        btn.textContent = "✅ Downloaded";
+                        setTimeout(() => { btn.textContent = "⬇️ Download PDF"; btn.disabled = false; }, 2000);
+                    });
+                }
+            <\/script>
+        </body>
+        </html>
+    `);
+    w.document.close();
+}
+
+// --- Reschedule Notification Modal ---
+function openRescheduleNotification(staffList, oldKey, newKey) {
+    const list = document.getElementById('notif-list-container');
+    const title = document.getElementById('notif-modal-title');
+    const subtitle = document.getElementById('notif-modal-subtitle');
+    const previewEl = document.getElementById('notif-message-preview');
+
+    title.textContent = "⚠️ Send Reschedule Alerts";
+    subtitle.textContent = `Notify ${staffList.length} staff about the time change.`;
+    list.innerHTML = '';
+    currentEmailQueue = [];
+
+    staffList.forEach((email, index) => {
+        const staff = staffData.find(s => s.email === email);
+        const fullName = staff ? staff.name : email;
+        const phone = staff ? (staff.phone || "").replace(/\D/g, '') : "";
+        const validPhone = phone.length >= 10 ? (phone.length === 10 ? "91"+phone : phone) : "";
+        const staffEmail = staff ? staff.email : "";
+
+        // --- GENERATE MESSAGES ---
+        const waMsg = `⚠️ *URGENT: EXAM RESCHEDULED* ⚠️\n\nDear *${fullName}*,\n\nThe exam session originally scheduled for:\n❌ *${oldKey}*\n\nHas been moved to:\n✅ *${newKey}*\n\nYour invigilation duty has been transferred to this new time. Please adjust your calendar accordingly.\n\n- Exam Wing`;
+        
+        const emailBody = `
+            <div style="font-family:Arial,sans-serif; color:#333;">
+                <h2 style="color:#c0392b;">⚠️ Exam Reschedule Alert</h2>
+                <p>Dear <b>${fullName}</b>,</p>
+                <p>This is to inform you that an exam session has been rescheduled.</p>
+                <div style="background:#fff5f5; border-left:4px solid #c0392b; padding:15px; margin:15px 0;">
+                    <p style="margin:0;"><b>Previous Schedule:</b> <strike>${oldKey}</strike></p>
+                    <p style="margin:5px 0 0 0; font-size:1.1em;"><b>New Schedule:</b> <span style="color:#c0392b;">${newKey}</span></p>
+                </div>
+                <p>Your duty assignment has been automatically moved to the new slot.</p>
+                <p>Regards,<br><b>Chief Superintendent</b></p>
+            </div>
+        `;
+
+        const waLink = validPhone ? `https://wa.me/${validPhone}?text=${encodeURIComponent(waMsg)}` : "#";
+        const btnId = `email-btn-${index}`;
+
+        if (staffEmail) {
+            currentEmailQueue.push({ 
+                email: staffEmail, 
+                name: fullName, 
+                subject: "URGENT: Invigilation Duty Rescheduled", 
+                body: emailBody, 
+                btnId: btnId 
+            });
+        }
+
+        // Show preview for first user
+        if (index === 0 && previewEl) {
+            previewEl.textContent = waMsg;
+        }
+
+        list.innerHTML += `
+            <div class="flex justify-between items-center bg-orange-50 border border-orange-200 p-3 rounded-lg shadow-sm mb-2">
+                <div>
+                    <div class="font-bold text-gray-800">${fullName}</div>
+                    <div class="text-xs text-orange-700">Moved to: ${newKey.split('|')[0]}</div>
+                </div>
+                <div class="flex gap-2">
+                     <button id="${btnId}" onclick="sendSingleEmail(this, '${staffEmail}', '${fullName}', 'URGENT: Reschedule Alert', '${emailBody.replace(/"/g, '&quot;')}')" ${staffEmail ? '' : 'disabled'} class="bg-gray-700 hover:bg-gray-800 text-white text-xs font-bold px-3 py-2 rounded shadow transition">Mail</button>
+                     <a href="${waLink}" target="_blank" ${validPhone ? '' : 'disabled'} class="bg-green-600 hover:bg-green-700 text-white text-xs font-bold px-3 py-2 rounded shadow transition">WA Alert</a>
+                </div>
+            </div>
+        `;
+    });
+    
+    // Add Bulk Button Logic
+    list.insertAdjacentHTML('afterbegin', `
+        <div class="mb-3 flex justify-end">
+            <button onclick="sendBulkEmails('btn-bulk-reschedule')" id="btn-bulk-reschedule" class="bg-orange-600 text-white text-xs font-bold px-4 py-2 rounded shadow hover:bg-orange-700 transition flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                Send All Emails
+            </button>
+        </div>
+    `);
+
+    window.openModal('notification-modal');
+}
+
+// ==========================================
+// 📄 DUTY NOTIFICATION PREVIEW (No Signature, No Blank Page)
+// ==========================================
+
+window.printDutyNotification = function(key) {
+    const slot = invigilationSlots[key];
+    if (!slot || slot.assigned.length === 0) return alert("No staff assigned to this session.");
+
+    // 1. DATA PREPARATION
+    const [dateStr, timeStr] = key.split(' | ');
+    const [d, m, y] = dateStr.split('.');
+    const examDate = new Date(`${y}-${m}-${d}`);
+    
+    const excelBaseDate = new Date(1899, 11, 30);
+    const dayDiff = Math.floor((examDate - excelBaseDate) / (1000 * 60 * 60 * 24));
+    
+    const isAN = (timeStr.includes("PM") || timeStr.startsWith("12:") || timeStr.startsWith("12."));
+    const sessionCode = isAN ? "AN" : "FN";
+    const reportTime = calculateReportTime(timeStr);
+    const logoUrl = "logo.png"; 
+
+    // 2. LAYOUT LOGIC (Limit 20)
+    const totalStaff = slot.assigned.length;
+    const useTwoColumns = totalStaff > 20; 
+
+    const generateRow = (email, idx) => {
+        const staff = staffData.find(s => s.email === email) || { name: getNameFromEmail(email), dept: "", phone: "" };
+        let phone = staff.phone || "-";
+        let nameDisplay = staff.name.length > 28 ? staff.name.substring(0, 26) + ".." : staff.name;
+        
+        return `
+            <tr>
+                <td style="text-align: center;">${idx + 1}</td>
+                <td>
+                    <div style="font-weight: bold;">${nameDisplay}</div>
+                    <div style="font-size: 9pt; color: #444;">${staff.dept}</div>
+                </td>
+                <td style="text-align: center; font-size: 9pt;">${phone}</td>
+            </tr>
+        `;
+    };
+
+    let tableContentHtml = "";
+
+    if (useTwoColumns) {
+        // --- 2 COLUMN LAYOUT (No Signature) ---
+        const mid = Math.ceil(totalStaff / 2);
+        const leftList = slot.assigned.slice(0, mid);
+        const rightList = slot.assigned.slice(mid);
+
+        const renderMiniTable = (list, startIdx) => `
+            <table class="staff-table" style="width: 100%; font-size: 9pt;">
+                <thead>
+                    <tr>
+                        <th style="width: 25px;">No</th>
+                        <th>Name & Dept</th>
+                        <th style="width: 80px;">Mobile</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${list.map((email, i) => generateRow(email, startIdx + i)).join('')}
+                </tbody>
+            </table>
+        `;
+
+        tableContentHtml = `
+            <div style="display: flex; gap: 15px; align-items: flex-start;">
+                <div style="flex: 1;">
+                    ${renderMiniTable(leftList, 0)}
+                </div>
+                <div style="flex: 1;">
+                    ${renderMiniTable(rightList, mid)}
+                </div>
+            </div>
+        `;
+    } else {
+        // --- 1 COLUMN LAYOUT (No Signature) ---
+        tableContentHtml = `
+            <table class="staff-table" style="width: 100%; margin-top: 10px;">
+                <thead>
+                    <tr>
+                        <th style="width: 40px;">SL. NO</th>
+                        <th>Name and Department of the Invigilator</th>
+                        <th style="width: 120px;">Mobile</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${slot.assigned.map((email, i) => generateRow(email, i)).join('')}
+                </tbody>
+            </table>
+        `;
+    }
+
+    // 3. OPEN PREVIEW WINDOW
+    const w = window.open('', '_blank');
+    w.document.write(`
+        <html>
+        <head>
+            <title>Notification_${dateStr}_${sessionCode}</title>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"><\/script>
+            <style>
+                @import url('https://fonts.googleapis.com/css2?family=Times+New+Roman&display=swap');
+                
+                body { font-family: 'Times New Roman', serif; background: #f3f4f6; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+                
+                /* CONTROL BAR */
+                #controls {
+                    margin-bottom: 20px; background: white; padding: 10px 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+                }
+                .btn {
+                    padding: 10px 20px; font-weight: bold; border: none; border-radius: 4px; cursor: pointer; font-family: sans-serif; font-size: 14px; margin: 0 5px;
+                }
+                .btn-print { background-color: #374151; color: white; }
+                .btn-download { background-color: #2563eb; color: white; }
+                .btn:hover { opacity: 0.9; }
+
+                /* CONTENT CONTAINER */
+                .content-wrapper {
+                    width: 100%; 
+                    max-width: 200mm; /* Fits safely inside A4 */
+                    /* CHANGED FROM min-height: 297mm TO auto */
+                    height: auto; 
+                    min-height: 100mm; 
+                    background: white;
+                    padding: 10mm 15mm;
+                    box-sizing: border-box;
+                    box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+                }
+
+                .header { text-align: center; margin-bottom: 15px; }
+                .header img { height: 60px; width: auto; margin-bottom: 5px; }
+                .college-name { font-size: 14pt; font-weight: bold; text-transform: uppercase; line-height: 1.2; }
+                .address { font-size: 9pt; }
+                .meta { font-size: 9pt; font-weight: bold; margin-top: 4px; border-bottom: 1px solid #000; padding-bottom: 8px; }
+                
+                .title-section { margin: 12px 0; display: flex; justify-content: space-between; align-items: flex-end; }
+                .designation { font-weight: bold; font-size: 11pt; text-align: left; line-height: 1.2; }
+                .doc-number { font-weight: bold; font-size: 11pt; text-align: right; line-height: 1.2; }
+                
+                .body-text { font-size: 11pt; text-align: justify; margin-bottom: 12px; line-height: 1.3; }
+                
+                .highlight-box { 
+                    font-weight: bold; margin: 12px 0; font-size: 10pt; 
+                    border: 1px solid #000; padding: 6px; text-align: center; background: #f9f9f9; 
+                }
+                
+                /* TABLE */
+                .staff-table { width: 100%; border-collapse: collapse; margin-top: 5px; }
+                .staff-table th, .staff-table td { border: 1px solid black; padding: 5px; vertical-align: middle; }
+                .staff-table th { background-color: #f0f0f0; text-align: center; font-weight: bold; font-size: 10pt; }
+                
+                .footer { margin-top: 40px; text-align: right; font-weight: bold; font-size: 11pt; }
+                .signature-line { display: inline-block; text-align: center; }
+
+                /* PRINT HIDING */
+                @media print {
+                    body { background: white; padding: 0; }
+                    #controls { display: none !important; }
+                    .content-wrapper { box-shadow: none; width: 100%; margin: 0; padding: 0; }
+                    @page { margin: 15mm; }
+                }
+            </style>
+        </head>
+        <body>
+            
+            <div id="controls">
+                <button class="btn btn-print" onclick="window.print()">🖨️ Print</button>
+                <button class="btn btn-download" onclick="downloadPDF()">⬇️ Download PDF</button>
+            </div>
+
+            <div class="content-wrapper" id="pdf-content">
+                <div class="header">
+                    <img src="${logoUrl}" alt="Logo" onerror="this.style.display='none'"> 
+                    <div class="college-name">GOVERNMENT VICTORIA COLLEGE, PALAKKAD</div>
+                    <div class="address">Kerala, India, PIN 678001 | Affiliation: University of Calicut</div>
+                    <div class="meta">📞 0491 2576773 | ✉️ victoriapkd@gmail.com | 🌐 www.gvc.ac.in</div>
+                </div>
+
+                <div class="title-section">
+                    <div class="designation">Chief Superintendent,<br>University Examinations</div>
+                    <div class="doc-number">No: EXAM/${dayDiff}${sessionCode}<br>Date: ${new Date().toLocaleDateString('en-GB')}</div>
+                </div>
+
+                <div class="body-text">
+                    The following teachers have been assigned invigilation duty for the upcoming Calicut University examinations. 
+                    Invigilators are requested to report to the Chief Superintendent's office <strong>30 minutes before</strong> the commencement of the exam.
+                    In case of any inconvenience, invigilators must arrange for a substitute and inform the office accordingly.
+                </div>
+
+                <div class="highlight-box">
+                    EXAM DATE: ${dateStr} &nbsp;|&nbsp; SESSION: ${sessionCode} (${timeStr}) &nbsp;|&nbsp; REPORT BY: ${reportTime}
+                </div>
+
+                ${tableContentHtml}
+
+                <div class="footer">
+                    <div class="signature-line">Chief Superintendent</div>
+                </div>
+            </div>
+
+            <script>
+                function downloadPDF() {
+                    const element = document.getElementById('pdf-content');
+                    const btn = document.querySelector('.btn-download');
+                    btn.textContent = "Generating...";
+                    btn.disabled = true;
+
+                    const opt = {
+                        margin: 10, 
+                        filename: 'Duty_Notification_${dateStr}.pdf',
+                        image: { type: 'jpeg', quality: 0.98 },
+                        html2canvas: { scale: 2, useCORS: true },
+                        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+                    };
+
+                    html2pdf().set(opt).from(element).save().then(() => {
+                        btn.textContent = "✅ Downloaded";
+                        setTimeout(() => { 
+                            btn.textContent = "⬇️ Download PDF"; 
+                            btn.disabled = false; 
+                        }, 2000);
+                    });
+                }
+            <\/script>
+        </body>
+        </html>
+    `);
+    w.document.close();
+}
+
+
 // Network Listeners
 window.addEventListener('online', () => {
     updateSyncStatus("Back Online", "success");
@@ -5353,6 +6046,9 @@ window.addEventListener('online', () => {
 window.addEventListener('offline', () => {
     updateSyncStatus("No Internet", "error");
 });
+
+
+    
 // Initialize Listeners
 setupSearchHandler('att-cs-search', 'att-cs-results', 'att-cs-email', false);
 setupSearchHandler('att-sas-search', 'att-sas-results', 'att-sas-email', false);
