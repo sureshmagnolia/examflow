@@ -500,10 +500,14 @@ function syncDataFromCloud(collegeId) {
             currentCollegeData = mainData; 
 
             // Admin Permission Check
-            if (currentCollegeData.admins && currentUser && currentCollegeData.admins.includes(currentUser.email)) {
+            const isAdminUser = currentCollegeData.admins && currentUser && currentCollegeData.admins.includes(currentUser.email);
+            
+            if (isAdminUser) {
                 if(adminBtn) adminBtn.classList.remove('hidden');
+                if(btnInvigilation) btnInvigilation.classList.remove('hidden'); // <--- SHOW PORTAL BUTTON
             } else {
                 if(adminBtn) adminBtn.classList.add('hidden');
+                if(btnInvigilation) btnInvigilation.classList.add('hidden'); // <--- HIDE PORTAL BUTTON
             }
 
             // === TIMESTAMP CHECK ===
@@ -592,7 +596,7 @@ function syncDataFromCloud(collegeId) {
             // 3. Refresh UI
             updateSyncStatus("Synced", "success");
             loadInitialData();
-            
+            if (typeof updateStudentPortalLink === 'function') updateStudentPortalLink();
             if (typeof viewRoomAllotment !== 'undefined' && !viewRoomAllotment.classList.contains('hidden') && allotmentSessionSelect.value) {
                  allotmentSessionSelect.dispatchEvent(new Event('change'));
             }
@@ -613,7 +617,7 @@ function syncDataFromCloud(collegeId) {
     });
 }
 
-// 4. CLOUD UPLOAD FUNCTION (Network Aware + Smart Filtering)
+// 4. CLOUD UPLOAD FUNCTION (Optimized with Invigilation Slot Sync)
 async function syncDataToCloud() {
     if (!currentUser || !currentCollegeId) return;
     if (isSyncing) return;
@@ -637,7 +641,7 @@ async function syncDataToCloud() {
         let cloudData = {};
         if (cloudSnap.exists()) cloudData = cloudSnap.data();
 
-        // --- STEP 2: Merge Settings ---
+        // --- STEP 2: Smart Merge Settings ---
         const isEmptyOrDefault = (key, val) => {
             if (!val) return true;
             if (key === 'examCollegeName') return val === "University of Calicut";
@@ -671,7 +675,7 @@ async function syncDataToCloud() {
             'examCollegeName', 'examStreamsConfig', 'examRoomConfig', 
             'examQPCodes', 'examScribeList', 'examScribeAllotment', 
             'examAbsenteeList', 'examSessionNames', 'examRulesConfig',
-            'examRemunerationConfig'
+            'examRemunerationConfig', 'examStaffData', 'invigDesignations', 'invigRoles' // Persist Staff/Roles
         ];
 
         const finalMainData = { lastUpdated: timestamp };
@@ -681,8 +685,46 @@ async function syncDataToCloud() {
             if (bestVal) finalMainData[key] = bestVal;
         });
 
-        // --- STEP 3: Bulk Data Handling ---
+        // --- NEW: INVIGILATION SLOT CALCULATOR (SMART MERGE) ---
+        // Calculates requirements locally but preserves cloud assignments
         const localBaseData = localStorage.getItem('examBaseData');
+        if (localBaseData) {
+            const students = JSON.parse(localBaseData);
+            const sessionCounts = {};
+            
+            // 1. Count Students per Session
+            students.forEach(s => {
+                const key = `${s.Date} | ${s.Time}`;
+                sessionCounts[key] = (sessionCounts[key] || 0) + 1;
+            });
+
+            // 2. Get Existing Cloud Slots (to preserve assignments)
+            const cloudSlots = JSON.parse(cloudData.examInvigilationSlots || '{}');
+            const mergedSlots = { ...cloudSlots };
+
+            // 3. Update Requirements
+            Object.keys(sessionCounts).forEach(key => {
+                const count = sessionCounts[key];
+                // Logic: 1 per 30 + 10% Reserve
+                const base = Math.ceil(count / 30);
+                const reserve = Math.ceil(base * 0.10);
+                const totalRequired = base + reserve;
+
+                if (!mergedSlots[key]) {
+                    // New Session
+                    mergedSlots[key] = { required: totalRequired, assigned: [], unavailable: [], isLocked: false };
+                } else {
+                    // Existing: Update ONLY the requirement, keep assignments
+                    mergedSlots[key].required = totalRequired;
+                }
+            });
+
+            // 4. Add to Update Payload
+            finalMainData['examInvigilationSlots'] = JSON.stringify(mergedSlots);
+        }
+        // -------------------------------------------------------
+
+        // --- STEP 3: Bulk Data Handling ---
         let localAllotment = localStorage.getItem('examRoomAllotment');
         const bulkDataObj = {};
         if (localBaseData) bulkDataObj['examBaseData'] = localBaseData;
@@ -705,96 +747,64 @@ async function syncDataToCloud() {
             batch.set(chunkRef, { payload: chunkStr, index: index, totalChunks: chunks.length });
         });
 
-        
-        // --- NEW: SECURE PUBLIC SYNC (Seating + Names + Courses + Scribes) ---
+        // --- STEP 4: PUBLIC SYNC (Student Link) ---
         const publicRef = doc(db, "public_seating", currentCollegeId);
         const namesRef = doc(db, "public_seating", currentCollegeId + "_names");
         const coursesRef = doc(db, "public_seating", currentCollegeId + "_courses");
         
-        const collegeName = localStorage.getItem('examCollegeName') || "Exam Centre";
-        const allotmentData = localStorage.getItem('examRoomAllotment') || '{}';
         const roomConfigData = localStorage.getItem('examRoomConfig') || '{}';
-        const scribeData = localStorage.getItem('examScribeAllotment') || '{}'; // <--- NEW: Scribe Data
-
-        // 1. Prepare Data Maps (Filtered for Today/Future)
-        const todayMidnight = new Date();
-        todayMidnight.setHours(0,0,0,0);
+        const scribeData = localStorage.getItem('examScribeAllotment') || '{}';
         
-        const parseDateKey = (dStr) => {
-            if (!dStr) return new Date(0);
-            const [d, m, y] = dStr.split('.');
-            return new Date(`${y}-${m}-${d}`);
+        // Filter Logic
+        const todayMidnight = new Date(); todayMidnight.setHours(0,0,0,0);
+        const parseDateKey = (d) => {
+            if(!d) return new Date(0);
+            const [dd, mm, yy] = d.split('.');
+            return new Date(`${yy}-${mm}-${dd}`);
         };
 
-        // 2. Filter Allotment & Scribes
         let publicAllotment = {};
-        let publicScribes = {}; // <--- Filtered Scribe Data
-        
-        const rawAllotment = JSON.parse(allotmentData);
+        let publicScribes = {};
+        const rawAllotment = JSON.parse(localAllotment || '{}');
         const rawScribes = JSON.parse(scribeData);
         const activeRegNos = new Set();
 
         Object.keys(rawAllotment).forEach(sessionKey => {
-            const [dateStr] = sessionKey.split(' | ');
-            const examDate = parseDateKey(dateStr);
-            
-            if (examDate >= todayMidnight) {
+            const [dStr] = sessionKey.split(' | ');
+            if (parseDateKey(dStr) >= todayMidnight) {
                 publicAllotment[sessionKey] = rawAllotment[sessionKey];
-                // Keep Scribe Data for this session
-                if (rawScribes[sessionKey]) {
-                    publicScribes[sessionKey] = rawScribes[sessionKey];
-                }
-                
-                // Collect active students
-                rawAllotment[sessionKey].forEach(room => {
-                    room.students.forEach(regNo => activeRegNos.add(regNo));
-                });
+                if(rawScribes[sessionKey]) publicScribes[sessionKey] = rawScribes[sessionKey];
+                rawAllotment[sessionKey].forEach(r => r.students.forEach(s => activeRegNos.add(s)));
             }
         });
 
-// 3. Filter Names & Papers
-        let nameMap = {};
-        let paperMap = {}; 
-        
-        // FIX: Added 'localBaseData' back into the condition and parse function
+        let nameMap = {}; let paperMap = {};
         if (localBaseData) {
              try {
                  const baseData = JSON.parse(localBaseData);
                  baseData.forEach(s => {
                      const r = s['Register Number'];
                      if (r && activeRegNos.has(r)) {
-                         const n = s.Name;
-                         const c = s.Course;
-                         const d = s.Date;
-                         const t = s.Time;
                          const cleanReg = r.toString().trim().toUpperCase();
-
-                         if (n) nameMap[cleanReg] = n.toString().trim();
-                         if (c && d && t) {
-                             const examDate = parseDateKey(d);
-                             if (examDate >= todayMidnight) {
-                                 const paperKey = `${cleanReg}_${d}_${t}`;
-                                 paperMap[paperKey] = c.toString().trim();
-                             }
+                         nameMap[cleanReg] = (s.Name || "").toString().trim();
+                         const d = s.Date; const t = s.Time;
+                         if (s.Course && d && t && parseDateKey(d) >= todayMidnight) {
+                             paperMap[`${cleanReg}_${d}_${t}`] = s.Course.toString().trim();
                          }
                      }
                  });
-             } catch (e) { console.error("Error filtering public data", e); }
+             } catch (e) {}
         }
 
-        // 4. Upload Split Docs
         batch.set(publicRef, {
-            collegeName: collegeName,
+            collegeName: localStorage.getItem('examCollegeName') || "Exam Centre",
             seatingData: JSON.stringify(publicAllotment),
-            scribeData: JSON.stringify(publicScribes), // <--- Uploading Scribes
+            scribeData: JSON.stringify(publicScribes),
             roomData: roomConfigData,
             lastUpdated: new Date().toISOString()
         });
-
         batch.set(namesRef, { json: JSON.stringify(nameMap) });
         batch.set(coursesRef, { json: JSON.stringify(paperMap) });
-        // -------------------------------
-        // ============================================================
 
         await batch.commit();
         
@@ -804,10 +814,7 @@ async function syncDataToCloud() {
 
     } catch (e) {
         console.error("Sync Up Error:", e);
-        if (e.code === 'not-found') {
-             try { await window.firebase.setDoc(window.firebase.doc(db, "colleges", currentCollegeId), { lastUpdated: new Date().toISOString() }); } catch (retryErr) {}
-        }
-        updateSyncStatus(navigator.onLine ? "Save Fail" : "Offline - Saved Locally", "error");
+        updateSyncStatus(navigator.onLine ? "Save Fail" : "Offline", "error");
     } finally {
         isSyncing = false;
     }
@@ -887,21 +894,33 @@ window.removeUser = async function(email) {
     }
 }
 
-// Helper for status UI
+// Helper for status UI (Updates Desktop & Mobile)
 function updateSyncStatus(status, type) {
-    if (!syncStatusDisplay) return;
-    syncStatusDisplay.textContent = status;
-    syncStatusDisplay.className = type === 'success' ? 'text-xs text-green-400' : (type === 'error' ? 'text-xs text-red-400' : 'text-xs text-yellow-400');
-}
+    // 1. Desktop Status (Text)
+    const syncStatusDisplay = document.getElementById('sync-status');
+    if (syncStatusDisplay) {
+        syncStatusDisplay.textContent = status;
+        syncStatusDisplay.className = type === 'success' ? 'text-xs text-green-400' : (type === 'error' ? 'text-xs text-red-400' : 'text-xs text-yellow-400');
+    }
 
+    // 2. Mobile Status (Dot Only)
+    const mobileDot = document.getElementById('mobile-sync-dot');
+    if (mobileDot) {
+        if (type === 'success') mobileDot.className = "md:hidden w-2 h-2 rounded-full bg-green-400 mr-1";
+        else if (type === 'error') mobileDot.className = "md:hidden w-2 h-2 rounded-full bg-red-500 mr-1";
+        else mobileDot.className = "md:hidden w-2 h-2 rounded-full bg-yellow-400 mr-1 animate-pulse";
+    }
+}
 // --- Global var to hold data from the last *report run* ---
 let lastGeneratedRoomData = [];
 let lastGeneratedReportType = "";
 let currentStreamConfig = ["Regular"]; // Default
-
+let isStreamSettingsLocked = true; // Default Locked state for Streams
 // --- (V28) Global var to hold room config map for report generation ---
 let currentRoomConfig = {};
 
+
+let isQPLocked = true; // Default Locked
 // --- (V48) Global var for college name ---
 let currentCollegeName = "University of Calicut";
 
@@ -1549,21 +1568,16 @@ function getRoomCapacitiesFromStorage() {
 // This function performs the *original* (non-scribe) allotment and assigns
 // a definitive seat number to every student.
 // --- *** CENTRAL ALLOCATION FUNCTION (Manual Only) *** ---
+// --- *** CENTRAL ALLOCATION FUNCTION (Manual Only - Fixed Seat Numbers) *** ---
 function performOriginalAllocation(data) {
     const allAllotments = JSON.parse(localStorage.getItem(ROOM_ALLOTMENT_KEY) || '{}');
     const scribeRegNos = new Set((JSON.parse(localStorage.getItem(SCRIBE_LIST_KEY) || '[]')).map(s => s.regNo));
     
-    // Helper to track seat numbers per room
-    const sessionRoomOccupancy = {}; 
-
     const processed_rows_with_rooms = [];
     
     data.forEach(row => {
-        const sessionKey = `${row.Date}_${row.Time}`;
         const sessionKeyPipe = `${row.Date} | ${row.Time}`;
         const isScribe = scribeRegNos.has(row['Register Number']);
-
-        if (!sessionRoomOccupancy[sessionKey]) sessionRoomOccupancy[sessionKey] = {};
 
         let assignedRoomName = "Unallotted";
         let seatNumber = "N/A";
@@ -1572,13 +1586,12 @@ function performOriginalAllocation(data) {
         const manualAllotment = allAllotments[sessionKeyPipe];
         if (manualAllotment) {
             for (const room of manualAllotment) {
-                // Check if student is in this room's list
-                if (room.students.includes(row['Register Number'])) {
+                // FIX: Get the exact index from the room array to match student.html
+                const studentIndex = room.students.indexOf(row['Register Number']);
+                
+                if (studentIndex !== -1) {
                     assignedRoomName = room.roomName;
-                    
-                    // Generate Seat Number
-                    sessionRoomOccupancy[sessionKey][assignedRoomName] = (sessionRoomOccupancy[sessionKey][assignedRoomName] || 0) + 1;
-                    seatNumber = sessionRoomOccupancy[sessionKey][assignedRoomName];
+                    seatNumber = studentIndex + 1; // 0-based index to 1-based seat
                     break;
                 }
             }
@@ -2667,7 +2680,9 @@ generateDaywiseReportButton.addEventListener('click', async () => {
         });
 
         const sortedStreamNames = Object.keys(dataByStream).sort((a, b) => {
+            // Fix: Explicitly handle both sides to ensure Regular is always first
             if (a === "Regular") return -1;
+            if (b === "Regular") return 1; 
             return a.localeCompare(b);
         });
 
@@ -6043,11 +6058,20 @@ sessionSelect.addEventListener('change', () => {
         absenteeListSection.classList.remove('hidden');
         generateAbsenteeReportButton.disabled = false;
         loadAbsenteeList(sessionKey);
+        
+        // *** FIX: Populate the QP Filter Dropdown ***
+        populateAbsenteeQpFilter(sessionKey); 
+        // ******************************************
     } else {
         absenteeSearchSection.classList.add('hidden');
         absenteeListSection.classList.add('hidden');
         generateAbsenteeReportButton.disabled = true;
         currentAbsenteeListDiv.innerHTML = "";
+        
+        // Optional: Reset the filter if no session
+        if (typeof populateAbsenteeQpFilter === 'function') {
+             populateAbsenteeQpFilter(null);
+        }
     }
     clearSearch();
 });
@@ -6255,6 +6279,7 @@ function saveAbsenteeList(sessionKey) {
     localStorage.setItem(ABSENTEE_LIST_KEY, JSON.stringify(allAbsentees));
 }
 
+// Render Absentee List (Responsive: Card on Mobile, Row on PC)
 function renderAbsenteeList() {
     getRoomCapacitiesFromStorage();
     const sessionKey = sessionSelect.value;
@@ -6269,7 +6294,7 @@ function renderAbsenteeList() {
     currentAbsenteeListDiv.innerHTML = "";
     
     if (currentAbsenteeList.length === 0) {
-        currentAbsenteeListDiv.innerHTML = `<em class="text-gray-500">No absentees marked for this session.</em>`;
+        currentAbsenteeListDiv.innerHTML = `<div class="text-center py-6 bg-gray-50 rounded-lg border-2 border-dashed border-gray-200 text-gray-400 text-xs italic">No absentees marked for this session.</div>`;
         return;
     }
 
@@ -6282,7 +6307,7 @@ function renderAbsenteeList() {
             room: s['Room No'], 
             isScribe: s.isScribe, 
             stream: s.Stream,
-            name: s.Name // Capture name for deletion confirmation
+            name: s.Name 
         };
         return map;
     }, {});
@@ -6297,29 +6322,48 @@ function renderAbsenteeList() {
         
         const strm = roomData.stream || "Regular";
 
-        // 2. Determine Button State based on Lock
-        const btnDisabled = isAbsenteeListLocked ? 'disabled' : '';
-        const btnClass = isAbsenteeListLocked 
-            ? 'text-gray-300 cursor-not-allowed' 
-            : 'text-red-600 hover:text-red-800 cursor-pointer';
-
         const item = document.createElement('div');
-        item.className = 'flex justify-between items-center p-2 bg-white border border-gray-200 rounded';
+        // Mobile: Column (Card), Desktop: Row
+        item.className = 'group flex flex-col md:flex-row justify-between items-start md:items-center p-3 bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md transition mb-2 gap-3 md:gap-4';
+
+        // 2. Determine Button State
+        const isLocked = isAbsenteeListLocked;
+        const btnDisabled = isLocked ? 'disabled' : '';
         
+        const btnBase = "text-xs font-bold px-3 py-1.5 rounded border transition w-full md:w-auto text-center flex items-center justify-center gap-1";
+        const btnStyle = isLocked 
+            ? "bg-gray-50 text-gray-400 border-gray-100 cursor-not-allowed" 
+            : "bg-white text-red-600 border-red-200 hover:bg-red-50 hover:border-red-300 cursor-pointer";
+            
+        const btnIcon = isLocked ? '' : '<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>';
+        const btnText = isLocked ? "Locked" : "Remove";
+
         item.innerHTML = `
-            <div class="flex items-center gap-2">
-                <span class="font-medium">${regNo}</span>
-                <span class="text-xs text-gray-600 hidden sm:inline">(${roomData.name})</span>
-                <span class="text-[10px] uppercase font-bold text-purple-700 bg-purple-50 px-1.5 rounded border border-purple-100">${strm}</span>
+            <div class="flex flex-col md:flex-row md:items-center gap-1.5 md:gap-4 w-full min-w-0">
+                <div class="flex items-center justify-between md:justify-start gap-2">
+                    <span class="font-mono font-bold text-gray-800 text-sm bg-gray-100 px-2 py-0.5 rounded md:bg-transparent md:p-0">${regNo}</span>
+                    <span class="text-[10px] uppercase font-bold text-purple-700 bg-purple-50 px-2 py-0.5 rounded border border-purple-100 tracking-wide">${strm}</span>
+                </div>
+                
+                <div class="flex flex-col md:flex-row md:items-center gap-0.5 md:gap-3 min-w-0">
+                    <div class="text-xs text-gray-800 font-medium truncate pl-1 md:pl-0" title="${roomData.name}">
+                        ${roomData.name}
+                    </div>
+                    <div class="text-xs text-gray-400 pl-1 md:pl-0 truncate" title="${roomDisplay}">
+                         ${roomDisplay}
+                    </div>
+                </div>
             </div>
-            <div class="flex items-center gap-3">
-                <span class="text-sm text-gray-500">${roomDisplay}</span>
-                <button class="text-xs font-medium ${btnClass}" ${btnDisabled}>&times; Remove</button>
+            
+            <div class="w-full md:w-auto md:shrink-0 pt-2 md:pt-0 border-t md:border-0 border-gray-100">
+                <button class="${btnBase} ${btnStyle}" ${btnDisabled}>
+                    ${btnIcon} ${btnText}
+                </button>
             </div>
         `;
         
         // 3. Attach Delete Event with Name
-        if (!isAbsenteeListLocked) {
+        if (!isLocked) {
             item.querySelector('button').onclick = () => removeAbsentee(regNo, roomData.name);
         }
         
@@ -6425,7 +6469,6 @@ sessionSelectQP.addEventListener('change', () => {
     }
 });
 
-// V92: Renders the QP Code list (Grouped by Stream)
 // V93: Renders the QP Code list (Regular First, then Alphabetical)
 function render_qp_code_list(sessionKey) {
     const [date, time] = sessionKey.split(' | ');
@@ -6472,9 +6515,7 @@ function render_qp_code_list(sessionKey) {
     uniquePairs.forEach(item => {
         // Add Stream Header if it changes
         if (item.stream !== currentStream) {
-            // Add a spacer if it's not the first group
             const marginTop = currentStream ? "mt-6" : "mt-0";
-            
             htmlChunks.push(`
                 <div class="${marginTop} mb-2 bg-indigo-50 p-2 font-bold text-indigo-800 border-b border-indigo-200 rounded-t-md">
                     ${item.stream} Stream
@@ -6483,28 +6524,39 @@ function render_qp_code_list(sessionKey) {
             currentStream = item.stream;
         }
 
-        // Generate Key using Helper (ensure getQpKey exists in your code)
+        // Generate Key
         const base64Key = getQpKey(item.course, item.stream);
         const savedCode = sessionCodes[base64Key] || "";
 
-       htmlChunks.push(`
+        // *** NEW LOCK LOGIC ***
+        const disabledAttr = isQPLocked ? "disabled" : "";
+        const bgClass = isQPLocked ? "bg-gray-50 text-gray-500" : "bg-white";
+
+        htmlChunks.push(`
         <div class="flex items-center gap-3 p-2 border-b border-gray-200 hover:bg-gray-50">
             <label class="font-medium text-gray-700 w-2/3 text-sm">
                 ${item.course}
             </label>
             <input type="text" 
-                   class="qp-code-input block w-1/3 p-2 border border-gray-300 rounded-md shadow-sm text-sm focus:ring-indigo-500 focus:border-indigo-500" 
+                   class="qp-code-input block w-1/3 p-2 border border-gray-300 rounded-md shadow-sm text-sm focus:ring-indigo-500 focus:border-indigo-500 ${bgClass}" 
                    value="${savedCode}" 
                    data-course-key="${base64Key}"
-                   placeholder="QP Code">
+                   placeholder="QP Code"
+                   ${disabledAttr}>
         </div>
        `);
     });
     
     qpCodeContainer.innerHTML = htmlChunks.join('');
-    saveQpCodesButton.disabled = false;
-    qpCodeStatus.textContent = '';
-}
+    
+    // Disable Save button if locked
+    saveQpCodesButton.disabled = isQPLocked;
+    if(isQPLocked) {
+        saveQpCodesButton.classList.add('opacity-50', 'cursor-not-allowed');
+    } else {
+        saveQpCodesButton.classList.remove('opacity-50', 'cursor-not-allowed');
+    }
+    }
 
 // V89: NEW SAVE STRATEGY
 saveQpCodesButton.addEventListener('click', () => {
@@ -7137,6 +7189,10 @@ window.deleteRoom = function(index) {
 function showRoomSelectionModal() {
     getRoomCapacitiesFromStorage();
     roomSelectionList.innerHTML = '';
+    
+    // Clear previous search
+    const searchInput = document.getElementById('room-selection-search');
+    if(searchInput) searchInput.value = "";
 
     // 1. Smart Default Stream Logic (Existing)
     const [date, time] = currentSessionKey.split(' | ');
@@ -7261,10 +7317,37 @@ function selectRoomForAllotment(roomName, capacity, targetStream) {
     // 3. Find unallotted students MATCHING THE TARGET STREAM
     const candidates = [];
     // Sort first to ensure consistent filling (Stream -> Course -> RegNo)
-    sessionStudentRecords.sort((a, b) => {
-        if (a.Course !== b.Course) return a.Course.localeCompare(b.Course);
-        return a['Register Number'].localeCompare(b['Register Number']);
-    });
+    // *** MODIFIED SORT: Prefix Descending (Z->Y), Number Ascending (001->002) ***
+sessionStudentRecords.sort((a, b) => {
+    // 1. Course Name (A-Z)
+    if (a.Course !== b.Course) return a.Course.localeCompare(b.Course);
+
+    const regA = a['Register Number'] ? a['Register Number'].trim() : "";
+    const regB = b['Register Number'] ? b['Register Number'].trim() : "";
+
+    // Extract Prefix (Letters) and Number (Digits)
+    // Example: "VPAZSBO001" -> Prefix "VPAZSBO", Number "001"
+    const matchA = regA.match(/^([A-Z]+)(\d+)$/i);
+    const matchB = regB.match(/^([A-Z]+)(\d+)$/i);
+
+    if (matchA && matchB) {
+        const prefixA = matchA[1];
+        const numA = parseInt(matchA[2], 10);
+        const prefixB = matchB[1];
+        const numB = parseInt(matchB[2], 10);
+
+        // 2. Sort Prefix DESCENDING (Z comes before Y)
+        if (prefixA !== prefixB) {
+            return prefixB.localeCompare(prefixA); 
+        }
+
+        // 3. Sort Number ASCENDING (1 comes before 2)
+        return numA - numB;
+    }
+
+    // Fallback if Register Number format is standard (Ascending)
+    return regA.localeCompare(regB);
+});
 
     for (const student of sessionStudentRecords) {
         const regNo = student['Register Number'];
@@ -7328,6 +7411,28 @@ closeRoomModal.addEventListener('click', () => {
     roomSelectionModal.classList.add('hidden');
 });
 
+// --- NEW: Room Search Filter Listener ---
+const roomSearchInput = document.getElementById('room-selection-search');
+if (roomSearchInput) {
+    roomSearchInput.addEventListener('input', function() {
+        const query = this.value.toLowerCase();
+        const items = roomSelectionList.children;
+        
+        Array.from(items).forEach(item => {
+            // Prevent hiding the "Stream Selection" dropdown (it has a <select> inside)
+            if (item.querySelector('select')) return;
+
+            // Filter based on text content (Room Name + Location)
+            const text = item.textContent.toLowerCase();
+            if (text.includes(query)) {
+                item.classList.remove('hidden');
+            } else {
+                item.classList.add('hidden');
+            }
+        });
+    });
+}
+
 saveRoomAllotmentButton.addEventListener('click', () => {
     saveRoomAllotment();
     roomAllotmentStatus.textContent = 'Room allotment saved successfully!';
@@ -7336,6 +7441,28 @@ saveRoomAllotmentButton.addEventListener('click', () => {
 });
 
 // --- END ROOM ALLOTMENT FUNCTIONALITY ---
+
+// --- NEW: QP Lock Toggle Listener ---
+const toggleQPLockBtn = document.getElementById('toggle-qp-lock-btn');
+if (toggleQPLockBtn) {
+    toggleQPLockBtn.addEventListener('click', () => {
+        isQPLocked = !isQPLocked;
+        
+        // Update Button UI
+        if (isQPLocked) {
+            toggleQPLockBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" /></svg><span>Codes Locked</span>`;
+            toggleQPLockBtn.className = "text-xs flex items-center gap-1 bg-gray-100 text-gray-600 border border-gray-300 px-3 py-1 rounded hover:bg-gray-200 transition shadow-sm shrink-0 ml-2";
+        } else {
+            toggleQPLockBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 10.5V6.75a4.5 4.5 0 1 1 9 0v3.75M3.75 21.75h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H3.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" /></svg><span>Unlocked</span>`;
+            toggleQPLockBtn.className = "text-xs flex items-center gap-1 bg-red-50 text-red-600 border border-red-200 px-3 py-1 rounded hover:bg-red-100 transition shadow-sm shrink-0 ml-2";
+        }
+        
+        // Re-render list to apply disabled state to inputs
+        if (sessionSelectQP.value) {
+            render_qp_code_list(sessionSelectQP.value);
+        }
+    });
+}
 
 // --- ALLOTMENT LIST LOCK TOGGLE ---
 const toggleAllotmentLockBtn = document.getElementById('toggle-allotment-lock-btn');
@@ -7406,39 +7533,55 @@ window.real_loadGlobalScribeList = function() {
     renderGlobalScribeList();
 }
 
-// 2. Render the global list (Updated with Lock Logic & Stream)
+// 2. Render the global list (Responsive: Card on Mobile, Row on PC)
 function renderGlobalScribeList() {
     if (!currentScribeListDiv) return; 
     currentScribeListDiv.innerHTML = "";
     
     if (globalScribeList.length === 0) {
-        currentScribeListDiv.innerHTML = `<em class="text-gray-500">No students added to the scribe list.</em>`;
+        currentScribeListDiv.innerHTML = `<div class="text-center py-6 bg-gray-50 rounded-lg border-2 border-dashed border-gray-200 text-gray-400 text-xs italic">No scribes added yet.</div>`;
         return;
     }
     
     globalScribeList.forEach(student => {
         const item = document.createElement('div');
-        item.className = 'flex justify-between items-center p-2 bg-white border border-gray-200 rounded';
+        // Mobile: Column (Card), Desktop: Row
+        item.className = 'group flex flex-col md:flex-row justify-between items-start md:items-center p-3 bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md transition mb-2 gap-3 md:gap-4';
         
         const strm = student.stream || "Regular";
         
-        // Determine button state based on Lock
-        const btnDisabled = isScribeListLocked ? 'disabled' : '';
-        const btnClass = isScribeListLocked 
-            ? 'text-gray-300 cursor-not-allowed' 
-            : 'text-red-600 hover:text-red-800 cursor-pointer';
+        // Determine button styling
+        const isLocked = isScribeListLocked;
+        const btnDisabled = isLocked ? 'disabled' : '';
+        
+        // Button: Full width on mobile, auto on desktop
+        const btnBase = "text-xs font-bold px-3 py-1.5 rounded border transition w-full md:w-auto text-center flex items-center justify-center gap-1";
+        const btnStyle = isLocked 
+            ? "bg-gray-50 text-gray-400 border-gray-100 cursor-not-allowed" 
+            : "bg-white text-red-600 border-red-200 hover:bg-red-50 hover:border-red-300 cursor-pointer";
+
+        const btnIcon = isLocked ? '' : '<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>';
+        const btnText = isLocked ? "Locked" : "Remove";
 
         item.innerHTML = `
-            <div class="flex items-center gap-2">
-                <span class="font-medium">${student.regNo}</span>
-                <span class="text-sm text-gray-600">${student.name}</span>
-                <span class="text-[10px] uppercase font-bold text-gray-400 bg-gray-100 px-1.5 rounded border border-gray-200">${strm}</span>
+            <div class="flex flex-col md:flex-row md:items-center gap-1.5 md:gap-3 w-full min-w-0">
+                <div class="flex items-center justify-between md:justify-start gap-2">
+                    <span class="font-mono font-bold text-gray-800 text-sm bg-gray-100 px-2 py-0.5 rounded md:bg-transparent md:p-0">${student.regNo}</span>
+                    <span class="text-[10px] uppercase font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100 tracking-wide">${strm}</span>
+                </div>
+                <div class="text-xs text-gray-600 truncate font-medium pl-1 md:pl-0" title="${student.name}">
+                    ${student.name}
+                </div>
             </div>
-            <button class="text-xs font-medium ${btnClass}" ${btnDisabled}>&times; Remove</button>
+            
+            <div class="w-full md:w-auto md:shrink-0 pt-2 md:pt-0 border-t md:border-0 border-gray-100">
+                <button class="${btnBase} ${btnStyle}" ${btnDisabled}>
+                    ${btnIcon} ${btnText}
+                </button>
+            </div>
         `;
         
-        // Only attach click event if unlocked
-        if (!isScribeListLocked) {
+        if (!isLocked) {
             item.querySelector('button').onclick = () => removeScribeStudent(student.regNo, student.name);
         }
         
@@ -7705,7 +7848,8 @@ async function findAvailableRooms(sessionKey) {
 window.openScribeRoomModal = async function(regNo, studentName) {
     studentToAllotScribeRoom = regNo;
     scribeRoomModalTitle.textContent = `Select Room for ${studentName} (${regNo})`;
-    
+    const searchInput = document.getElementById('scribe-room-search');
+    if(searchInput) searchInput.value = "";
     const sessionKey = allotmentSessionSelect.value; // MODIFIED: Use main allotment selector
 
     // --- NEW: Calculate current scribe room counts ---
@@ -7780,6 +7924,24 @@ scribeCloseRoomModal.addEventListener('click', () => {
     studentToAllotScribeRoom = null;
 });
 
+// --- NEW: Scribe Room Search Filter Listener ---
+const scribeRoomSearchInput = document.getElementById('scribe-room-search');
+if (scribeRoomSearchInput) {
+    scribeRoomSearchInput.addEventListener('input', function() {
+        const query = this.value.toLowerCase();
+        const items = document.getElementById('scribe-room-selection-list').children;
+        
+        Array.from(items).forEach(item => {
+            // Filter based on text content (Room Name)
+            const text = item.textContent.toLowerCase();
+            if (text.includes(query)) {
+                item.classList.remove('hidden');
+            } else {
+                item.classList.add('hidden');
+            }
+        });
+    });
+}
 // **********************************
 
 // --- Helper function to disable all report buttons ---
@@ -7945,10 +8107,12 @@ editCourseSelect.addEventListener('change', () => {
 });
 
 // 3. Render Table (Updated with Stream Column)
+// 3. Render Table (Responsive: Card on Mobile, Table on PC)
 function renderStudentEditTable() {
     editDataContainer.innerHTML = '';
+    
     if (currentCourseStudents.length === 0) {
-        editDataContainer.innerHTML = '<p class="text-gray-500">No students found for this course.</p>';
+        editDataContainer.innerHTML = '<div class="text-gray-500 text-center py-8 bg-gray-50 rounded-lg border border-gray-200 italic">No students found for this course.</div>';
         editPaginationControls.classList.add('hidden');
         return;
     }
@@ -7957,45 +8121,88 @@ function renderStudentEditTable() {
     const end = start + STUDENTS_PER_EDIT_PAGE;
     const pageStudents = currentCourseStudents.slice(start, end);
 
+    // --- NEW RESPONSIVE STRUCTURE ---
+    // 1. Table Header is HIDDEN on Mobile
+    // 2. Table Body becomes a BLOCK on Mobile
+    // 3. Rows become CARDS with borders/shadows on Mobile
+    
     let tableHtml = `
-        <table class="edit-data-table">
-            <thead>
+        <div class="overflow-hidden border-b border-gray-200 sm:rounded-lg">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50 hidden md:table-header-group">
                 <tr>
-                    <th>Sl No</th>
-                    <th>Date</th>
-                    <th>Time</th>
-                    <th>Stream</th> <th>Course</th>
-                    <th>Register Number</th>
-                    <th>Name</th>
-                    <th class="actions-cell">Actions</th>
+                    <th scope="col" class="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Sl</th>
+                    <th scope="col" class="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Date & Time</th>
+                    <th scope="col" class="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Reg No</th>
+                    <th scope="col" class="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Name</th>
+                    <th scope="col" class="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Stream</th>
+                    <th scope="col" class="px-6 py-3 text-right text-xs font-bold text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
             </thead>
-            <tbody>
+            <tbody class="bg-white divide-y divide-gray-200 block md:table-row-group">
     `;
 
     pageStudents.forEach((student, index) => {
         const uniqueRowIndex = start + index; 
         const serialNo = uniqueRowIndex + 1;
-        // Default to "Regular" if stream is missing
         const streamDisplay = student.Stream || "Regular";
         
+        // Card-like styling for Mobile (block, border, margin) vs Table-row for Desktop
         tableHtml += `
-            <tr data-row-index="${uniqueRowIndex}">
-                <td>${serialNo}</td>
-                <td>${student.Date}</td>
-                <td>${student.Time}</td>
-                <td class="font-medium text-indigo-600">${streamDisplay}</td> <td>${student.Course}</td>
-                <td>${student['Register Number']}</td>
-                <td>${student.Name}</td>
-                <td class="actions-cell">
-                    <button class="edit-row-btn text-sm text-blue-600 hover:text-blue-800">Edit</button>
-                    <button class="delete-row-btn text-sm text-red-600 hover:text-red-800 ml-2">Delete</button>
+            <tr data-row-index="${uniqueRowIndex}" class="block md:table-row mb-4 md:mb-0 bg-white border border-gray-200 md:border-0 rounded-lg md:rounded-none shadow-sm md:shadow-none mx-1 md:mx-0">
+                
+                <td class="hidden md:table-cell px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                    ${serialNo}
+                </td>
+
+                <td class="block md:table-cell px-4 py-2 md:px-6 md:py-4 border-b md:border-0 border-gray-100">
+                    <div class="flex justify-between md:block">
+                        <span class="md:hidden text-xs font-bold text-gray-400 uppercase">Schedule</span>
+                        <div>
+                            <div class="text-sm text-gray-900 font-medium">${student.Date}</div>
+                            <div class="text-xs text-gray-500">${student.Time}</div>
+                        </div>
+                    </div>
+                </td>
+
+                <td class="block md:table-cell px-4 py-2 md:px-6 md:py-4 border-b md:border-0 border-gray-100">
+                    <div class="flex justify-between items-center md:block">
+                        <span class="md:hidden text-xs font-bold text-gray-400 uppercase">Reg No</span>
+                        <span class="text-sm font-mono font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded md:bg-transparent md:px-0 md:text-gray-900">
+                            ${student['Register Number']}
+                        </span>
+                    </div>
+                </td>
+
+                <td class="block md:table-cell px-4 py-2 md:px-6 md:py-4 border-b md:border-0 border-gray-100">
+                    <div class="md:hidden text-xs font-bold text-gray-400 uppercase mb-1">Name</div>
+                    <div class="text-sm font-medium text-gray-900">${student.Name}</div>
+                    <div class="text-xs text-gray-400 md:hidden mt-0.5">${student.Course}</div> </td>
+
+                <td class="block md:table-cell px-4 py-2 md:px-6 md:py-4 border-b md:border-0 border-gray-100">
+                    <div class="flex justify-between items-center md:block">
+                        <span class="md:hidden text-xs font-bold text-gray-400 uppercase">Stream</span>
+                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
+                            ${streamDisplay}
+                        </span>
+                    </div>
+                </td>
+
+                <td class="block md:table-cell px-4 py-3 md:px-6 md:py-4 md:text-right bg-gray-50 md:bg-transparent rounded-b-lg md:rounded-none">
+                    <div class="flex justify-end gap-3">
+                        <button class="edit-row-btn flex-1 md:flex-none justify-center inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-bold rounded-md text-indigo-700 bg-indigo-100 hover:bg-indigo-200 focus:outline-none">
+                            Edit
+                        </button>
+                        <button class="delete-row-btn flex-1 md:flex-none justify-center inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-bold rounded-md text-red-700 bg-red-100 hover:bg-red-200 focus:outline-none">
+                            Remove
+                        </button>
+                    </div>
                 </td>
             </tr>
         `;
     });
 
-    tableHtml += `</tbody></table>`;
+    tableHtml += `</tbody></table></div>`;
     editDataContainer.innerHTML = tableHtml;
     renderEditPagination(currentCourseStudents.length);
 }
@@ -10070,21 +10277,31 @@ window.handlePythonExtraction = function(jsonString) {
         populateStreamDropdowns();
     }
 
-    // Render Settings List
+    // Render Settings List (Lock-Aware)
     function renderStreamSettings() {
         if (!streamContainer) return;
         streamContainer.innerHTML = '';
         currentStreamConfig.forEach((stream, index) => {
             const div = document.createElement('div');
             div.className = "flex justify-between items-center bg-white border p-2 rounded text-sm";
+            
+            let actionHtml = '';
+            if (index === 0) {
+                 actionHtml = '<span class="text-xs text-gray-400">(Default)</span>';
+            } else {
+                 // Only show delete button if UNLOCKED
+                 if (!isStreamSettingsLocked) {
+                     actionHtml = `<button class="text-red-500 hover:text-red-700 font-bold px-2" onclick="deleteStream('${stream}')">&times;</button>`;
+                 }
+            }
+
             div.innerHTML = `
                 <span class="font-medium">${stream}</span>
-                ${index > 0 ? `<button class="text-red-500 hover:text-red-700" onclick="deleteStream('${stream}')">&times;</button>` : '<span class="text-xs text-gray-400">(Default)</span>'}
+                ${actionHtml}
             `;
             streamContainer.appendChild(div);
         });
     }
-
 // Populate Dropdowns (Fixed: Variable Name Typo)
     function populateStreamDropdowns() {
         const streamsToRender = (currentStreamConfig && currentStreamConfig.length > 0) 
@@ -10141,13 +10358,10 @@ window.handlePythonExtraction = function(jsonString) {
         }
     }
     
-    // Expose globally
-    window.populateRemunerationDropdowns = populateStreamDropdowns;
-    
-    
-    // Also expose this function globally if needed by remuneration.js init
+        // Also expose this function globally if needed by remuneration.js init
     window.populateRemunerationDropdowns = populateStreamDropdowns;
 
+    
     // Add Stream
     if (addStreamBtn) {
         addStreamBtn.addEventListener('click', () => {
@@ -10358,7 +10572,32 @@ if (generateRoomSummaryButton) {
         }
     });
 }
+// --- Stream Lock Toggle Logic ---
+    const toggleStreamLockBtn = document.getElementById('toggle-stream-lock-btn');
+    const streamInputGroup = document.getElementById('stream-input-group');
 
+    if (toggleStreamLockBtn) {
+        toggleStreamLockBtn.addEventListener('click', () => {
+            isStreamSettingsLocked = !isStreamSettingsLocked;
+            
+            // Update UI based on state
+            if (isStreamSettingsLocked) {
+                // LOCKED STATE
+                toggleStreamLockBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" /></svg><span>List Locked</span>`;
+                toggleStreamLockBtn.className = "text-xs flex items-center gap-1 bg-gray-100 text-gray-600 border border-gray-300 px-3 py-1 rounded hover:bg-gray-200 transition shadow-sm";
+                
+                if(streamInputGroup) streamInputGroup.classList.add('hidden'); // Hide Add inputs
+            } else {
+                // UNLOCKED STATE
+                toggleStreamLockBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 10.5V6.75a4.5 4.5 0 1 1 9 0v3.75M3.75 21.75h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H3.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" /></svg><span>Unlocked</span>`;
+                toggleStreamLockBtn.className = "text-xs flex items-center gap-1 bg-red-50 text-red-600 border border-red-200 px-3 py-1 rounded hover:bg-red-100 transition shadow-sm";
+                
+                if(streamInputGroup) streamInputGroup.classList.remove('hidden'); // Show Add inputs
+            }
+            
+            renderStreamSettings(); // Re-render list to show/hide delete buttons
+        });
+    }
 // Also update real_disable_all_report_buttons to include the new button
 const originalDisableFuncV2 = window.real_disable_all_report_buttons;
 window.real_disable_all_report_buttons = function(disabled) {
@@ -10366,7 +10605,8 @@ window.real_disable_all_report_buttons = function(disabled) {
     const btn = document.getElementById('generate-room-summary-button');
     if(btn) btn.disabled = disabled;
 };
-
+// ==========================================
+const btnInvigilation = document.getElementById('btn-invigilation-portal');
 // ==========================================
 // ☢️ NUKE & SETTINGS MANAGER
 // ==========================================
@@ -10838,17 +11078,91 @@ function loadInitialData() {
         });
     }
 
+   // --- UPDATED PRINT LOGIC: Open Clean Window ---
     if (btnPrintBill) {
         btnPrintBill.addEventListener('click', () => {
-            document.body.classList.add('printing-bill');
-            window.print();
-            setTimeout(() => {
-                document.body.classList.remove('printing-bill');
-            }, 500);
+            // 1. Get the bill content only
+            const billContent = document.getElementById('remuneration-output').innerHTML;
+            if (!billContent.trim()) return alert("No bill generated to print.");
+
+            // 2. Open a new blank window
+            const printWindow = window.open('', '_blank');
+            
+            // 3. Write the clean HTML structure
+            printWindow.document.write(`
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>Print Bill</title>
+                    <script src="https://cdn.tailwindcss.com"><\/script>
+                    <style>
+                        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+                        body { 
+                            font-family: 'Inter', sans-serif; 
+                            background: white; 
+                        }
+
+                        /* PRINT STYLES (A4 Portrait) */
+                        @media print {
+                            @page { 
+                                size: A4 portrait; 
+                                margin: 15mm; 
+                            }
+                            body { 
+                                margin: 0; 
+                                padding: 0; 
+                                -webkit-print-color-adjust: exact; 
+                            }
+                            /* Reset container styles for print */
+                            .print-page { 
+                                border: none !important; 
+                                shadow: none !important; 
+                                width: 100% !important; 
+                                max-width: 100% !important;
+                                margin: 0 !important; 
+                                padding: 0 !important; 
+                                page-break-after: always; 
+                            }
+                            .print-page:last-child { 
+                                page-break-after: auto; 
+                            }
+                            /* Hide any accidental UI elements */
+                            button, .no-print { 
+                                display: none !important; 
+                            }
+                        }
+
+                        /* SCREEN PREVIEW STYLES (Inside the pop-up) */
+                        .print-page {
+                            max-width: 210mm;
+                            margin: 20px auto;
+                            padding: 40px;
+                            border: 1px solid #ddd;
+                            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+                        }
+                    </style>
+                </head>
+                <body>
+                    ${billContent}
+                    <script>
+                        // Auto-print when loaded
+                        window.onload = function() { 
+                            setTimeout(() => {
+                                window.print();
+                                // Optional: window.close(); 
+                            }, 500);
+                        };
+                    <\/script>
+                </body>
+                </html>
+            `);
+            printWindow.document.close();
         });
     }
 
-    // 5. Render Function (Updated: CLEAN B&W - No Shading)
+    // 5. Render Function (Strictly Black & White - No Date)
     function renderBillHTML(bill, container) {
         function numToWords(n) {
             const a = ['','One ','Two ','Three ','Four ','Five ','Six ','Seven ','Eight ','Nine ','Ten ','Eleven ','Twelve ','Thirteen ','Fourteen ','Fifteen ','Sixteen ','Seventeen ','Eighteen ','Nineteen '];
@@ -10879,10 +11193,11 @@ function loadInitialData() {
             ? `<col style="width: 16%;"><col style="width: 12%;"><col style="width: 10%;"><col style="width: 8%;"><col style="width: 8%;"><col style="width: 10%;"><col style="width: 10%;"><col style="width: 10%;"><col style="width: 12%;">`
             : `<col style="width: 16%;"><col style="width: 12%;"><col style="width: 10%;"><col style="width: 8%;"><col style="width: 8%;"><col style="width: 8%;"><col style="width: 10%;"><col style="width: 10%;"><col style="width: 12%;">`;
 
-        const osHeader = isRegular ? '<th class="p-1 border border-black text-center text-black">OS</th>' : '';
-        const peonHeader = hasPeon ? '<th class="p-1 border border-black text-center text-black">Peon</th>' : '';
-        const osFooter = isRegular ? `<td class="p-2 border border-black text-black">₹${bill.supervision_breakdown.office.total}</td>` : '';
-        const peonFooter = hasPeon ? `<td class="p-2 border border-black text-black">₹${bill.peon}</td>` : '';
+        // Added style="background-color:white !important" to force white background
+        const osHeader = isRegular ? '<th class="p-1 border border-black text-center text-black" style="background-color: #ffffff !important;">OS</th>' : '';
+        const peonHeader = hasPeon ? '<th class="p-1 border border-black text-center text-black" style="background-color: #ffffff !important;">Peon</th>' : '';
+        const osFooter = isRegular ? `<td class="p-2 border border-black text-black" style="background-color: #ffffff !important;">₹${bill.supervision_breakdown.office.total}</td>` : '';
+        const peonFooter = hasPeon ? `<td class="p-2 border border-black text-black" style="background-color: #ffffff !important;">₹${bill.peon}</td>` : '';
         const tableTotal = bill.invigilation + bill.clerical + bill.sweeping + bill.peon + bill.supervision;
 
         let supSummaryHTML = isRegular 
@@ -10900,7 +11215,7 @@ function loadInitialData() {
             const peonCell = hasPeon ? `<td class="p-1 border align-middle text-xs text-black">₹${d.peon_cost}</td>` : '';
 
             return `
-                <tr class="border-b border-black text-center">
+                <tr class="border-b border-black text-center" style="background-color: #ffffff !important;">
                     <td class="p-1 border border-black text-left align-middle text-black">${d.date} <br><span class="text-[10px] text-black">${d.time}</span></td>
                     <td class="p-1 border border-black align-middle font-bold text-xs text-black">${studentDetail}</td>
                     <td class="p-1 border border-black align-middle text-xs text-black">${invigDetail}<br><span class="text-black text-[10px]">(₹${d.invig_cost})</span></td>
@@ -10916,56 +11231,56 @@ function loadInitialData() {
         }).join('');
 
         const html = `
-            <div class="bg-white border-2 border-gray-800 shadow-xl p-8 print-page mb-8 relative text-black">
+            <div class="bg-white border-2 border-black p-8 print-page mb-8 relative text-black shadow-none" style="background-color: #ffffff !important;">
                 <div class="text-center border-b-2 border-black pb-4 mb-4">
                     <h2 class="text-xl font-bold uppercase leading-tight text-black">${currentCollegeName}</h2>
                     <h3 class="text-lg font-semibold mt-1 text-black">Remuneration Bill: ${bill.title}</h3>
-                    <p class="text-sm text-black mt-1">Stream: ${bill.stream} | Generated on ${new Date().toLocaleDateString()}</p>
+                    <p class="text-sm text-black mt-1">Stream: ${bill.stream}</p>
                 </div>
-                <table class="w-full border-collapse border border-black text-sm mb-4 table-fixed text-black">
+                <table class="w-full border-collapse border border-black text-sm mb-4 table-fixed text-black" style="background-color: #ffffff !important;">
                     <colgroup>${colGroup}</colgroup>
                     <thead>
-                        <tr>
-                            <th class="p-1 border border-black text-left text-black font-bold">Session</th>
-                            <th class="p-1 border border-black text-center text-black font-bold">Candidates</th>
-                            <th class="p-1 border border-black text-center text-black font-bold">Invig</th>
-                            <th class="p-1 border border-black text-center text-black font-bold">Clerk</th>
+                        <tr style="background-color: #ffffff !important;">
+                            <th class="p-1 border border-black text-left text-black font-bold" style="background-color: #ffffff !important;">Session</th>
+                            <th class="p-1 border border-black text-center text-black font-bold" style="background-color: #ffffff !important;">Candidates</th>
+                            <th class="p-1 border border-black text-center text-black font-bold" style="background-color: #ffffff !important;">Invig</th>
+                            <th class="p-1 border border-black text-center text-black font-bold" style="background-color: #ffffff !important;">Clerk</th>
                             ${peonHeader}
-                            <th class="p-1 border border-black text-center text-black font-bold">Swpr</th>
-                            <th class="p-1 border border-black text-center text-black font-bold">CS</th>
-                            <th class="p-1 border border-black text-center text-black font-bold">SAS</th>
+                            <th class="p-1 border border-black text-center text-black font-bold" style="background-color: #ffffff !important;">Swpr</th>
+                            <th class="p-1 border border-black text-center text-black font-bold" style="background-color: #ffffff !important;">CS</th>
+                            <th class="p-1 border border-black text-center text-black font-bold" style="background-color: #ffffff !important;">SAS</th>
                             ${osHeader}
-                            <th class="p-1 border border-black text-center font-bold text-black">Total</th>
+                            <th class="p-1 border border-black text-center font-bold text-black" style="background-color: #ffffff !important;">Total</th>
                         </tr>
                     </thead>
-                    <tbody>${rows}</tbody>
-                    <tfoot class="font-bold text-xs text-center">
-                        <tr>
-                            <td colspan="2" class="p-2 border border-black text-right text-black">Subtotals:</td>
-                            <td class="p-2 border border-black text-black">₹${bill.invigilation}</td>
-                            <td class="p-2 border border-black text-black">₹${bill.clerical}</td>
+                    <tbody style="background-color: #ffffff !important;">${rows}</tbody>
+                    <tfoot class="font-bold text-xs text-center" style="background-color: #ffffff !important;">
+                        <tr style="background-color: #ffffff !important;">
+                            <td colspan="2" class="p-2 border border-black text-right text-black" style="background-color: #ffffff !important;">Subtotals:</td>
+                            <td class="p-2 border border-black text-black" style="background-color: #ffffff !important;">₹${bill.invigilation}</td>
+                            <td class="p-2 border border-black text-black" style="background-color: #ffffff !important;">₹${bill.clerical}</td>
                             ${peonFooter}
-                            <td class="p-2 border border-black text-black">₹${bill.sweeping}</td>
-                            <td class="p-2 border border-black text-black">₹${bill.supervision_breakdown.chief.total}</td>
-                            <td class="p-2 border border-black text-black">₹${bill.supervision_breakdown.senior.total}</td>
+                            <td class="p-2 border border-black text-black" style="background-color: #ffffff !important;">₹${bill.sweeping}</td>
+                            <td class="p-2 border border-black text-black" style="background-color: #ffffff !important;">₹${bill.supervision_breakdown.chief.total}</td>
+                            <td class="p-2 border border-black text-black" style="background-color: #ffffff !important;">₹${bill.supervision_breakdown.senior.total}</td>
                             ${osFooter}
-                            <td class="p-2 border border-black text-lg text-black">₹${tableTotal}</td>
+                            <td class="p-2 border border-black text-lg text-black" style="background-color: #ffffff !important;">₹${tableTotal}</td>
                         </tr>
                     </tfoot>
                 </table>
-                <div class="summary-box grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4 text-sm border-t-2 border-black pt-4 break-inside-avoid text-black">
-                    <div class="p-3 border border-black">
+                <div class="summary-box grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4 text-sm border-t-2 border-black pt-4 break-inside-avoid text-black" style="background-color: #ffffff !important;">
+                    <div class="p-3 border border-black" style="background-color: #ffffff !important;">
                         <div class="font-bold text-black border-b border-black mb-2 pb-1">1. Supervision Breakdown</div>
                         <div class="text-xs text-black leading-relaxed">${supSummaryHTML}</div>
                     </div>
-                    <div class="space-y-2">
+                    <div class="space-y-2" style="background-color: #ffffff !important;">
                         <div class="flex justify-between border-b border-dotted border-black pb-1 font-bold text-black">2. Other Allowances</div>
                         <div class="flex justify-between border-b border-dotted border-black pb-1 text-black"><span>Contingency:</span> <span class="font-mono font-bold">₹${bill.contingency.toFixed(2)}</span></div>
                         <div class="flex justify-between border-b border-dotted border-black pb-1 text-black"><span>Data Entry Operator:</span> <span class="font-mono font-bold">₹${bill.data_entry}</span></div>
                         <div class="flex justify-between border-b border-dotted border-black pb-1 text-black"><span>Accountant:</span> <span class="font-mono font-bold">₹${(allRates[bill.stream] ? allRates[bill.stream].accountant : 0)}</span></div>
                     </div>
                 </div>
-                <div class="summary-box mt-6 p-3 border border-black flex flex-col items-end break-inside-avoid text-black">
+                <div class="summary-box mt-6 p-3 border border-black flex flex-col items-end break-inside-avoid text-black" style="background-color: #ffffff !important;">
                     <div class="flex justify-between w-full items-center">
                         <span class="text-lg font-bold uppercase">Grand Total Claim</span>
                         <span class="text-2xl font-bold font-mono">₹${bill.grand_total.toFixed(2)}</span>
@@ -10974,15 +11289,79 @@ function loadInitialData() {
                         <span class="text-sm font-bold italic text-black">(Rupees ${amountInWords} Only)</span>
                     </div>
                 </div>
-                <div class="summary-box mt-12 flex justify-end text-sm font-bold break-inside-avoid text-black">
+                <div class="summary-box mt-12 flex justify-end text-sm font-bold break-inside-avoid text-black" style="background-color: #ffffff !important;">
                     <div class="border-t border-black w-1/3 text-center pt-2">Chief Superintendent</div>
                 </div>
             </div>
         `;
         container.insertAdjacentHTML('beforeend', html);
     }
-    
-    // --- NEW: Restore Last Active Tab ---
+
+// ==========================================
+// 🔗 STUDENT PORTAL LINK GENERATOR
+// ==========================================
+
+function updateStudentPortalLink() {
+    const linkInput = document.getElementById('student-portal-link');
+    if (!linkInput) return;
+
+    if (currentCollegeId) {
+        // 1. Get the current base URL
+        let currentUrl = window.location.href;
+        let baseUrl = currentUrl.substring(0, currentUrl.lastIndexOf('/'));
+        
+        // 2. Construct Link with the correct ID format
+        const studentUrl = `${baseUrl}/student.html?id=/public_seating/${currentCollegeId}`;
+        
+        linkInput.value = studentUrl;
+        linkInput.classList.remove('text-gray-400', 'italic');
+        linkInput.classList.add('text-gray-700');
+    } else {
+        linkInput.value = "Please log in to generate your unique link.";
+        linkInput.classList.add('text-gray-400', 'italic');
+    }
+}
+
+// 1. Update when clicking the Settings Tab
+if (navSettings) {
+    navSettings.addEventListener('click', updateStudentPortalLink);
+}
+
+// 2. Copy Button Functionality
+const btnCopyPortal = document.getElementById('copy-portal-btn');
+if (btnCopyPortal) {
+    btnCopyPortal.addEventListener('click', () => {
+        const linkInput = document.getElementById('student-portal-link');
+        if (!linkInput || !linkInput.value.startsWith('http')) return;
+
+        linkInput.select();
+        linkInput.setSelectionRange(0, 99999); // For mobile devices
+        
+        navigator.clipboard.writeText(linkInput.value).then(() => {
+            const originalText = btnCopyPortal.innerHTML;
+            btnCopyPortal.innerHTML = `✅ Copied!`;
+            btnCopyPortal.classList.remove('bg-teal-600');
+            btnCopyPortal.classList.add('bg-green-600');
+            
+            setTimeout(() => {
+                btnCopyPortal.innerHTML = originalText;
+                btnCopyPortal.classList.add('bg-teal-600');
+                btnCopyPortal.classList.remove('bg-green-600');
+            }, 2000);
+        });
+    });
+}
+
+// 3. Initial Call (Try to generate if already logged in)
+updateStudentPortalLink();
+
+
+
+
+
+// Initial Call (in case we start on settings page or refresh)
+updateStudentPortalLink();
+// --- NEW: Restore Last Active Tab ---
     function restoreActiveTab() {
         const savedViewId = localStorage.getItem('lastActiveViewId');
         const savedNavId = localStorage.getItem('lastActiveNavId');
