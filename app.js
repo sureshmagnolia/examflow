@@ -1,4 +1,4 @@
-// --- FUNCTIONS FOR PYTHON BRIDGE ---
+// --- FUNCTIONS FOR PYTHON  BRIDGE ---
 // These 11 functions MUST be outside the DOMContentLoaded listener
 // to be available when Python loads.
 
@@ -332,6 +332,7 @@ const syncStatusDisplay = document.getElementById('sync-status');
 
 // Admin UI Elements
 const adminBtn = document.getElementById('admin-btn');
+const btnInvigilation = document.getElementById('btn-invigilation-portal'); // <--- ADD THIS
 const adminModal = document.getElementById('admin-modal');
 const closeAdminModal = document.getElementById('close-admin-modal');
 const newUserEmailInput = document.getElementById('new-user-email');
@@ -499,15 +500,24 @@ function syncDataFromCloud(collegeId) {
             const mainData = docSnap.data();
             currentCollegeData = mainData; 
 
-            // Admin Permission Check
+           // Admin & Team Permission Check
             const isAdminUser = currentCollegeData.admins && currentUser && currentCollegeData.admins.includes(currentUser.email);
-            
-            if (isAdminUser) {
-                if(adminBtn) adminBtn.classList.remove('hidden');
-                if(btnInvigilation) btnInvigilation.classList.remove('hidden'); // <--- SHOW PORTAL BUTTON
-            } else {
-                if(adminBtn) adminBtn.classList.add('hidden');
-                if(btnInvigilation) btnInvigilation.classList.add('hidden'); // <--- HIDE PORTAL BUTTON
+            const isTeamMember = currentCollegeData.allowedUsers && currentUser && currentCollegeData.allowedUsers.includes(currentUser.email);
+
+            // Show Admin Button (Admins Only)
+            if (adminBtn) {
+                if (isAdminUser) adminBtn.classList.remove('hidden');
+                else adminBtn.classList.add('hidden');
+            }
+
+            // Show Invigilation Button (Admins + Staff)
+            // Anyone in the 'allowedUsers' list can access the portal
+            if (btnInvigilation) {
+                if (isAdminUser || isTeamMember) {
+                    btnInvigilation.classList.remove('hidden');
+                } else {
+                    btnInvigilation.classList.add('hidden');
+                }
             }
 
             // === TIMESTAMP CHECK ===
@@ -531,14 +541,15 @@ function syncDataFromCloud(collegeId) {
 
             console.log("☁️ New cloud data detected. Downloading...");
             
-            // 1. Save Main Keys
-            [
-                'examRoomConfig', 'examStreamsConfig', 'examCollegeName', 
-                'examQPCodes', 'examScribeList', 'examScribeAllotment', 
-                'examAbsenteeList', 'examSessionNames', 'lastUpdated', 'examRulesConfig'
-            ].forEach(key => {
-                if (mainData[key]) localStorage.setItem(key, mainData[key]);
-            });
+           // 1. Save Main Keys (UPDATED)
+        [
+            'examRoomConfig', 'examStreamsConfig', 'examCollegeName', 
+            'examQPCodes', 'examScribeList', 'examScribeAllotment', 
+            'examAbsenteeList', 'examSessionNames', 'lastUpdated', 'examRulesConfig',
+            'examInvigilationSlots', 'examStaffData' // <--- ADDED THESE TWO
+        ].forEach(key => {
+            if (mainData[key]) localStorage.setItem(key, mainData[key]);
+        });
             updateHeaderCollegeName(); // <--- ADD THIS LINE HERE
 
             // -------------------------------------------------------
@@ -1710,7 +1721,7 @@ function updateDashboard() {
         if(dashContainer) dashContainer.classList.add('hidden');
         if(todayContainer) todayContainer.classList.add('hidden');
         return;
-    }
+        }
 
     // 1. UPDATE GLOBAL STATS
     const totalStudents = allStudentData.length;
@@ -1812,6 +1823,8 @@ function updateDashboard() {
     // 5. REFRESH CALENDAR & SETTINGS
     if (typeof renderCalendar === 'function') renderCalendar();
     if (typeof renderExamNameSettings === 'function') renderExamNameSettings();
+    // Check for Invigilation Slots for Today
+    renderDashboardInvigilation();
 }
 
 // ==========================================
@@ -9858,7 +9871,30 @@ async function findMyCollege(user) {
         updateSyncStatus("Auth Error", "error");
     }
 }
-
+// 7. SWITCH COLLEGE (SUPER ADMIN)
+const btnAdminSwitch = document.getElementById('btn-admin-switch-college');
+if (btnAdminSwitch) {
+    btnAdminSwitch.addEventListener('click', () => {
+        const select = document.getElementById('admin-college-select');
+        const newCollegeId = select.value;
+        
+        if (!newCollegeId) return alert("Please select a college to access.");
+        
+        if (confirm(`Switch dashboard to view data for this college?\nID: ${newCollegeId}`)) {
+            // 1. Update Global ID
+            currentCollegeId = newCollegeId;
+            
+            // 2. Trigger Sync
+            syncDataFromCloud(newCollegeId);
+            
+            // 3. Close Modal
+            const modal = document.getElementById('super-admin-modal');
+            if(modal) modal.classList.add('hidden');
+            
+            alert("✅ Switched! Loading data...");
+        }
+    });
+}
 // --- Helper: Generate Unique Key for Comparison ---
     // We compare only Date, Time, and Register Number (User Requirement)
     function getRecordKey(row) {
@@ -10606,7 +10642,6 @@ window.real_disable_all_report_buttons = function(disabled) {
     if(btn) btn.disabled = disabled;
 };
 // ==========================================
-const btnInvigilation = document.getElementById('btn-invigilation-portal');
 // ==========================================
 // ☢️ NUKE & SETTINGS MANAGER
 // ==========================================
@@ -11352,13 +11387,162 @@ if (btnCopyPortal) {
     });
 }
 
-// 3. Initial Call (Try to generate if already logged in)
-updateStudentPortalLink();
+// ==========================================
+// 🖨️ DASHBOARD INVIGILATION PRINTER
+// ==========================================
 
+function renderDashboardInvigilation() {
+    const wrapper = document.getElementById('dashboard-invigilation-wrapper');
+    const container = document.getElementById('dashboard-invigilation-buttons');
+    if (!wrapper || !container) return;
 
+    const slotsJson = localStorage.getItem('examInvigilationSlots');
+    if (!slotsJson) { wrapper.classList.add('hidden'); return; }
 
+    const slots = JSON.parse(slotsJson);
+    
+    // --- FIX: Robust Date Matching (Padded & Unpadded) ---
+    const today = new Date();
+    const d = today.getDate();
+    const m = today.getMonth() + 1;
+    const y = today.getFullYear();
 
+    const pad = (n) => String(n).padStart(2, '0');
+    const todayStrPadded = `${pad(d)}.${pad(m)}.${y}`; // e.g. 01.12.2025
+    const todayStrSimple = `${d}.${m}.${y}`;           // e.g. 1.12.2025
 
+    const todayKeys = Object.keys(slots).filter(k => 
+        k.startsWith(todayStrPadded) || k.startsWith(todayStrSimple)
+    );
+    // -----------------------------------------------------
+    
+    if (todayKeys.length === 0) {
+        wrapper.classList.add('hidden');
+        return;
+    }
+
+    container.innerHTML = '';
+    todayKeys.sort();
+
+    todayKeys.forEach(key => {
+        const timePart = key.split(' | ')[1];
+        const btn = document.createElement('button');
+        btn.className = "bg-white text-indigo-700 hover:bg-indigo-50 font-bold py-2 px-4 rounded shadow-sm text-xs flex items-center gap-2 transition";
+        btn.innerHTML = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg> Print ${timePart}`;
+        btn.onclick = () => printDashboardSession(key, slots[key]);
+        container.appendChild(btn);
+    });
+
+    wrapper.classList.remove('hidden');
+}
+
+// Standalone Print Function (Does not depend on invigilation.js variables)
+function printDashboardSession(key, slot) {
+    const [datePart, timePart] = key.split(' | ');
+    const collegeName = localStorage.getItem('examCollegeName') || "Government Victoria College";
+    
+    // Load Staff Data for Names
+    const staffJson = localStorage.getItem('examStaffData');
+    const staffData = staffJson ? JSON.parse(staffJson) : [];
+    
+    // Identify Session
+    const isAN = (timePart.includes("PM") || timePart.startsWith("12:") || timePart.startsWith("12."));
+    const sessionLabel = isAN ? "AFTERNOON SESSION" : "FORENOON SESSION";
+    
+    // Exam Name Logic
+    let examName = slot.examName || "University Examinations";
+    
+    // Prepare Rows
+    const scribes = slot.scribeCount || 0;
+    const totalStudents = slot.studentCount || 0;
+    const regularStudents = Math.max(0, totalStudents - scribes);
+    const regularInvigs = Math.ceil(regularStudents / 30);
+    const totalRowsToPrint = Math.max((slot.assigned || []).length + 5, regularInvigs + scribes + 2, 20);
+
+    let rowsHtml = "";
+    
+    (slot.assigned || []).forEach((email, index) => {
+        const staff = staffData.find(s => s.email === email) || { name: email.split('@')[0], dept: "" };
+        rowsHtml += `
+            <tr>
+                <td class="center">${index + 1}</td>
+                <td class="bold">${staff.name}</td>
+                <td>${staff.dept}</td>
+                <td></td> <td></td> <td></td> <td></td> <td></td> <td></td>
+            </tr>
+        `;
+    });
+
+    // Empty Rows
+    for (let i = (slot.assigned || []).length; i < totalRowsToPrint; i++) {
+        rowsHtml += `<tr><td class="center">${i + 1}</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`;
+    }
+
+    // Open Print Window
+    const printWindow = window.open('', '_blank');
+    printWindow.document.write(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <title>Invigilation List - ${datePart}</title>
+            <style>
+                @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+                body { font-family: 'Inter', sans-serif; margin: 0; padding: 0; color: #000; }
+                @page { size: A4 portrait; margin: 15mm; }
+                .container { width: 100%; max-width: 210mm; margin: 0 auto; }
+                .header { text-align: center; margin-bottom: 20px; border-bottom: 2px solid #000; padding-bottom: 10px; }
+                .header h1 { margin: 0; font-size: 16pt; text-transform: uppercase; font-weight: 800; }
+                .header h2 { margin: 5px 0 0; font-size: 13pt; font-weight: 600; }
+                .header h3 { margin: 5px 0 0; font-size: 11pt; font-weight: normal; text-transform: uppercase; }
+                .meta { display: flex; justify-content: space-between; font-size: 11pt; font-weight: bold; margin-bottom: 15px; padding: 5px; background-color: #f3f4f6; border: 1px solid #ddd; }
+                table { width: 100%; border-collapse: collapse; font-size: 10pt; }
+                th, td { border: 1px solid #000; padding: 8px 4px; vertical-align: middle; }
+                th { background-color: #e5e7eb !important; font-weight: bold; text-align: center; -webkit-print-color-adjust: exact; }
+                .center { text-align: center; }
+                .bold { font-weight: 600; }
+                .footer { margin-top: 40px; display: flex; justify-content: space-between; font-size: 11pt; font-weight: bold; }
+                .footer div { text-align: center; width: 40%; border-top: 1px solid #000; padding-top: 5px; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>${collegeName}</h1>
+                    <h2>Invigilation Duty List</h2>
+                    <h3>${examName}</h3>
+                </div>
+                <div class="meta">
+                    <span>Date: ${datePart}</span>
+                    <span>${sessionLabel} (${timePart})</span>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 5%;">Sl</th>
+                            <th style="width: 25%; text-align:left; padding-left:8px;">Name of Invigilator</th>
+                            <th style="width: 10%;">Dept</th>
+                            <th style="width: 8%;">RNBB</th>
+                            <th style="width: 8%;">Asgd<br>Script</th>
+                            <th style="width: 8%;">Used<br>Script</th>
+                            <th style="width: 8%;">Retd<br>Script</th>
+                            <th style="width: 18%;">Remarks</th>
+                            <th style="width: 10%;">Sign</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rowsHtml}</tbody>
+                </table>
+                <div class="footer">
+                    <div>Senior Assistant Superintendent</div>
+                    <div>Chief Superintendent</div>
+                </div>
+            </div>
+            <script>window.onload = function() { setTimeout(() => window.print(), 500); };<\/script>
+        </body>
+        </html>
+    `);
+    printWindow.document.close();
+}
 // Initial Call (in case we start on settings page or refresh)
 updateStudentPortalLink();
 // --- NEW: Restore Last Active Tab ---
