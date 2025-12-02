@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ExamFlow Invigilation Portal v10.1</title>
+    <title>ExamFlow Invigilation Portal v10.4</title>
     <script src="tailwind.js"></script>
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
@@ -38,32 +38,55 @@
         .custom-scroll::-webkit-scrollbar-track { background: #f1f1f1; }
         .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 2px; }
     </style>
+<link rel="preconnect" href="https://fonts.googleapis.com/css2">
+<link href="https://fonts.googleapis.com/css2?family=Anek+Malayalam:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+    .font-malayalam { font-family: 'Anek Malayalam', sans-serif; }
+</style>
 </head>
 <body class="bg-gray-50 text-gray-800 h-screen flex flex-col overflow-hidden">
 
-    <header class="bg-white border-b border-gray-200 p-4 flex justify-between items-center shadow-sm z-10">
-        <div class="flex items-center gap-3">
-            <div class="bg-indigo-600 text-white p-2 rounded-lg">
-                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
-            </div>
-            <div>
-                <h1 class="text-lg font-bold text-gray-900 leading-none">Invigilation Portal 10.0</h1>
-                <p id="header-college-name" class="text-xs text-gray-500 font-medium">Exam Wing</p>
+
+
+
+<header class="bg-white border-b border-gray-200 py-2 px-3 md:p-4 flex justify-between items-center shadow-sm z-10 shrink-0 h-14 md:h-auto transition-all">
+    <div class="flex items-center gap-2 md:gap-3 overflow-hidden">
+        <div class="bg-indigo-600 text-white p-1.5 md:p-2 rounded-md md:rounded-lg shadow-sm shrink-0">
+            <svg class="w-5 h-5 md:w-6 md:h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+        </div>
+        <div class="flex flex-col justify-center min-w-0">
+            <h1 class="text-sm md:text-lg font-bold text-gray-900 leading-tight truncate">Invigilation Portal <span class="text-indigo-600">10.1</span></h1>
+            <p id="header-college-name" class="text-[10px] md:text-xs text-gray-500 font-medium truncate max-w-[140px] sm:max-w-md">Exam Wing</p>
+        </div>
+    </div>
+
+    
+    <div id="auth-section" class="hidden flex items-center gap-2 md:gap-4 shrink-0">
+    <button onclick="openModal('help-modal')" class="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 p-1.5 md:px-3 md:py-2 rounded-md text-xs md:text-sm font-bold transition flex items-center gap-1 shadow-sm" title="User Guide / സഹായം">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0 1 18 0z" /></svg>
+        <span class="hidden md:inline">Help</span>
+    </button>
+
+    <button id="btn-hod-monitor" onclick="openHodMonitorModal()" class="hidden bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-200 p-1.5 md:px-3 md:py-2 rounded-md text-xs md:text-sm font-bold transition flex items-center gap-1 shadow-sm">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+        <span class="hidden md:inline">HoD Monitor</span>
+    </button>
+
+    <div class="text-right flex flex-col justify-center">
+        <div id="user-name" class="hidden sm:block text-xs md:text-sm font-bold text-gray-800 truncate max-w-[100px]">User</div>
+        <div class="flex items-center justify-end gap-1.5">
+            <div id="user-role" class="hidden md:block text-[10px] md:text-xs text-indigo-600 font-bold uppercase tracking-wider">Role</div>
+            <div id="sync-status" class="text-[9px] md:text-[10px] font-bold text-gray-400 flex items-center gap-1">
+                <span class="w-1.5 h-1.5 rounded-full bg-gray-400"></span> <span class="hidden sm:inline">Sync</span>
             </div>
         </div>
-        <div id="auth-section" class="hidden flex items-center gap-4">
-            <div class="text-right hidden md:block">
-                <div id="user-name" class="text-sm font-bold text-gray-800">User</div>
-                <div class="flex items-center justify-end gap-2">
-                    <div id="user-role" class="text-xs text-indigo-600 font-bold uppercase tracking-wider">Role</div>
-                    <div id="sync-status" class="text-[10px] font-bold text-gray-400 flex items-center gap-1">
-                        <span class="w-1.5 h-1.5 rounded-full bg-gray-400"></span> Connecting...
-                    </div>
-                </div>
-            </div>
-            <button id="logout-btn" class="bg-gray-100 hover:bg-gray-200 text-gray-600 px-3 py-2 rounded text-sm font-medium">Logout</button>
-        </div>
-    </header>
+    </div>
+    
+    <button id="logout-btn" class="bg-gray-100 hover:bg-gray-200 text-gray-600 px-3 py-1.5 md:px-3 md:py-2 rounded-md text-xs md:text-sm font-bold transition border border-gray-200">
+        Logout
+    </button>
+</div>
+</header> 
 
     <main class="flex-1 overflow-y-auto p-6 relative">
         
@@ -79,14 +102,15 @@
        <div id="view-admin" class="hidden max-w-7xl mx-auto">
        <div id="admin-today-container" class="mb-6 hidden"></div>
             
-            <div class="flex flex-wrap gap-2 sm:gap-4 mb-6 border-b border-gray-200 pb-1">
-                <button onclick="switchAdminTab('staff')" id="tab-btn-staff" class="px-4 py-2 font-bold text-indigo-600 border-b-2 border-indigo-600">Staff Management</button>
-                
-                <button onclick="switchAdminTab('slots')" id="tab-btn-slots" class="px-4 py-2 font-medium text-indigo-500 border-b-2 border-transparent hover:text-gray-700 transition">Duty Allocation</button>
-                
-                <button onclick="switchAdminTab('attendance')" id="tab-btn-attendance" class="px-4 py-2 font-medium text-indigo-500 border-b-2 border-transparent hover:text-gray-700 flex items-center gap-2 transition">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" /></svg>
-                    Mark Attendance
+            <div class="flex p-1 space-x-1 bg-gray-100 rounded-xl mb-6 select-none">
+                <button id="tab-btn-staff" onclick="switchAdminTab('staff')" class="flex-1 py-2 px-2 text-xs md:text-sm font-bold rounded-lg transition shadow bg-white text-indigo-600 text-center">
+                    Staff
+                </button>
+                <button id="tab-btn-slots" onclick="switchAdminTab('slots')" class="flex-1 py-2 px-2 text-xs md:text-sm font-bold rounded-lg transition text-gray-500 hover:bg-gray-200 text-center">
+                    Duty Allocation
+                </button>
+                <button id="tab-btn-attendance" onclick="switchAdminTab('attendance')" class="flex-1 py-2 px-2 text-xs md:text-sm font-bold rounded-lg transition text-gray-500 hover:bg-gray-200 text-center">
+                    Attendance
                 </button>
             </div>
 
@@ -156,7 +180,7 @@
                     </div>
                     <div class="overflow-x-auto">
                         <table class="min-w-full divide-y divide-gray-200">
-                            <thead class="bg-gray-50">
+                            <thead class="bg-gray-50 hidden md:table-header-group">
                                 <tr>
                                     <th class="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase">Staff</th>
                                     <th class="px-6 py-3 text-center text-xs font-bold text-gray-500 uppercase">Target</th>
@@ -168,6 +192,21 @@
                             <tbody id="staff-table-body" class="bg-white divide-y divide-gray-200"></tbody>
                         </table>
                     </div>
+           <div id="staff-pagination-controls" class="fixed bottom-0 left-0 w-full z-50 bg-white border-t border-gray-200 p-3 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)] flex justify-between items-center md:static md:w-auto md:bg-transparent md:border-0 md:shadow-none md:p-0 md:mt-4">
+                <button id="btn-staff-prev" class="px-3 py-1.5 text-xs font-bold text-gray-700 bg-white border border-gray-300 rounded-md shadow-sm hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" /></svg>
+                    Prev
+                </button>
+                <span id="staff-page-info" class="text-xs text-gray-600 font-medium">Page 1 of 1</span>
+                <button id="btn-staff-next" class="px-3 py-1.5 text-xs font-bold text-gray-700 bg-white border border-gray-300 rounded-md shadow-sm hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1">
+                    Next
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" /></svg>
+                </button>
+            </div>
+
+
+
+                    
                 </div>
             </div>
 
@@ -352,11 +391,6 @@
                         </div>
                     </div>
 
-                    <div class="bg-white p-4 rounded-lg shadow-sm border border-gray-200 shrink-0 min-h-[250px] max-h-[350px] overflow-y-auto custom-scroll">
-                        <h3 class="text-xs font-bold text-gray-500 uppercase mb-3 pb-2 border-b">My Upcoming Duties</h3>
-                        <div id="staff-upcoming-list" class="space-y-2">
-                            </div>
-                    </div>
                     <div class="bg-gradient-to-br from-indigo-50 to-white p-4 rounded-lg shadow-sm border border-indigo-100 shrink-0 min-h-[250px] max-h-[350px] overflow-y-auto custom-scroll mt-4">
                         <div class="flex justify-between items-center mb-2 pb-2 border-b border-indigo-100">
                             <h3 class="text-xs font-bold text-indigo-600 uppercase flex items-center gap-1">
@@ -374,64 +408,74 @@
                             <p class="text-xs text-gray-400 italic text-center py-2">No duties available for exchange.</p>
                         </div>
                     </div>
-                   <div class="hidden md:flex bg-white p-4 rounded-lg shadow-sm border border-gray-200 h-[600px] flex-col">
+
+
+                <div class="hidden md:flex bg-white p-4 rounded-lg shadow-sm border border-gray-200 h-[600px] flex-col">
                         <div class="flex justify-between items-center border-b pb-2 mb-2 shrink-0">
                             <div>
-                                <h3 class="text-xs font-bold text-gray-500 uppercase">Duty Priority List</h3>
-                                <span class="text-[9px] bg-gray-100 px-1.5 py-0.5 rounded text-gray-600">Highest Pending 1st</span>
-                            </div>
+                            <h3 class="text-xs font-bold text-gray-500 uppercase">Duty Priority List</h3>
+                            <span class="text-[9px] bg-gray-100 px-1.5 py-0.5 rounded text-gray-600">Highest Pending 1st</span>
+                        </div>
                             <button onclick="openDutyNormsModal()" class="text-[10px] text-indigo-600 border border-indigo-200 bg-indigo-50 px-2 py-1 rounded hover:bg-indigo-100 font-bold flex items-center gap-1">
-                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0 1 18 0z" /></svg>
-                                Norms
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0 1 18 0z" /></svg>
+                            Norms
                             </button>
                         </div>
-                        <div id="staff-rank-list" class="space-y-1 overflow-y-auto custom-scroll flex-1 pr-1"></div>
-                    </div>
-
+                    <div id="staff-rank-list" class="space-y-1 overflow-y-auto custom-scroll flex-1 pr-1"></div>
+                    <div id="staff-rank-pagination" class="mt-2 pt-2 border-t border-gray-100 shrink-0"></div>
                 </div>
-
-                <div class="md:w-3/4 flex flex-col gap-4 h-full">
                     
-                    <div class="bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col flex-1 relative">
-                        <div class="p-4 border-b border-gray-200 flex justify-between items-center bg-gray-50 shrink-0 rounded-t-lg">
-                            <h2 class="text-lg font-bold text-gray-800 flex items-center gap-2">
-                                <svg class="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
-                                <span id="cal-month-title">Month Year</span>
-                            </h2>
-                            <div class="flex gap-2">
-                                <button id="cal-prev" class="p-1 hover:bg-gray-200 rounded"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" /></svg></button>
-                                <button id="cal-next" class="p-1 hover:bg-gray-200 rounded"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" /></svg></button>
-                            </div>
-                        </div>
-                        
-                        <div class="grid grid-cols-7 border-b border-gray-200 bg-gray-50 text-center text-xs font-semibold text-gray-500 py-2 shrink-0">
-                            <div>SUN</div><div>MON</div><div>TUE</div><div>WED</div><div>THU</div><div>FRI</div><div>SAT</div>
-                        </div>
-                        
-                        <div id="calendar-grid" class="grid grid-cols-7 flex-1 overflow-y-auto custom-scroll bg-white"></div>
-                        
-                        <div class="p-2 bg-gray-50 text-[10px] text-gray-500 flex gap-4 justify-center border-t shrink-0 rounded-b-lg">
-                            <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-green-500"></span> Available</span>
-                            <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-blue-600"></span> Assigned</span>
-                            <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-red-500"></span> Unavailable</span>
-                            <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-gray-300"></span> Full/Locked</span>
-                        </div>
-                    </div>
-
-                    <div class="md:hidden bg-white p-4 rounded-lg shadow-sm border border-gray-200 h-[400px] flex flex-col">
-                        <div class="flex justify-between items-center border-b pb-2 mb-2">
-                            <div>
-                                <h3 class="text-xs font-bold text-gray-500 uppercase">Duty Priority List</h3>
-                                <span class="text-[9px] bg-gray-100 px-1.5 py-0.5 rounded text-gray-600">Highest Pending 1st</span>
-                            </div>
-                            <button onclick="openDutyNormsModal()" class="text-[10px] text-indigo-600 border border-indigo-200 bg-indigo-50 px-2 py-1 rounded hover:bg-indigo-100 font-bold flex items-center gap-1">
-                                Norms
-                            </button>
-                        </div>
-                        <div id="staff-rank-list-mobile" class="space-y-1 overflow-y-auto custom-scroll flex-1 pr-1"></div>
-                    </div>
+                   
 
                 </div>
+
+
+<div class="md:w-3/4 flex flex-col gap-4 h-full">
+    
+    <div class="bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col flex-1 relative">
+        <div class="p-4 border-b border-gray-200 flex justify-between items-center bg-gray-50 shrink-0 rounded-t-lg">
+            <h2 class="text-lg font-bold text-gray-800 flex items-center gap-2">
+                <svg class="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+                <span id="cal-month-title">Month Year</span>
+            </h2>
+            <div class="flex gap-2">
+                <button id="cal-prev" class="p-1 hover:bg-gray-200 rounded"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" /></svg></button>
+                <button id="cal-next" class="p-1 hover:bg-gray-200 rounded"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" /></svg></button>
+            </div>
+        </div>
+        
+        <div class="grid grid-cols-7 border-b border-gray-200 bg-gray-50 text-center text-xs font-semibold text-gray-500 py-2 shrink-0">
+            <div>SUN</div><div>MON</div><div>TUE</div><div>WED</div><div>THU</div><div>FRI</div><div>SAT</div>
+        </div>
+        
+        <div id="calendar-grid" class="grid grid-cols-7 flex-1 overflow-y-auto custom-scroll bg-white"></div>
+        
+        <div class="p-2 bg-gray-50 text-[10px] text-gray-500 flex gap-4 justify-center border-t shrink-0 rounded-b-lg">
+            <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-green-500"></span> Available</span>
+            <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-blue-600"></span> Assigned</span>
+            <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-red-500"></span> Unavailable</span>
+            <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-gray-300"></span> Full/Locked</span>
+        </div>
+    </div>
+
+    <div class="md:hidden bg-white p-4 rounded-lg shadow-sm border border-gray-200 h-[400px] flex flex-col mb-24">
+        <div class="flex justify-between items-center border-b pb-2 mb-2 shrink-0">
+            <div>
+                <h3 class="text-xs font-bold text-gray-500 uppercase">Duty Priority List</h3>
+                <span class="text-[9px] bg-gray-100 px-1.5 py-0.5 rounded text-gray-600">Highest Pending 1st</span>
+            </div>
+            <button onclick="openDutyNormsModal()" class="text-[10px] text-indigo-600 border border-indigo-200 bg-indigo-50 px-2 py-1 rounded hover:bg-indigo-100 font-bold flex items-center gap-1">
+                Norms
+            </button>
+        </div>
+        <div id="staff-rank-list-mobile" class="space-y-1 overflow-y-auto custom-scroll flex-1 pr-1"></div>
+        <div id="staff-rank-mobile-pagination" class="mt-2 pt-2 border-t border-gray-100 shrink-0"></div>
+    </div>
+
+</div>
+
+
+                
             </div>
         </div>
 
@@ -844,6 +888,184 @@
             </div>
         </div>
     </div>
+
+
+<div id="help-modal" class="hidden fixed inset-0 bg-gray-900/60 flex justify-center items-end sm:items-center z-50 p-0 sm:p-4 backdrop-blur-sm transition-opacity">
+    <div class="bg-white w-full max-w-3xl h-[95vh] sm:h-auto sm:max-h-[90vh] rounded-t-2xl sm:rounded-xl shadow-2xl flex flex-col overflow-hidden animate-slide-up sm:animate-none">
+        
+        <div class="flex justify-between items-center p-4 border-b border-gray-100 bg-white shrink-0">
+            <div>
+                <h3 class="text-lg font-bold text-gray-800 flex items-center gap-2">
+                    <span class="bg-indigo-100 text-indigo-600 w-8 h-8 rounded-full flex items-center justify-center text-lg">💡</span> 
+                    Help & Guidelines
+                </h3>
+                <p class="text-xs text-gray-500 ml-10 -mt-1">App Guide & Exam Rules / നിർദ്ദേശങ്ങൾ</p>
+            </div>
+            <button onclick="closeModal('help-modal')" class="bg-gray-100 text-gray-500 hover:text-gray-800 p-2 rounded-full transition">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+        </div>
+        
+        <div class="p-4 sm:p-6 overflow-y-auto custom-scroll bg-gray-50/50 space-y-8">
+            
+            <div>
+                <div class="flex items-center gap-2 mb-4">
+                    <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">Part A: App Instructions</span>
+                    <span class="h-px flex-1 bg-gray-200"></span>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
+                        <h4 class="text-xs font-bold text-indigo-600 uppercase mb-2 flex items-center gap-1">
+                            <span class="w-1.5 h-1.5 rounded-full bg-indigo-600"></span> How to Use
+                        </h4>
+                        <ul class="space-y-2 text-xs text-gray-600 leading-relaxed">
+                            <li><b>1. Calendar:</b> <span class="text-blue-600 font-bold">Blue</span>=Your Duty, <span class="text-green-600 font-bold">Green</span>=Vacancy.</li>
+                            <li><b>2. Volunteer:</b> Click a Green date → "Volunteer".</li>
+                            <li><b>3. Leave:</b> Click a date → "Mark Unavailable". (Cannot mark leave if assigned; use Exchange).</li>
+                            <li><b>4. Exchange:</b> Click your Blue slot → "Post for Exchange". You remain responsible until accepted.</li>
+                        </ul>
+                    </div>
+
+                    <div class="bg-white p-4 rounded-xl border border-gray-200 shadow-sm font-malayalam">
+                        <h4 class="text-xs font-bold text-indigo-600 uppercase mb-2 flex items-center gap-1">
+                            <span class="w-1.5 h-1.5 rounded-full bg-indigo-600"></span> ഉപയോഗക്രമം
+                        </h4>
+                        <ul class="space-y-2 text-xs text-gray-600 leading-relaxed">
+                            <li><b>1. കലണ്ടർ:</b> <span class="text-blue-600 font-bold">നീല</span>=ഡ്യൂട്ടി ഉണ്ട്, <span class="text-green-600 font-bold">പച്ച</span>=ഒഴിവുണ്ട്.</li>
+                            <li><b>2. ഡ്യൂട്ടി എടുക്കാൻ:</b> പച്ച തീയതി ക്ലിക്ക് ചെയ്ത് "Volunteer" ചെയ്യുക.</li>
+                            <li><b>3. അവധി:</b> തീയതി ക്ലിക്ക് ചെയ്ത് "Mark Unavailable" നൽകുക. (ഡ്യൂട്ടി ഉണ്ടെങ്കിൽ ലീവ് പറ്റില്ല, പകരം Exchange ചെയ്യണം).</li>
+                            <li><b>4. കൈമാറ്റം:</b> സ്ലോട്ടിൽ ക്ലിക്ക് ചെയ്ത് "Post for Exchange" ചെയ്യുക.</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <div class="font-malayalam">
+                <div class="flex items-center gap-2 mb-4">
+                    <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">Part B: Official Rules</span>
+                    <span class="h-px flex-1 bg-gray-200"></span>
+                </div>
+
+                <div class="bg-white p-5 rounded-xl border border-indigo-100 shadow-sm ring-1 ring-indigo-50">
+                    <h3 class="text-base font-bold text-indigo-900 mb-4 flex items-center gap-2 pb-3 border-b border-gray-100">
+                        <span class="text-xl">📜</span> ഇന്‍വിജിലേഷന്‍ ഡ്യൂട്ടി: പൊതു നിര്‍ദ്ദേശങ്ങൾ
+                    </h3>
+
+                    <p class="bg-blue-50 p-3 rounded-lg border border-blue-100 text-blue-900 text-xs leading-relaxed mb-5">
+                        യുജിസി റെഗുലേഷൻ/കോടതി വിധികൾ പ്രകാരം പരീക്ഷാ ജോലി അധ്യാപകരുടെ ഡ്യൂട്ടിയുടെ ഭാഗമാണ് (Part of Duty). 
+                        അസൗകര്യങ്ങൾ ഉണ്ടെങ്കിൽ സ്വയം പകരം സംവിധാനം ഏർപ്പെടുത്തി ചീഫ് സൂപ്രണ്ടിനെയോ SAS-നെയോ അറിയിക്കുക.
+                    </p>
+
+                    <div class="space-y-6 text-sm text-gray-700 leading-relaxed">
+                        
+                        <div>
+                            <h5 class="font-bold text-gray-900 mb-2 flex items-center gap-2 text-sm">
+                                <span class="bg-gray-100 text-gray-600 w-5 h-5 rounded flex items-center justify-center text-xs">1</span>
+                                പരീക്ഷ തുടങ്ങുന്നതിന് മുൻപ്
+                            </h5>
+                            <ul class="list-disc list-inside pl-1 space-y-1 text-xs sm:text-sm text-gray-600 marker:text-gray-300">
+                                <li><b class="text-gray-900">30 മിനിറ്റ് മുൻപ്</b> ഓഫീസിൽ ഹാജരായി സാമഗ്രികൾ കൈപ്പറ്റുക.</li>
+                                <li>പ്രത്യേക നിർദ്ദേശങ്ങൾ ശ്രദ്ധിക്കുക. ബുക്ക്‌ലെറ്റുകളും ചോദ്യപേപ്പറും എണ്ണി തിട്ടപ്പെടുത്തുക.</li>
+                                <li>RNBB-യിൽ (Attendance Sheet) രജിസ്റ്റർ നമ്പറുകൾ രേഖപ്പെടുത്തുക.</li>
+                                <li><b class="text-gray-900">10 മിനിറ്റ് മുൻപ്</b> പരീക്ഷാ ഹാളിൽ എത്തുക.</li>
+                            </ul>
+                        </div>
+
+                        <div>
+                            <h5 class="font-bold text-gray-900 mb-2 flex items-center gap-2 text-sm">
+                                <span class="bg-gray-100 text-gray-600 w-5 h-5 rounded flex items-center justify-center text-xs">2</span>
+                                ഹാളിലെ നടപടിക്രമങ്ങൾ
+                            </h5>
+                            <ul class="list-disc list-inside pl-1 space-y-1 text-xs sm:text-sm text-gray-600 marker:text-gray-300">
+                                <li>അനുവദിക്കപ്പെട്ട കുട്ടികൾ തന്നെയല്ലേ സീറ്റിൽ എന്ന് ഉറപ്പുവരുത്തുക.</li>
+                                <li>പുസ്തകം, പേപ്പർ, മൊബൈൽ ഫോൺ എന്നിവ മാറ്റിവെപ്പിക്കുക.</li>
+                                <li>ബുക്ക്‌ലെറ്റിൽ രജിസ്റ്റർ നമ്പർ, ചോദ്യപേപ്പർ കോഡ് എന്നിവ കൃത്യമാണെന്ന് ഉറപ്പാക്കിയ ശേഷം മാത്രം ഒപ്പിടുക.</li>
+                            </ul>
+                        </div>
+
+                        <div class="bg-red-50 p-3 rounded-lg border border-red-100 my-4">
+                            <h5 class="font-bold text-red-700 text-sm mb-2 flex items-center gap-2">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                                ശ്രദ്ധിക്കുക: അബ്സെന്റീസ് മാർക്കിംഗ്
+                            </h5>
+                            <ul class="list-disc list-inside pl-1 space-y-1.5 text-xs sm:text-sm text-red-800 marker:text-red-300">
+                                <li>പരീക്ഷ തുടങ്ങി <b class="underline">30 മിനിറ്റിന് ശേഷം</b> മാത്രം Absent രേഖപ്പെടുത്തുക (ചുവന്ന മഷിയിൽ).</li>
+                                <li>കുട്ടികൾ ഹാളിൽ ഇല്ല എന്ന് ഉറപ്പുവരുത്തുക (പിഴ: <b>₹5000</b>).</li>
+                                <li>ആബ്സെന്റ് ആയവരുടെ QP Code അതിനായുള്ള കോളത്തിൽ രേഖപ്പെടുത്തുക.</li>
+                            </ul>
+                        </div>
+
+                        <div>
+                            <h5 class="font-bold text-gray-900 mb-2 flex items-center gap-2 text-sm">
+                                <span class="bg-gray-100 text-gray-600 w-5 h-5 rounded flex items-center justify-center text-xs">3</span>
+                                പരീക്ഷാ സമയത്തും അവസാനവും
+                            </h5>
+                            <ul class="list-disc list-inside pl-1 space-y-1 text-xs sm:text-sm text-gray-600 marker:text-gray-300">
+                                <li>ഹാളിൽ പൂർണ്ണ നിശബ്ദത പാലിക്കുക. ഫോൺ Silent Mode-ൽ സൂക്ഷിക്കുക.</li>
+                                <li>ക്രമക്കേടുകൾ കണ്ടാൽ തെളിവ് സഹിതം റിപ്പോർട്ട് ചെയ്യുക.</li>
+                                <li>ഒരു മണിക്കൂറിന് ശേഷം മാത്രമേ കുട്ടികളെ പുറത്തുവിടാവൂ.</li>
+                                <li>ഭിന്നശേഷിക്കാർക്ക് മണിക്കൂറിന് 20 മിനിറ്റ് അധിക സമയം നൽകുക.</li>
+                            </ul>
+                        </div>
+
+                        <div class="bg-gray-50 p-3 rounded-lg border border-gray-200">
+                            <h6 class="font-bold text-gray-700 text-xs mb-2">തിരികെ ഏൽപ്പിക്കുമ്പോൾ (Submission):</h6>
+                            <p class="text-xs text-gray-500 mb-3">അക്കൗണ്ട് ക്ലോസ് ചെയ്ത്, പേരെഴുതി ഒപ്പിട്ട് 5 മിനിറ്റിനുള്ളിൽ ഏൽപ്പിക്കുക.</p>
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                                <div class="bg-white p-2 rounded border border-gray-100 shadow-sm">
+                                    <span class="block font-bold text-indigo-600 mb-0.5">Barcode ഉള്ളവ:</span>
+                                    QP Code അടിസ്ഥാനത്തിൽ തരംതിരിക്കുക.
+                                </div>
+                                <div class="bg-white p-2 rounded border border-gray-100 shadow-sm">
+                                    <span class="block font-bold text-indigo-600 mb-0.5">Barcode ഇല്ലാത്തവ:</span>
+                                    Register Number ക്രമത്തിൽ അടുക്കുക.
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
+        </div>
+        
+        <div class="p-4 border-t border-gray-200 bg-white shrink-0 flex justify-end">
+            <button onclick="closeModal('help-modal')" class="bg-gray-800 text-white px-6 py-2.5 rounded-lg text-sm font-bold hover:bg-gray-900 shadow-sm transition transform active:scale-95 w-full sm:w-auto">
+                Close Guide
+            </button>
+        </div>
+    </div>
+</div>
+
+
+
+<div id="hod-monitor-modal" class="hidden fixed inset-0 bg-gray-900/60 flex justify-center items-end sm:items-center z-50 p-0 sm:p-4 backdrop-blur-sm transition-opacity">
+    <div class="bg-white w-full max-w-4xl h-[95vh] sm:h-auto sm:max-h-[90vh] rounded-t-2xl sm:rounded-xl shadow-2xl flex flex-col overflow-hidden animate-slide-up sm:animate-none">
+        
+        <div class="flex justify-between items-center p-4 border-b border-gray-100 bg-white shrink-0">
+            <div>
+                <h3 class="text-lg font-bold text-gray-800 flex items-center gap-2">
+                    <span class="bg-purple-100 text-purple-600 w-8 h-8 rounded-full flex items-center justify-center text-lg">👁️</span> 
+                    Department Monitor
+                </h3>
+                <p class="text-xs text-gray-500 ml-10 -mt-1" id="hod-dept-name">Department Overview</p>
+            </div>
+            <button onclick="closeModal('hod-monitor-modal')" class="bg-gray-100 text-gray-500 hover:text-gray-800 p-2 rounded-full transition">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+        </div>
+        
+        <div id="hod-monitor-list" class="p-4 sm:p-6 overflow-y-auto custom-scroll bg-gray-50/50 space-y-4">
+            </div>
+        
+        <div class="p-4 border-t border-gray-200 bg-white shrink-0 flex justify-end">
+            <button onclick="closeModal('hod-monitor-modal')" class="bg-gray-800 text-white px-6 py-2.5 rounded-lg text-sm font-bold hover:bg-gray-900 shadow-sm transition">Close Monitor</button>
+        </div>
+    </div>
+</div>
+    
+    
     <script type="module" src="invigilation.js">
     </script>
 </body>
