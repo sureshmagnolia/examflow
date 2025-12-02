@@ -192,7 +192,8 @@ let currentCollegeId = null; // The shared document ID
 let currentCollegeData = null; // Holds the full data including permissions
 let isSyncing = false;
 let cloudSyncUnsubscribe = null; // [NEW] To track the active listener
-
+let hasUnsavedAllotment = false; // Tracks if room changes need saving
+let isScribeAllotmentLocked = true; // Default to Locked
 // --- MAIN APP LOGIC ---
 document.addEventListener('DOMContentLoaded', () => {
 
@@ -251,6 +252,7 @@ const ROOM_ALLOTMENT_KEY = 'examRoomAllotment';
 const EXAM_RULES_KEY = 'examRulesConfig'; 
 let currentExamRules = []; 
 let isExamRulesLocked = true; // <--- ADD THIS NEW VARIABLE
+let isAddingExamSchedule = false; // Controls visibility of the schedule form    
 let isAllotmentLocked = true; // Default locked state for Room Allotment
 // ******************************
     
@@ -1143,6 +1145,31 @@ const restoreStatus = document.getElementById('restore-status');
 const toggleButton = document.getElementById('sidebar-toggle');
 const sidebar = document.getElementById('main-nav');
 
+// --- INJECT DOWNLOAD BUTTON FOR REPORTS ---
+const btnDownloadReport = document.createElement('button');
+btnDownloadReport.id = 'download-report-pdf-btn';
+btnDownloadReport.className = "flex-1 inline-flex justify-center items-center rounded-md border border-transparent bg-green-600 py-2 px-4 text-sm font-medium text-white shadow-sm hover:bg-green-700";
+btnDownloadReport.innerHTML = `⬇️ Download PDF`;
+
+if (finalPrintButton && finalPrintButton.parentNode) {
+    // Insert only if not already there
+    if (!document.getElementById('download-report-pdf-btn')) {
+        finalPrintButton.parentNode.insertBefore(btnDownloadReport, finalPrintButton.nextSibling);
+    }
+}
+
+// Attach Listener
+btnDownloadReport.addEventListener('click', () => {
+    const content = document.getElementById('report-output-area').innerHTML;
+    if (!content.trim()) return alert("No report generated.");
+    
+    const filename = (typeof lastGeneratedReportType !== 'undefined' && lastGeneratedReportType) 
+                     ? lastGeneratedReportType 
+                     : "Exam_Report";
+                     
+    openPdfPreview(content, filename);
+});
+    
 if (toggleButton && sidebar) {
     toggleButton.addEventListener('click', () => {
         // Check if we are on Mobile (window width < 768px)
@@ -1187,6 +1214,34 @@ if (closeSidebarBtn) {
 }
 // --- END: Sidebar Toggle Logic ---
 
+// --- SCRIBE ALLOTMENT LOCK TOGGLE ---
+const toggleScribeAllotmentLockBtn = document.getElementById('toggle-scribe-allotment-lock-btn');
+if (toggleScribeAllotmentLockBtn) {
+    toggleScribeAllotmentLockBtn.addEventListener('click', () => {
+        isScribeAllotmentLocked = !isScribeAllotmentLocked;
+        
+        if (isScribeAllotmentLocked) {
+            toggleScribeAllotmentLockBtn.innerHTML = `
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" /></svg>
+                <span>List Locked</span>
+            `;
+            toggleScribeAllotmentLockBtn.className = "text-xs flex items-center gap-1 bg-gray-100 text-gray-600 border border-gray-300 px-3 py-1 rounded hover:bg-gray-200 transition shadow-sm";
+        } else {
+            toggleScribeAllotmentLockBtn.innerHTML = `
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 10.5V6.75a4.5 4.5 0 1 1 9 0v3.75M3.75 21.75h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H3.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" /></svg>
+                <span>Unlocked</span>
+            `;
+            toggleScribeAllotmentLockBtn.className = "text-xs flex items-center gap-1 bg-red-50 text-red-600 border border-red-200 px-3 py-1 rounded hover:bg-red-100 transition shadow-sm";
+        }
+        
+        // Refresh the list to apply disabled state
+        if (allotmentSessionSelect && allotmentSessionSelect.value) {
+            renderScribeAllotmentList(allotmentSessionSelect.value);
+        }
+    });
+}
+    
+    
 // [In app.js - Replace the previous Exam Name logic with this]
 
 const EXAM_NAMES_KEY = 'examSessionNames';
@@ -1260,12 +1315,11 @@ function getExamName(date, time, stream) {
     return ""; // No match found
 }
 
-// --- UI: Render the Scheduler Interface (Updated with Lock) ---
+// --- UI: Render the Scheduler Interface (Mobile Friendly & Tidy) ---
 function renderExamNameSettings() {
     const container = document.getElementById('exam-names-grid');
     const section = document.getElementById('exam-names-section');
     
-    // Load Rules
     const saved = localStorage.getItem(EXAM_RULES_KEY);
     currentExamRules = saved ? JSON.parse(saved) : [];
 
@@ -1274,101 +1328,157 @@ function renderExamNameSettings() {
     section.classList.remove('hidden');
     container.innerHTML = '';
 
-    // --- 1. ADD NEW ENTRY FORM ---
-    const streams = (typeof currentStreamConfig !== 'undefined') ? currentStreamConfig : ["Regular"];
-    const streamOptions = streams.map(s => `<option value="${s}">${s}</option>`).join('');
-    
-    const formHtml = `
-        <div class="bg-white p-5 rounded-lg border border-gray-200 shadow-sm mb-6">
-            <div class="flex justify-between items-center mb-4">
-                <h3 class="text-base font-bold text-gray-800 flex items-center gap-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-indigo-600"><path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5" /></svg>
-                    Schedule New Exam
-                </h3>
-                <button id="toggle-exam-rules-lock" class="text-xs flex items-center gap-1 px-3 py-1 rounded transition shadow-sm ${isExamRulesLocked ? 'bg-gray-100 text-gray-600 border border-gray-300 hover:bg-gray-200' : 'bg-red-50 text-red-600 border border-red-200 hover:bg-red-100'}">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="${isExamRulesLocked ? 'M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25 2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z' : 'M13.5 10.5V6.75a4.5 4.5 0 1 1 9 0v3.75M3.75 21.75h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H3.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z'}" />
-                    </svg>
-                    <span>${isExamRulesLocked ? 'List Locked' : 'Unlocked'}</span>
-                </button>
-            </div>
-            
-            <div class="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
-                <div class="md:col-span-4">
-                    <label class="block text-xs font-bold text-gray-500 uppercase mb-1">Exam Name</label>
-                    <input type="text" id="rule-name" class="block w-full p-2 border border-gray-300 rounded text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500" placeholder="e.g. 5th Semester B.Sc">
-                </div>
+    // --- 1. HEADER TOOLBAR (Responsive Wrap) ---
+    // Change: Added flex-wrap and adjusted gap/margins for cleaner mobile spacing
+    const lockBtnHtml = `
+        <button id="toggle-exam-rules-lock" class="text-xs flex items-center gap-1 px-3 py-1.5 rounded-full transition shadow-sm font-medium border ${isExamRulesLocked ? 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100' : 'bg-white text-red-600 border-red-200 hover:bg-red-50'}">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="${isExamRulesLocked ? 'M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25 2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z' : 'M13.5 10.5V6.75a4.5 4.5 0 1 1 9 0v3.75M3.75 21.75h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H3.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z'}" />
+            </svg>
+            <span>${isExamRulesLocked ? 'Locked' : 'Unlocked'}</span>
+        </button>
+    `;
 
-                <div class="md:col-span-2">
-                    <label class="block text-xs font-bold text-gray-500 uppercase mb-1">Stream</label>
-                    <select id="rule-stream" class="block w-full p-2 border border-gray-300 rounded text-sm bg-white">
-                        <option value="All Streams">All Streams</option>
-                        ${streamOptions}
-                    </select>
-                </div>
-
-                <div class="md:col-span-3 bg-gray-50 p-2 rounded border border-gray-200">
-                    <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">From</label>
-                    <div class="flex gap-1">
-                        <input type="date" id="rule-start-date" class="w-full p-1.5 border border-gray-300 rounded text-xs cursor-pointer" onclick="this.showPicker()">
-                        <select id="rule-start-session" class="w-16 p-1.5 border border-gray-300 rounded text-xs">
-                            <option value="FN">FN</option>
-                            <option value="AN">AN</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="md:col-span-3 bg-gray-50 p-2 rounded border border-gray-200">
-                    <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">To</label>
-                    <div class="flex gap-1">
-                        <input type="date" id="rule-end-date" class="w-full p-1.5 border border-gray-300 rounded text-xs cursor-pointer" onclick="this.showPicker()">
-                        <select id="rule-end-session" class="w-16 p-1.5 border border-gray-300 rounded text-xs">
-                            <option value="AN" selected>AN</option>
-                            <option value="FN">FN</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="md:col-span-12 flex justify-end mt-2">
-                    <button id="add-rule-btn" class="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded text-sm font-medium shadow-sm transition">
-                        + Add to Schedule
-                    </button>
-                </div>
+    const headerHtml = `
+        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-3">
+            <h3 class="text-lg font-bold text-gray-800 flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-indigo-600"><path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5" /></svg>
+                Exam Schedule
+            </h3>
+            <div class="flex items-center gap-2 w-full sm:w-auto justify-between sm:justify-end">
+                 ${lockBtnHtml}
+                 ${!isAddingExamSchedule ? `<button onclick="setExamScheduleMode(true)" class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-4 py-1.5 rounded-full shadow-sm transition flex items-center gap-1">+ New Schedule</button>` : ''}
             </div>
         </div>
     `;
 
-    // --- 2. LIST EXISTING RULES (Database View) ---
+    // --- 2. ADD FORM (Mobile Optimized) ---
+    // Change: Increased vertical gaps, cleaner input styling, distinct sections for dates
+    let formHtml = '';
+    if (isAddingExamSchedule) {
+        const streams = (typeof currentStreamConfig !== 'undefined') ? currentStreamConfig : ["Regular"];
+        const streamOptions = streams.map(s => `<option value="${s}">${s}</option>`).join('');
+        
+        formHtml = `
+            <div class="bg-white p-4 sm:p-5 rounded-xl border border-indigo-100 shadow-lg mb-6 relative ring-1 ring-indigo-50">
+                <div class="flex justify-between items-center mb-4 pb-2 border-b border-gray-100">
+                    <h4 class="text-sm font-bold text-indigo-800 uppercase tracking-wide">Add New Exam</h4>
+                    <button onclick="setExamScheduleMode(false)" class="text-gray-400 hover:text-red-500 transition p-1">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" /></svg>
+                    </button>
+                </div>
+                
+                <div class="grid grid-cols-1 md:grid-cols-12 gap-4">
+                    <div class="md:col-span-8">
+                        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Exam Name</label>
+                        <input type="text" id="rule-name" class="block w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition" placeholder="e.g. 5th Semester B.Sc November 2025">
+                    </div>
+
+                    <div class="md:col-span-4">
+                        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Applied Stream</label>
+                        <select id="rule-stream" class="block w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none">
+                            <option value="All Streams">All Streams (General)</option>
+                            ${streamOptions}
+                        </select>
+                    </div>
+
+                    <div class="md:col-span-6">
+                        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Starts From</label>
+                        <div class="flex gap-2">
+                            <input type="date" id="rule-start-date" class="flex-grow px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 bg-white cursor-pointer focus:ring-1 focus:ring-indigo-500 outline-none" onclick="this.showPicker()">
+                            <select id="rule-start-session" class="w-20 px-2 py-2 border border-gray-300 rounded-lg text-sm bg-gray-50 font-medium">
+                                <option value="FN">FN</option>
+                                <option value="AN">AN</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="md:col-span-6">
+                        <label class="block text-xs font-semibold text-gray-600 mb-1.5">Ends On</label>
+                        <div class="flex gap-2">
+                            <input type="date" id="rule-end-date" class="flex-grow px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 bg-white cursor-pointer focus:ring-1 focus:ring-indigo-500 outline-none" onclick="this.showPicker()">
+                            <select id="rule-end-session" class="w-20 px-2 py-2 border border-gray-300 rounded-lg text-sm bg-gray-50 font-medium">
+                                <option value="AN" selected>AN</option>
+                                <option value="FN">FN</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="mt-5 flex justify-end gap-3 pt-3 border-t border-gray-100">
+                    <button onclick="setExamScheduleMode(false)" class="px-4 py-2 rounded-lg text-xs font-bold text-gray-500 hover:bg-gray-100 transition">Cancel</button>
+                    <button id="add-rule-btn" class="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2 rounded-lg text-xs font-bold shadow-md transform active:scale-95 transition">
+                        Save Schedule
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
+    // --- 3. HYBRID LIST VIEW (Mobile Cards + Desktop Table) ---
+    // Change: Created two separate visual structures based on screen size
     let listHtml = '';
+    
     if (currentExamRules.length > 0) {
-        const sortedRules = [...currentExamRules].sort((a, b) => {
-            return new Date(a.startDate) - new Date(b.startDate);
+        const sortedRules = [...currentExamRules].sort((a, b) => new Date(a.startDate) - new Date(b.startDate));
+        
+        // A. Mobile Cards View (Visible on < md)
+        let mobileCards = '';
+        sortedRules.forEach(rule => {
+            const fmt = (d) => d.split('-').reverse().slice(0, 2).join('/');
+            const onclickAction = isExamRulesLocked ? '' : `onclick="deleteExamRule('${rule.id}')"`;
+            const deleteBtn = isExamRulesLocked ? '' : `
+                <button class="absolute top-3 right-3 p-1.5 bg-white text-red-500 border border-red-100 rounded-full shadow-sm hover:bg-red-50" ${onclickAction}>
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                </button>`;
+
+            mobileCards += `
+                <div class="bg-white p-4 rounded-lg border border-gray-200 shadow-sm relative flex flex-col gap-2">
+                    ${deleteBtn}
+                    <div>
+                        <span class="text-[10px] uppercase font-bold text-gray-400 tracking-wider">Exam Name</span>
+                        <div class="font-bold text-gray-800 text-sm leading-tight pr-8">${rule.examName}</div>
+                    </div>
+                    
+                    <div class="flex items-center gap-2">
+                        <span class="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded text-[10px] font-bold border border-indigo-100 uppercase">${rule.stream}</span>
+                    </div>
+
+                    <div class="mt-1 pt-2 border-t border-gray-100 flex items-center justify-between text-xs text-gray-600">
+                        <div>
+                            <span class="block text-[9px] text-gray-400 font-bold uppercase">From</span>
+                            ${fmt(rule.startDate)} <span class="font-bold text-orange-600">${rule.startSession}</span>
+                        </div>
+                        <div class="text-gray-300">➜</div>
+                        <div class="text-right">
+                            <span class="block text-[9px] text-gray-400 font-bold uppercase">To</span>
+                            ${fmt(rule.endDate)} <span class="font-bold text-indigo-600">${rule.endSession}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
         });
 
-        let rows = '';
-        sortedRules.forEach((rule) => {
+        // B. Desktop Table View (Visible on >= md)
+        let desktopRows = '';
+        sortedRules.forEach(rule => {
             const fmt = (d) => d.split('-').reverse().slice(0, 2).join('/');
-            
-            // CHECK LOCK STATE FOR DELETE BUTTON
-            const btnState = isExamRulesLocked 
-                ? 'disabled opacity-30 cursor-not-allowed text-gray-400' 
-                : 'text-red-500 hover:text-red-700 cursor-pointer';
-            
+            const btnState = isExamRulesLocked ? 'disabled opacity-30 cursor-not-allowed text-gray-400' : 'text-red-500 hover:text-red-700 hover:bg-red-50 rounded';
             const onclickAction = isExamRulesLocked ? '' : `onclick="deleteExamRule('${rule.id}')"`;
 
-            rows += `
-                <tr class="hover:bg-gray-50 border-b border-gray-100 last:border-0">
+            desktopRows += `
+                <tr class="hover:bg-gray-50 border-b border-gray-100 last:border-0 transition">
                     <td class="px-4 py-3 text-sm font-bold text-gray-800">${rule.examName}</td>
-                    <td class="px-4 py-3 text-xs text-gray-600">
-                        <span class="bg-gray-100 px-2 py-1 rounded border border-gray-200">${rule.stream}</span>
+                    <td class="px-4 py-3 text-xs">
+                        <span class="bg-gray-100 text-gray-600 px-2 py-1 rounded border border-gray-200 font-medium">${rule.stream}</span>
                     </td>
                     <td class="px-4 py-3 text-sm text-gray-700 whitespace-nowrap">
-                        ${fmt(rule.startDate)} <span class="text-xs font-bold text-orange-600">${rule.startSession}</span>
-                        <span class="text-gray-400 mx-2">➝</span>
-                        ${fmt(rule.endDate)} <span class="text-xs font-bold text-indigo-600">${rule.endSession}</span>
+                        <span class="font-mono text-gray-500">${fmt(rule.startDate)}</span> <span class="text-xs font-bold text-orange-600 bg-orange-50 px-1 rounded">${rule.startSession}</span>
+                        <span class="text-gray-300 mx-1">➜</span>
+                        <span class="font-mono text-gray-500">${fmt(rule.endDate)}</span> <span class="text-xs font-bold text-indigo-600 bg-indigo-50 px-1 rounded">${rule.endSession}</span>
                     </td>
                     <td class="px-4 py-3 text-right">
-                        <button class="p-1 ${btnState}" ${onclickAction} title="${isExamRulesLocked ? 'Unlock list to delete' : 'Delete'}">
+                        <button class="p-1.5 transition ${btnState}" ${onclickAction} title="Delete">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" /></svg>
                         </button>
                     </td>
@@ -1377,36 +1487,42 @@ function renderExamNameSettings() {
         });
 
         listHtml = `
-            <div class="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+            <div class="md:hidden flex flex-col gap-2">
+                ${mobileCards}
+            </div>
+
+            <div class="hidden md:block bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
                 <table class="w-full text-left border-collapse">
                     <thead class="bg-gray-50 border-b border-gray-200">
                         <tr>
-                            <th class="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Exam Name</th>
-                            <th class="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Stream</th>
-                            <th class="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Schedule Range</th>
-                            <th class="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">Action</th>
+                            <th class="px-4 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Exam Name</th>
+                            <th class="px-4 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Stream</th>
+                            <th class="px-4 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">Schedule Range</th>
+                            <th class="px-4 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">Action</th>
                         </tr>
                     </thead>
-                    <tbody>${rows}</tbody>
+                    <tbody>${desktopRows}</tbody>
                 </table>
             </div>
         `;
     } else {
-        listHtml = `<div class="text-center text-gray-400 italic py-4 bg-white border border-dashed border-gray-300 rounded-lg">No exams scheduled yet. Add one above.</div>`;
+        listHtml = `<div class="text-center text-gray-400 text-sm py-8 border-2 border-dashed border-gray-200 rounded-xl bg-gray-50">
+            <p>No exams scheduled yet.</p>
+            <p class="text-xs mt-1">Click "New Schedule" to define Exam Names for reports.</p>
+        </div>`;
     }
 
-    container.innerHTML = formHtml + listHtml;
+    container.innerHTML = headerHtml + formHtml + listHtml;
 
-    // --- ATTACH LOCK LISTENER ---
+    // --- RE-ATTACH LISTENERS (Logic remains same) ---
     const lockBtn = document.getElementById('toggle-exam-rules-lock');
     if(lockBtn) {
         lockBtn.addEventListener('click', () => {
             isExamRulesLocked = !isExamRulesLocked;
-            renderExamNameSettings(); // Re-render UI to reflect new state
+            renderExamNameSettings(); 
         });
     }
 
-    // --- ATTACH ADD BUTTON LISTENER ---
     const addBtn = document.getElementById('add-rule-btn');
     if(addBtn) {
         addBtn.addEventListener('click', () => {
@@ -1417,17 +1533,9 @@ function renderExamNameSettings() {
             const eDate = document.getElementById('rule-end-date').value;
             const eSess = document.getElementById('rule-end-session').value;
 
-            if (!name || !sDate || !eDate) {
-                alert("Please fill in Name, Start Date, and End Date.");
-                return;
-            }
+            if (!name || !sDate || !eDate) { alert("Please fill in Name, Start Date, and End Date."); return; }
+            if (new Date(sDate) > new Date(eDate)) { alert("Start Date cannot be after End Date."); return; }
 
-            if (new Date(sDate) > new Date(eDate)) {
-                alert("Start Date cannot be after End Date.");
-                return;
-            }
-
-            // Create Rule Object
             const newRule = {
                 id: Date.now().toString(),
                 examName: name,
@@ -1441,10 +1549,17 @@ function renderExamNameSettings() {
             currentExamRules.push(newRule);
             localStorage.setItem(EXAM_RULES_KEY, JSON.stringify(currentExamRules));
             
+            isAddingExamSchedule = false; 
             renderExamNameSettings();
             if (typeof syncDataToCloud === 'function') syncDataToCloud();
         });
     }
+}
+
+// Helper to toggle the "Add New" form
+window.setExamScheduleMode = function(isAdding) {
+    isAddingExamSchedule = isAdding;
+    renderExamNameSettings();
 }
 
 // Global Delete Function for Rules
@@ -1482,48 +1597,65 @@ function getNumericSortKey(key) {
     return `${parts[0]}_${parts[1]}_${String(roomNumber).padStart(4, '0')}`;
 }
 
-// --- Helper function to create a new room row HTML (Updated Placeholder) ---
+// --- Helper function to create a new room row HTML (Responsive Card/Row) ---
 function createRoomRowHtml(roomName, capacity, location, isLast = false, isLocked = true) {
     const disabledAttr = isLocked ? 'disabled' : '';
     const bgClass = isLocked ? 'bg-gray-50 text-gray-500' : 'bg-white';
 
     // Edit Button
     const editBtnHtml = `
-        <button class="edit-room-btn text-blue-600 hover:text-blue-800 p-1" title="Edit Row">
+        <button class="edit-room-btn text-blue-600 hover:text-blue-800 p-1.5 md:p-1 transition rounded-full hover:bg-blue-50" title="Edit Row">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
               <path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125" />
             </svg>
         </button>
     `;
 
+    // Remove Button (Styled as button on mobile, Spacer on desktop if not last)
     const removeButtonHtml = isLast ? 
-        `<button class="remove-room-button ml-2 text-sm text-red-600 hover:text-red-800 font-medium">&times; Remove</button>` : 
-        `<div class="w-[70px]"></div>`;
+        `<button class="remove-room-button text-xs font-bold text-red-600 hover:text-red-800 border border-red-200 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded transition">Remove</button>` : 
+        `<div class="w-[70px] hidden md:block"></div>`; // Hidden spacer on mobile
 
     // Capacity Tag Logic
     let capBadge = "";
     const capNum = parseInt(capacity) || 0;
     if (capNum > 30) {
-        capBadge = `<span class="ml-2 text-[10px] font-bold text-red-700 bg-red-50 px-1.5 py-0.5 rounded border border-red-200" title="Above Standard">▲ ${capNum}</span>`;
+        capBadge = `<span class="ml-2 text-[10px] font-bold text-red-700 bg-red-50 px-1.5 py-0.5 rounded border border-red-200 shrink-0" title="Above Standard">▲ ${capNum}</span>`;
     } else if (capNum < 30) {
-        capBadge = `<span class="ml-2 text-[10px] font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200" title="Below Standard">▼ ${capNum}</span>`;
+        capBadge = `<span class="ml-2 text-[10px] font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 shrink-0" title="Below Standard">▼ ${capNum}</span>`;
     }
     
     return `
-        <div class="room-row flex items-center gap-2 p-2 border-b border-gray-200" data-room-name="${roomName}">
-            <label class="room-name-label font-medium text-gray-700 w-24 shrink-0">${roomName}:</label>
+        <div class="room-row bg-white border border-gray-200 rounded-lg p-4 mb-3 shadow-sm md:flex md:items-center md:gap-2 md:p-2 md:border-0 md:border-b md:rounded-none md:shadow-none md:mb-0 transition-all hover:bg-gray-50" data-room-name="${roomName}">
             
-            <div class="flex items-center">
-                <input type="number" class="room-capacity-input block w-20 p-2 border border-gray-300 rounded-md shadow-sm text-sm ${bgClass}" 
-                       value="${capacity}" min="1" placeholder="30" ${disabledAttr}>
-                ${capBadge}
+            <div class="flex justify-between items-center mb-3 md:mb-0 md:w-24 md:shrink-0 border-b border-gray-100 pb-2 md:border-0 md:pb-0">
+                <label class="room-name-label font-bold text-gray-800 text-sm md:font-medium md:text-gray-700">
+                    ${roomName}
+                </label>
             </div>
             
-            <input type="text" class="room-location-input block flex-grow p-2 border border-gray-300 rounded-md shadow-sm text-sm ${bgClass}" 
-                   value="${location}" placeholder="e.g., 101 - Commerce Block" ${disabledAttr}>
+            <div class="flex flex-col gap-3 md:flex-row md:items-center md:gap-2 flex-grow">
+                
+                <div class="flex items-center justify-between md:justify-start">
+                    <span class="text-xs font-semibold text-gray-500 uppercase md:hidden">Capacity</span>
+                    <div class="flex items-center">
+                        <input type="number" class="room-capacity-input block w-20 p-2 border border-gray-300 rounded-md shadow-sm text-sm ${bgClass} focus:ring-indigo-500 focus:border-indigo-500" 
+                               value="${capacity}" min="1" placeholder="30" ${disabledAttr}>
+                        ${capBadge}
+                    </div>
+                </div>
+                
+                <div class="flex items-center gap-2 w-full md:w-auto md:flex-grow">
+                    <span class="text-xs font-semibold text-gray-500 uppercase md:hidden w-16 shrink-0">Location</span>
+                    <input type="text" class="room-location-input block w-full p-2 border border-gray-300 rounded-md shadow-sm text-sm ${bgClass} focus:ring-indigo-500 focus:border-indigo-500" 
+                           value="${location}" placeholder="e.g., 101 - Commerce Block" ${disabledAttr}>
+                </div>
+            </div>
             
-            ${editBtnHtml}
-            ${removeButtonHtml}
+            <div class="flex items-center justify-end gap-2 mt-3 md:mt-0 md:w-[90px] border-t pt-2 md:border-0 md:pt-0 border-gray-100">
+                ${editBtnHtml}
+                ${removeButtonHtml}
+            </div>
         </div>
     `;
 }
@@ -7024,71 +7156,65 @@ function saveRoomAllotment() {
     localStorage.setItem(ROOM_ALLOTMENT_KEY, JSON.stringify(allAllotments));
 }
 
-// Update the display with current allotment status
-// Update the display with current allotment status (Stream-wise)
+// Update display (Auto-Save Version)
 function updateAllotmentDisplay() {
     const [date, time] = currentSessionKey.split(' | ');
     const sessionStudentRecords = allStudentData.filter(s => s.Date === date && s.Time === time);
-    const scribeRegNos = new Set((JSON.parse(localStorage.getItem(SCRIBE_LIST_KEY) || '[]')).map(s => s.regNo));
     
     const container = document.getElementById('allotment-student-count-section');
-    container.innerHTML = ''; // Clear previous
-    container.className = "mb-6 grid grid-cols-1 md:grid-cols-2 gap-4"; // Grid layout
+    container.innerHTML = ''; 
+    container.className = "mb-6 grid grid-cols-1 md:grid-cols-2 gap-4"; 
     container.classList.remove('hidden');
 
-    // 1. Calculate Stats Per Stream
+    // 1. Calculate Stats
     const streamStats = {};
-    
-    // Initialize with configured streams so they appear even if empty
     currentStreamConfig.forEach(stream => {
-        streamStats[stream] = { total: 0, allotted: 0 };
+        streamStats[stream] = { total: 0, allotted: 0, roomsUsed: 0 };
     });
-    // Ensure "Regular" exists as fallback
-    if (!streamStats["Regular"]) streamStats["Regular"] = { total: 0, allotted: 0 };
+    if (!streamStats["Regular"]) streamStats["Regular"] = { total: 0, allotted: 0, roomsUsed: 0 };
 
-// Count Totals (Including Scribes)
-sessionStudentRecords.forEach(s => {
-    // Removed scribe exclusion check here
-    const strm = s.Stream || "Regular";
-    if (!streamStats[strm]) streamStats[strm] = { total: 0, allotted: 0 };
-    streamStats[strm].total++;
-});
+    sessionStudentRecords.forEach(s => {
+        const strm = s.Stream || "Regular";
+        if (!streamStats[strm]) streamStats[strm] = { total: 0, allotted: 0, roomsUsed: 0 };
+        streamStats[strm].total++;
+    });
 
-    // Count Allotted
     currentSessionAllotment.forEach(room => {
         const roomStream = room.stream || "Regular";
-        if (!streamStats[roomStream]) streamStats[roomStream] = { total: 0, allotted: 0 };
+        if (!streamStats[roomStream]) streamStats[roomStream] = { total: 0, allotted: 0, roomsUsed: 0 };
         streamStats[roomStream].allotted += room.students.length;
+        streamStats[roomStream].roomsUsed++;
     });
 
-    // 2. Generate Cards
+    // 2. Render Stats Cards
     Object.keys(streamStats).forEach(streamName => {
         const stats = streamStats[streamName];
         const remaining = stats.total - stats.allotted;
+        const estimatedRoomsNeeded = Math.ceil(stats.total / 30);
         
-        // Visual Cues
         const isComplete = (remaining <= 0 && stats.total > 0);
         const borderColor = isComplete ? "border-green-200 bg-green-50" : "border-blue-200 bg-blue-50";
         const titleColor = isComplete ? "text-green-800" : "text-blue-800";
 
         const cardHtml = `
-            <div class="${borderColor} border p-4 rounded-lg shadow-sm">
-                <h3 class="text-lg font-bold ${titleColor} mb-3 border-b border-gray-200 pb-1 flex justify-between">
-                    ${streamName} Stream
-                    ${isComplete ? '<span class="text-xs bg-green-200 text-green-800 px-2 py-1 rounded">Completed</span>' : ''}
-                </h3>
-                <div class="flex justify-between items-center text-sm">
-                    <div class="text-center">
-                        <p class="text-gray-500 font-medium">Total</p>
-                        <p class="text-xl font-bold text-gray-800">${stats.total}</p>
+            <div class="${borderColor} border p-4 rounded-lg shadow-sm flex flex-col justify-between">
+                <div>
+                    <h3 class="text-lg font-bold ${titleColor} mb-3 border-b border-gray-200 pb-1 flex justify-between">
+                        ${streamName} Stream
+                        ${isComplete ? '<span class="text-xs bg-green-200 text-green-800 px-2 py-1 rounded">Completed</span>' : ''}
+                    </h3>
+                    <div class="flex justify-between items-center text-sm mb-3">
+                        <div class="text-center"><p class="text-gray-500 font-medium text-xs uppercase">Total</p><p class="text-xl font-bold text-gray-800">${stats.total}</p></div>
+                        <div class="text-center"><p class="text-gray-500 font-medium text-xs uppercase">Allotted</p><p class="text-xl font-bold text-blue-600">${stats.allotted}</p></div>
+                        <div class="text-center"><p class="text-gray-500 font-medium text-xs uppercase">Remaining</p><p class="text-xl font-bold ${remaining > 0 ? 'text-orange-600' : 'text-gray-400'}">${remaining}</p></div>
                     </div>
-                    <div class="text-center">
-                        <p class="text-gray-500 font-medium">Allotted</p>
-                        <p class="text-xl font-bold text-blue-600">${stats.allotted}</p>
-                    </div>
-                    <div class="text-center">
-                        <p class="text-gray-500 font-medium">Remaining</p>
-                        <p class="text-xl font-bold ${remaining > 0 ? 'text-orange-600' : 'text-gray-400'}">${remaining}</p>
+                </div>
+                <div class="bg-white/60 rounded p-2 flex justify-between items-center text-xs border border-gray-200/50 mt-2">
+                    <span class="text-gray-600 font-bold uppercase tracking-wide">Rooms Used:</span>
+                    <div class="flex items-baseline gap-1">
+                        <span class="text-lg font-black text-indigo-700">${stats.roomsUsed}</span>
+                        <span class="text-gray-400 font-medium">/</span>
+                        <span class="text-gray-600 font-medium">~${estimatedRoomsNeeded} needed</span>
                     </div>
                 </div>
             </div>
@@ -7096,25 +7222,31 @@ sessionStudentRecords.forEach(s => {
         container.insertAdjacentHTML('beforeend', cardHtml);
     });
 
-    // Show/Hide Add Button based on global remaining
     const totalRemaining = Object.values(streamStats).reduce((sum, s) => sum + (s.total - s.allotted), 0);
     const addSection = document.getElementById('add-room-section');
-    if (totalRemaining > 0) {
-        addSection.classList.remove('hidden');
-    } else {
-        // Optional: Hide button if totally finished, or keep it to allow edits
-        addSection.classList.remove('hidden'); 
-    }
+    if (addSection) addSection.classList.remove('hidden');
 
-    // Render Rooms
     renderAllottedRooms();
     
-    // Show Save Section
+    // Update Save Button to indicate Auto-Save
     const saveSection = document.getElementById('save-allotment-section');
     const allottedSection = document.getElementById('allotted-rooms-section');
+    
     if (currentSessionAllotment.length > 0) {
         allottedSection.classList.remove('hidden');
         saveSection.classList.remove('hidden');
+        
+        // Indicate Auto-Save Status
+        const saveBtn = document.getElementById('save-room-allotment-button');
+        if(saveBtn) {
+            saveBtn.innerHTML = `
+                <svg class="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+                <span>Auto-Saved</span>
+            `;
+            saveBtn.classList.add('bg-green-50', 'text-green-700', 'border-green-200', 'cursor-default');
+            saveBtn.classList.remove('bg-indigo-600', 'text-white', 'hover:bg-indigo-700');
+            saveBtn.disabled = true; 
+        }
     } else {
         allottedSection.classList.add('hidden');
         saveSection.classList.add('hidden');
@@ -7203,12 +7335,34 @@ function renderAllottedRooms() {
     });
 }
 
-// Delete a room from allotment
+// Delete a room from allotment (Auto-Save & Sync enabled)
 window.deleteRoom = function(index) {
-    if (confirm('Are you sure you want to remove this room allotment?')) {
-        currentSessionAllotment.splice(index, 1);
-        updateAllotmentDisplay();
+    if (!confirm('Are you sure you want to remove this room allotment?')) return;
+
+    const roomData = currentSessionAllotment[index];
+
+    // Cleanup Scribes
+    if (roomData && roomData.students) {
+        roomData.students.forEach(s => {
+            const reg = (typeof s === 'object') ? s['Register Number'] : s;
+            if (currentScribeAllotment[reg]) {
+                delete currentScribeAllotment[reg];
+            }
+        });
     }
+
+    // Remove
+    currentSessionAllotment.splice(index, 1);
+
+    // --- AUTO SAVE & SYNC ---
+    saveRoomAllotment(); // Update Local Storage
+    
+    if (typeof syncDataToCloud === 'function') {
+        syncDataToCloud(); // Update Cloud
+    }
+    // ------------------------
+    
+    updateAllotmentDisplay();
 };
 
 // Show room selection modal (Updated: Excludes Scribe Rooms)
@@ -7327,107 +7481,106 @@ function showRoomSelectionModal() {
     roomSelectionModal.classList.remove('hidden');
 }
 
-// Select a room and allot students (Fixed: Adds Save Step)
+// Select a room and allot students (Auto-Save & Sync enabled)
 function selectRoomForAllotment(roomName, capacity, targetStream) {
     const [date, time] = currentSessionKey.split(' | ');
     
-    // 1. Get all students for this session
     const sessionStudentRecords = allStudentData.filter(s => s.Date === date && s.Time === time);
     
-    // 2. Get already allotted RegNos (Global for session)
     const allottedRegNos = new Set();
     currentSessionAllotment.forEach(room => {
-        room.students.forEach(regNo => allottedRegNos.add(regNo));
+        room.students.forEach(s => {
+            const reg = (typeof s === 'object') ? s['Register Number'] : s;
+            allottedRegNos.add(reg);
+        });
     });
 
-    // 3. Find unallotted students MATCHING THE TARGET STREAM
     const candidates = [];
-    // Sort first to ensure consistent filling (Stream -> Course -> RegNo)
-    // *** MODIFIED SORT: Prefix Descending (Z->Y), Number Ascending (001->002) ***
-sessionStudentRecords.sort((a, b) => {
-    // 1. Course Name (A-Z)
-    if (a.Course !== b.Course) return a.Course.localeCompare(b.Course);
-
-    const regA = a['Register Number'] ? a['Register Number'].trim() : "";
-    const regB = b['Register Number'] ? b['Register Number'].trim() : "";
-
-    // Extract Prefix (Letters) and Number (Digits)
-    // Example: "VPAZSBO001" -> Prefix "VPAZSBO", Number "001"
-    const matchA = regA.match(/^([A-Z]+)(\d+)$/i);
-    const matchB = regB.match(/^([A-Z]+)(\d+)$/i);
-
-    if (matchA && matchB) {
-        const prefixA = matchA[1];
-        const numA = parseInt(matchA[2], 10);
-        const prefixB = matchB[1];
-        const numB = parseInt(matchB[2], 10);
-
-        // 2. Sort Prefix DESCENDING (Z comes before Y)
-        if (prefixA !== prefixB) {
-            return prefixB.localeCompare(prefixA); 
+    
+    // Sort: Prefix Descending (Z->Y), Number Ascending (001->002)
+    sessionStudentRecords.sort((a, b) => {
+        if (a.Course !== b.Course) return a.Course.localeCompare(b.Course);
+        const regA = a['Register Number'] ? a['Register Number'].toString().trim() : "";
+        const regB = b['Register Number'] ? b['Register Number'].toString().trim() : "";
+        const matchA = regA.match(/^([A-Z]+)(\d+)$/i);
+        const matchB = regB.match(/^([A-Z]+)(\d+)$/i);
+        if (matchA && matchB) {
+            const prefixA = matchA[1].toUpperCase();
+            const numA = parseInt(matchA[2], 10);
+            const prefixB = matchB[1].toUpperCase();
+            const numB = parseInt(matchB[2], 10);
+            if (prefixA !== prefixB) return prefixB.localeCompare(prefixA); 
+            return numA - numB;
         }
-
-        // 3. Sort Number ASCENDING (1 comes before 2)
-        return numA - numB;
-    }
-
-    // Fallback if Register Number format is standard (Ascending)
-    return regA.localeCompare(regB);
-});
+        return regA.localeCompare(regB);
+    });
 
     for (const student of sessionStudentRecords) {
         const regNo = student['Register Number'];
-        const studentStream = student.Stream || "Regular"; // Default
-
-        // Condition: Not Allotted AND Matches Selected Stream (Scribes allowed)
+        const studentStream = student.Stream || "Regular"; 
         if (!allottedRegNos.has(regNo) && studentStream === targetStream) {
-            candidates.push(regNo);
+            candidates.push(student); 
         }
     }
     
-    // 4. Allot up to capacity
-    const newStudentRegNos = candidates.slice(0, capacity);
+    const newStudents = candidates.slice(0, capacity);
     
-    if (newStudentRegNos.length === 0) {
+    if (newStudents.length === 0) {
         alert(`No unallotted students found for stream: ${targetStream}`);
         return;
     }
 
-    // 5. Add to allotment
     currentSessionAllotment.push({
         roomName: roomName,
         capacity: capacity,
-        students: newStudentRegNos,
-        stream: targetStream // Save the stream tag for this room
+        students: newStudents,
+        stream: targetStream 
     });
     
-    // --- FIX: SAVE TO LOCAL STORAGE IMMEDIATELY ---
-    saveRoomAllotment(); 
-    // ----------------------------------------------
+    // Update Scribe Map
+    newStudents.forEach(s => {
+        const reg = s['Register Number'];
+        if (globalScribeList.some(g => g.regNo === reg)) {
+            currentScribeAllotment[reg] = roomName;
+        }
+    });
+
+    // --- AUTO SAVE & SYNC ---
+    saveRoomAllotment(); // Save to Local Storage (Updates Serial #)
+    
+    if (typeof syncDataToCloud === 'function') {
+        syncDataToCloud(); // Push to Firebase
+    }
+    // ------------------------
 
     roomSelectionModal.classList.add('hidden');
-    updateAllotmentDisplay();
-    
-    if (typeof syncDataToCloud === 'function') syncDataToCloud();
+    updateAllotmentDisplay(); // Now reads the saved data and shows Serial #
 }
 
 
 // Event Listeners for Room Allotment
-allotmentSessionSelect.addEventListener('change', () => {
-    const sessionKey = allotmentSessionSelect.value;
-    populateAbsenteeQpFilter(sessionKey);
-    if (sessionKey) {
-        loadRoomAllotment(sessionKey);
-        loadScribeAllotment(sessionKey); // <-- ADDED: Load scribe data at the same time
-    } else {
-        // Hide all sections
-        allotmentStudentCountSection.classList.add('hidden');
-        addRoomSection.classList.add('hidden');
-        allottedRoomsSection.classList.add('hidden');
-        saveAllotmentSection.classList.add('hidden');
-        scribeAllotmentListSection.classList.add('hidden'); // <-- ADDED
-    }
-});
+if (allotmentSessionSelect) {
+    allotmentSessionSelect.addEventListener('change', () => {
+        const sessionKey = allotmentSessionSelect.value;
+        
+        // 1. Reset Dirty Flag (New session loaded fresh)
+        hasUnsavedAllotment = false; 
+        
+        populateAbsenteeQpFilter(sessionKey);
+        
+        if (sessionKey) {
+            loadRoomAllotment(sessionKey);
+            loadScribeAllotment(sessionKey);
+        } else {
+            // Hide all sections
+            allotmentStudentCountSection.classList.add('hidden');
+            addRoomSection.classList.add('hidden');
+            allottedRoomsSection.classList.add('hidden');
+            saveAllotmentSection.classList.add('hidden');
+            scribeAllotmentListSection.classList.add('hidden');
+        }
+    });
+}
 
 addRoomAllotmentButton.addEventListener('click', () => {
     showRoomSelectionModal();
@@ -7459,12 +7612,37 @@ if (roomSearchInput) {
     });
 }
 
-saveRoomAllotmentButton.addEventListener('click', () => {
-    saveRoomAllotment();
-    roomAllotmentStatus.textContent = 'Room allotment saved successfully!';
-    setTimeout(() => { roomAllotmentStatus.textContent = ''; }, 2000);
-    syncDataToCloud(); // <--- ADD THIS
-});
+if (saveRoomAllotmentButton) {
+    saveRoomAllotmentButton.addEventListener('click', () => {
+        if (!currentSessionKey) return;
+
+        // 1. Update Global Allotment Objects
+        const allAllotments = JSON.parse(localStorage.getItem(ROOM_ALLOTMENT_KEY) || '{}');
+        allAllotments[currentSessionKey] = currentSessionAllotment;
+        
+        const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
+        allScribeAllotments[currentSessionKey] = currentScribeAllotment;
+
+        // 2. Save to Local Storage
+        localStorage.setItem(ROOM_ALLOTMENT_KEY, JSON.stringify(allAllotments));
+        localStorage.setItem(SCRIBE_ALLOTMENT_KEY, JSON.stringify(allScribeAllotments));
+        
+        // 3. Sync to Cloud
+        if (currentCollegeId && typeof syncDataToCloud === 'function') {
+            syncDataToCloud();
+        }
+        
+        // 4. Reset Dirty Flag
+        hasUnsavedAllotment = false;
+
+        // 5. UI Feedback
+        roomAllotmentStatus.textContent = 'Allotment Saved Successfully!';
+        setTimeout(() => { roomAllotmentStatus.textContent = ''; }, 2000);
+        
+        // 6. Refresh Display (Button changes to "✅ Saved")
+        updateAllotmentDisplay();
+    });
+}
 
 // --- END ROOM ALLOTMENT FUNCTIONALITY ---
 
@@ -7559,17 +7737,39 @@ window.real_loadGlobalScribeList = function() {
     renderGlobalScribeList();
 }
 
-// 2. Render the global list (Responsive: Card on Mobile, Row on PC)
+// --- SCRIBE PAGINATION VARIABLES ---
+let currentScribePage = 1;
+const SCRIBES_PER_PAGE = 10;
+
+// 2. Render the global list (Paginated)
 function renderGlobalScribeList() {
     if (!currentScribeListDiv) return; 
     currentScribeListDiv.innerHTML = "";
     
+    // Elements for pagination
+    const paginationControls = document.getElementById('scribe-pagination-controls');
+    const pageInfo = document.getElementById('scribe-page-info');
+    const prevBtn = document.getElementById('scribe-prev-page');
+    const nextBtn = document.getElementById('scribe-next-page');
+
     if (globalScribeList.length === 0) {
         currentScribeListDiv.innerHTML = `<div class="text-center py-6 bg-gray-50 rounded-lg border-2 border-dashed border-gray-200 text-gray-400 text-xs italic">No scribes added yet.</div>`;
+        if (paginationControls) paginationControls.classList.add('hidden');
         return;
     }
     
-    globalScribeList.forEach(student => {
+    // --- PAGINATION LOGIC ---
+    const totalPages = Math.ceil(globalScribeList.length / SCRIBES_PER_PAGE);
+    
+    // Safety check: if we deleted items and current page is now empty, go back
+    if (currentScribePage > totalPages) currentScribePage = totalPages || 1;
+
+    const startIndex = (currentScribePage - 1) * SCRIBES_PER_PAGE;
+    const endIndex = startIndex + SCRIBES_PER_PAGE;
+    const pageItems = globalScribeList.slice(startIndex, endIndex);
+
+    // Render Items
+    pageItems.forEach(student => {
         const item = document.createElement('div');
         // Mobile: Column (Card), Desktop: Row
         item.className = 'group flex flex-col md:flex-row justify-between items-start md:items-center p-3 bg-white border border-gray-200 rounded-lg shadow-sm hover:shadow-md transition mb-2 gap-3 md:gap-4';
@@ -7580,7 +7780,6 @@ function renderGlobalScribeList() {
         const isLocked = isScribeListLocked;
         const btnDisabled = isLocked ? 'disabled' : '';
         
-        // Button: Full width on mobile, auto on desktop
         const btnBase = "text-xs font-bold px-3 py-1.5 rounded border transition w-full md:w-auto text-center flex items-center justify-center gap-1";
         const btnStyle = isLocked 
             ? "bg-gray-50 text-gray-400 border-gray-100 cursor-not-allowed" 
@@ -7613,6 +7812,33 @@ function renderGlobalScribeList() {
         
         currentScribeListDiv.appendChild(item);
     });
+
+    // --- UPDATE CONTROLS ---
+    if (paginationControls) {
+        if (totalPages > 1) {
+            paginationControls.classList.remove('hidden');
+            pageInfo.textContent = `Page ${currentScribePage} of ${totalPages}`;
+            
+            prevBtn.disabled = (currentScribePage === 1);
+            nextBtn.disabled = (currentScribePage === totalPages);
+
+            // Re-attach listeners (safe to overwrite onclick)
+            prevBtn.onclick = () => {
+                if (currentScribePage > 1) {
+                    currentScribePage--;
+                    renderGlobalScribeList();
+                }
+            };
+            nextBtn.onclick = () => {
+                if (currentScribePage < totalPages) {
+                    currentScribePage++;
+                    renderGlobalScribeList();
+                }
+            };
+        } else {
+            paginationControls.classList.add('hidden');
+        }
+    }
 }
 
 // 3. Remove a student (Updated with Confirmation)
@@ -7760,8 +7986,7 @@ function loadScribeAllotment(sessionKey) {
     }
 }
 
-
-// Render the list of scribe students for the selected session (WITH SERIAL NUMBER)
+// Render the list of scribe students for the selected session (Lock-Aware)
 function renderScribeAllotmentList(sessionKey) {
     const [date, time] = sessionKey.split(' | ');
     const sessionStudents = allStudentData.filter(s => s.Date === date && s.Time === time);
@@ -7772,7 +7997,7 @@ function renderScribeAllotmentList(sessionKey) {
 
     scribeAllotmentList.innerHTML = '';
     if (sessionScribeStudents.length === 0) {
-        scribeAllotmentList.innerHTML = '<p class="text-gray-500 text-sm">No students from the global scribe list are in this session.</p>';
+        scribeAllotmentList.innerHTML = '<p class="text-gray-500 text-sm text-center py-4 italic">No students from the global scribe list are in this session.</p>';
         return;
     }
 
@@ -7787,58 +8012,87 @@ function renderScribeAllotmentList(sessionKey) {
     
     uniqueSessionScribeStudents.sort((a,b) => a['Register Number'].localeCompare(b['Register Number']));
 
-    // --- NEW: Update Count Header with Badge ---
+    // Update Count Header with Badge
     const headerEl = document.getElementById('scribe-session-header');
     if (headerEl) {
-        headerEl.innerHTML = `Scribe Students for this Session: <span class="ml-2 bg-orange-100 text-orange-800 text-sm font-bold px-2 py-0.5 rounded-full border border-orange-200">${uniqueSessionScribeStudents.length}</span>`;
+        headerEl.innerHTML = `Scribe Students: <span class="ml-2 bg-orange-100 text-orange-800 text-xs font-bold px-2 py-0.5 rounded-full border border-orange-200">${uniqueSessionScribeStudents.length}</span>`;
     }
-    // -------------------------------------------
-    // --- NEW: Get Serial Map (Needed to look up serial number when rendering) ---
+
     const roomSerialMap = getRoomSerialMap(sessionKey);
-    // ---------------------------------------------------------------------------
 
     uniqueSessionScribeStudents.forEach(student => {
         const regNo = student['Register Number'];
         const allottedRoom = currentScribeAllotment[regNo];
         
         const item = document.createElement('div');
-        item.className = 'bg-gray-50 border border-gray-200 rounded-lg p-4 flex justify-between items-center';
+        item.className = 'bg-white border border-gray-200 rounded-lg p-3 shadow-sm mb-3 flex flex-col md:flex-row justify-between items-start md:items-center gap-3 hover:shadow-md transition';
         
-        let roomHtml = '';
-        if (allottedRoom) {
-            // --- NEW: Format Room Display with Serial Number ---
-            const serialNo = roomSerialMap[allottedRoom] || '-';
-            const roomInfo = currentRoomConfig[allottedRoom];
-            const location = (roomInfo && roomInfo.location) ? ` (${roomInfo.location})` : '';
-            const displayRoom = `${serialNo} | ${allottedRoom}${location}`;
-            // ----------------------------------------------------
-
-            roomHtml = `
-                <div>
-                    <span class="text-sm font-medium text-gray-700">Allotted Room:</span>
-                    <span class="font-bold text-blue-600 ml-2">${displayRoom}</span>
-                </div>
-                <button class="ml-4 inline-flex justify-center items-center rounded-md border border-gray-300 bg-white py-2 px-3 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50"
-                        onclick="openScribeRoomModal('${regNo}', '${student.Name}')">
-                    Change
-                </button>
-            `;
+        let actionContent = '';
+        
+        // Check Lock State for Buttons
+        if (isScribeAllotmentLocked) {
+            // LOCKED STATE
+            if (allottedRoom) {
+                const serialNo = roomSerialMap[allottedRoom] || '-';
+                const roomInfo = currentRoomConfig[allottedRoom];
+                const location = (roomInfo && roomInfo.location) ? ` <span class="text-gray-400 font-normal text-xs">(${roomInfo.location})</span>` : '';
+                const displayRoom = `<span class="font-mono font-bold text-gray-500 mr-1">#${serialNo}</span> ${allottedRoom}${location}`;
+                
+                actionContent = `
+                    <div class="bg-gray-50 border border-gray-200 rounded p-2 text-sm font-bold text-gray-600 flex items-center gap-2">
+                        <span>🔒</span> ${displayRoom}
+                    </div>`;
+            } else {
+                actionContent = `<span class="text-xs text-gray-400 italic bg-gray-50 px-2 py-1 rounded border border-gray-100">Not Assigned (Locked)</span>`;
+            }
         } else {
-            roomHtml = `
-                <button class="inline-flex justify-center items-center rounded-md border border-transparent bg-indigo-600 py-2 px-3 text-sm font-medium text-white shadow-sm hover:bg-indigo-700"
-                        onclick="openScribeRoomModal('${regNo}', '${student.Name}')">
-                    Assign Room
-                </button>
-            `;
+            // UNLOCKED STATE (Editable)
+            if (allottedRoom) {
+                const serialNo = roomSerialMap[allottedRoom] || '-';
+                const roomInfo = currentRoomConfig[allottedRoom];
+                const location = (roomInfo && roomInfo.location) ? ` <span class="text-gray-400 font-normal text-xs">(${roomInfo.location})</span>` : '';
+                const displayRoom = `<span class="font-mono font-bold text-gray-500 mr-1">#${serialNo}</span> ${allottedRoom}${location}`;
+
+                actionContent = `
+                    <div class="w-full md:w-auto bg-green-50 border border-green-100 rounded p-2 md:bg-transparent md:border-0 md:p-0 flex flex-col md:flex-row md:items-center gap-2">
+                        <div class="text-xs text-gray-500 uppercase font-bold md:hidden">Allotted Room</div>
+                        <div class="text-sm font-bold text-green-700 md:text-gray-800 md:mr-4">${displayRoom}</div>
+                        
+                        <div class="flex gap-2 w-full md:w-auto">
+                            <button class="flex-1 md:flex-none inline-flex justify-center items-center rounded-md border border-gray-300 bg-white py-1.5 px-3 text-xs font-bold text-gray-700 shadow-sm hover:bg-gray-50"
+                                    onclick="openScribeRoomModal('${regNo}', '${student.Name}')">
+                                Change
+                            </button>
+                            <button class="flex-1 md:flex-none inline-flex justify-center items-center rounded-md border border-red-200 bg-white py-1.5 px-3 text-xs font-bold text-red-600 shadow-sm hover:bg-red-50"
+                                    onclick="removeScribeRoom('${regNo}')" title="Unassign Room">
+                                Clear
+                            </button>
+                        </div>
+                    </div>
+                `;
+            } else {
+                actionContent = `
+                    <button class="w-full md:w-auto inline-flex justify-center items-center rounded-md border border-transparent bg-indigo-600 py-2 px-4 text-xs font-bold text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                            onclick="openScribeRoomModal('${regNo}', '${student.Name}')">
+                        Assign Room
+                    </button>
+                `;
+            }
         }
         
         item.innerHTML = `
-            <div>
-                <h4 class="font-semibold text-gray-800">${regNo}</h4>
-                <p class="text-sm text-gray-600">${student.Name}</p>
+            <div class="flex items-center gap-3 w-full md:w-auto">
+                <div class="h-10 w-10 rounded-full bg-orange-100 text-orange-600 flex items-center justify-center font-bold text-xs shrink-0 border border-orange-200">
+                    Scr
+                </div>
+                <div class="min-w-0">
+                    <h4 class="font-bold text-gray-800 text-sm font-mono">${regNo}</h4>
+                    <p class="text-xs text-gray-600 truncate font-medium">${student.Name}</p>
+                </div>
             </div>
-            <div class="flex items-center">
-                ${roomHtml}
+            
+            <div class="w-full md:w-auto border-t md:border-0 border-gray-100 pt-2 md:pt-0 mt-1 md:mt-0">
+                ${actionContent}
             </div>
         `;
         scribeAllotmentList.appendChild(item);
@@ -7872,6 +8126,7 @@ async function findAvailableRooms(sessionKey) {
 
 // Open the Scribe Room Modal
 window.openScribeRoomModal = async function(regNo, studentName) {
+    if (isScribeAllotmentLocked) return alert("Scribe Allotment is Locked."); // Safety Check
     studentToAllotScribeRoom = regNo;
     scribeRoomModalTitle.textContent = `Select Room for ${studentName} (${regNo})`;
     const searchInput = document.getElementById('scribe-room-search');
@@ -8017,6 +8272,18 @@ const modalCancelBtn = document.getElementById('modal-cancel-student');
 // 1. Session selection (Updated: Splits Course by Stream)
 editSessionSelect.addEventListener('change', () => {
     currentEditSession = editSessionSelect.value;
+    const sessionOpsContainer = document.getElementById('bulk-session-ops-container');
+    if (sessionOpsContainer) {
+        if (currentEditSession) {
+            sessionOpsContainer.classList.remove('hidden');
+            // Reset Lock on change
+            isSessionOpsLocked = true;
+            updateSessionOpsLockUI();
+        } else {
+            sessionOpsContainer.classList.add('hidden');
+        }
+    }
+ 
     editDataContainer.innerHTML = '';
     editPaginationControls.classList.add('hidden');
     editSaveSection.classList.add('hidden');
@@ -8075,7 +8342,11 @@ editSessionSelect.addEventListener('change', () => {
 editCourseSelect.addEventListener('change', () => {
     const selectedValue = editCourseSelect.value; // "CourseName|StreamName"
     editCurrentPage = 1;
-    hasUnsavedEdits = false; 
+    if(typeof setUnsavedChanges === 'function') {
+        setUnsavedChanges(false); 
+    } else {
+        hasUnsavedEdits = false;
+    }
 
     let countDisplay = document.getElementById('edit-student-count');
     if (!countDisplay && addNewStudentBtn) {
@@ -8494,13 +8765,30 @@ saveEditDataButton.addEventListener('click', () => {
     }
 });
 
-// 11. Helper function to manage "unsaved" status (Unchanged)
+// 11. Helper function to manage "unsaved" status (Auto-Disable Button)
 function setUnsavedChanges(status) {
     hasUnsavedEdits = status;
+    const btn = document.getElementById('save-edit-data-button');
+    const statusText = document.getElementById('edit-data-status');
+    
     if (status) {
-        editDataStatus.textContent = 'You have unsaved changes. Click "Save All Changes" to commit.';
+        // STATE: CHANGES DETECTED -> ENABLE BUTTON
+        if(statusText) statusText.textContent = 'You have unsaved changes.';
+        if(btn) {
+            btn.disabled = false;
+            btn.classList.remove('opacity-50', 'cursor-not-allowed', 'bg-gray-400');
+            btn.classList.add('bg-green-600', 'hover:bg-green-700');
+            btn.textContent = "Save All Changes to Local Storage";
+        }
     } else {
-        editDataStatus.textContent = 'All changes saved.'; // Give clear feedback
+        // STATE: NO CHANGES -> DISABLE BUTTON
+        if(statusText) statusText.textContent = 'No unsaved changes.';
+        if(btn) {
+            btn.disabled = true;
+            btn.classList.add('opacity-50', 'cursor-not-allowed', 'bg-gray-400');
+            btn.classList.remove('bg-green-600', 'hover:bg-green-700');
+            btn.textContent = "No Changes to Save";
+        }
     }
 }
 // ==========================================
@@ -11126,87 +11414,13 @@ function loadInitialData() {
         });
     }
 
-   // --- UPDATED PRINT LOGIC: Open Clean Window ---
+   // --- REMUNERATION BILL DOWNLOAD ---
     if (btnPrintBill) {
         btnPrintBill.addEventListener('click', () => {
-            // 1. Get the bill content only
             const billContent = document.getElementById('remuneration-output').innerHTML;
-            if (!billContent.trim()) return alert("No bill generated to print.");
-
-            // 2. Open a new blank window
-            const printWindow = window.open('', '_blank');
+            if (!billContent.trim()) return alert("No bill generated.");
             
-            // 3. Write the clean HTML structure
-            printWindow.document.write(`
-                <!DOCTYPE html>
-                <html lang="en">
-                <head>
-                    <meta charset="UTF-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <title>Print Bill</title>
-                    <script src="https://cdn.tailwindcss.com"><\/script>
-                    <style>
-                        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
-                        body { 
-                            font-family: 'Inter', sans-serif; 
-                            background: white; 
-                        }
-
-                        /* PRINT STYLES (A4 Portrait) */
-                        @media print {
-                            @page { 
-                                size: A4 portrait; 
-                                margin: 15mm; 
-                            }
-                            body { 
-                                margin: 0; 
-                                padding: 0; 
-                                -webkit-print-color-adjust: exact; 
-                            }
-                            /* Reset container styles for print */
-                            .print-page { 
-                                border: none !important; 
-                                shadow: none !important; 
-                                width: 100% !important; 
-                                max-width: 100% !important;
-                                margin: 0 !important; 
-                                padding: 0 !important; 
-                                page-break-after: always; 
-                            }
-                            .print-page:last-child { 
-                                page-break-after: auto; 
-                            }
-                            /* Hide any accidental UI elements */
-                            button, .no-print { 
-                                display: none !important; 
-                            }
-                        }
-
-                        /* SCREEN PREVIEW STYLES (Inside the pop-up) */
-                        .print-page {
-                            max-width: 210mm;
-                            margin: 20px auto;
-                            padding: 40px;
-                            border: 1px solid #ddd;
-                            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-                        }
-                    </style>
-                </head>
-                <body>
-                    ${billContent}
-                    <script>
-                        // Auto-print when loaded
-                        window.onload = function() { 
-                            setTimeout(() => {
-                                window.print();
-                                // Optional: window.close(); 
-                            }, 500);
-                        };
-                    <\/script>
-                </body>
-                </html>
-            `);
-            printWindow.document.close();
+            openPdfPreview(billContent, "Remuneration_Bill");
         });
     }
 
@@ -11556,6 +11770,271 @@ function printDashboardSession(key, slot) {
     `);
     printWindow.document.close();
 }
+// ==========================================
+// 🗓️ BULK SESSION OPERATIONS (Reschedule/Delete)
+// ==========================================
+
+let isSessionOpsLocked = true;
+
+const btnSessionLock = document.getElementById('btn-session-ops-lock');
+const sessionOpsControls = document.getElementById('session-ops-controls');
+const sessionDateInput = document.getElementById('session-new-date');
+const sessionTimeInput = document.getElementById('session-new-time');
+const btnSessionReschedule = document.getElementById('btn-session-reschedule');
+const btnSessionDelete = document.getElementById('btn-session-delete');
+
+// 1. Toggle Lock
+if (btnSessionLock) {
+    btnSessionLock.addEventListener('click', () => {
+        isSessionOpsLocked = !isSessionOpsLocked;
+        updateSessionOpsLockUI();
+    });
+}
+
+function updateSessionOpsLockUI() {
+    if (!btnSessionLock || !sessionOpsControls) return;
+    
+    if (isSessionOpsLocked) {
+        // LOCKED STATE
+        btnSessionLock.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" /></svg><span>Locked</span>`;
+        btnSessionLock.className = "text-xs flex items-center gap-1 bg-gray-100 text-gray-600 border border-gray-300 px-3 py-1.5 rounded hover:bg-gray-200 transition shadow-sm";
+        
+        sessionOpsControls.classList.add('opacity-50', 'pointer-events-none');
+        [sessionDateInput, sessionTimeInput, btnSessionReschedule, btnSessionDelete].forEach(el => el.disabled = true);
+        
+    } else {
+        // UNLOCKED STATE
+        btnSessionLock.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3.5 h-3.5"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 10.5V6.75a4.5 4.5 0 1 1 9 0v3.75M3.75 21.75h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H3.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" /></svg><span>Unlocked</span>`;
+        btnSessionLock.className = "text-xs flex items-center gap-1 bg-red-50 text-red-600 border border-red-200 px-3 py-1.5 rounded hover:bg-red-100 transition shadow-sm font-bold";
+        
+        sessionOpsControls.classList.remove('opacity-50', 'pointer-events-none');
+        [sessionDateInput, sessionTimeInput, btnSessionReschedule, btnSessionDelete].forEach(el => el.disabled = false);
+    }
+}
+
+// 2. Reschedule Logic
+if (btnSessionReschedule) {
+    btnSessionReschedule.addEventListener('click', async () => {
+        const rawDate = sessionDateInput.value;
+        const rawTime = sessionTimeInput.value;
+        const currentSession = editSessionSelect.value;
+
+        if (!currentSession) return alert("No session selected.");
+        if (!rawDate || !rawTime) return alert("Please select both New Date and New Time.");
+
+        // Format New Values
+        const [y, m, d] = rawDate.split('-');
+        const newDate = `${d}.${m}.${y}`;
+
+        const [h, min] = rawTime.split(':');
+        let hours = parseInt(h);
+        const ampm = hours >= 12 ? 'PM' : 'AM';
+        hours = hours % 12;
+        hours = hours ? hours : 12;
+        const newTime = `${String(hours).padStart(2, '0')}:${min} ${ampm}`;
+        
+        const [oldDate, oldTime] = currentSession.split(' | ');
+
+        // Confirmation
+        const msg = `⚠️ RESCHEDULE CONFIRMATION ⚠️\n\nMove ALL students from:\n${oldDate} (${oldTime})\n\nTo:\n${newDate} (${newTime})?\n\nThis will update student records immediately.`;
+        
+        if (!confirm(msg)) return;
+        
+        const check = prompt("Type 'CHANGE' to confirm this bulk update:");
+        if (check !== 'CHANGE') return alert("Cancelled. Incorrect code.");
+
+        // Execute
+        let count = 0;
+        allStudentData.forEach(s => {
+            if (s.Date === oldDate && s.Time === oldTime) {
+                s.Date = newDate;
+                s.Time = newTime;
+                count++;
+            }
+        });
+
+        localStorage.setItem(BASE_DATA_KEY, JSON.stringify(allStudentData));
+        alert(`✅ Successfully moved ${count} students to ${newDate} | ${newTime}.`);
+        
+        if (typeof syncDataToCloud === 'function') await syncDataToCloud();
+        window.location.reload();
+    });
+}
+
+// 3. Delete Logic
+if (btnSessionDelete) {
+    btnSessionDelete.addEventListener('click', async () => {
+        const currentSession = editSessionSelect.value;
+        if (!currentSession) return alert("No session selected.");
+        
+        const [oldDate, oldTime] = currentSession.split(' | ');
+        
+        // Count targets
+        const targets = allStudentData.filter(s => s.Date === oldDate && s.Time === oldTime);
+        
+        const msg = `🛑 CRITICAL WARNING: DELETE SESSION 🛑\n\nYou are about to delete the ENTIRE session:\n${currentSession}\n\nThis will remove ${targets.length} student records permanently.\n\nAre you sure?`;
+        
+        if (!confirm(msg)) return;
+        
+        const check = prompt("Type 'DELETE' to confirm permanent deletion:");
+        if (check !== 'DELETE') return alert("Cancelled. Incorrect code.");
+        
+        // Execute
+        allStudentData = allStudentData.filter(s => !(s.Date === oldDate && s.Time === oldTime));
+        
+        localStorage.setItem(BASE_DATA_KEY, JSON.stringify(allStudentData));
+        alert(`✅ Deleted ${targets.length} records. The session is removed.`);
+        
+        if (typeof syncDataToCloud === 'function') await syncDataToCloud();
+        window.location.reload();
+    });
+}
+// ==========================================
+// 📄 GLOBAL PDF PREVIEW (85% Zoom / Smart Fit Strategy)
+// ==========================================
+window.openPdfPreview = function(contentHtml, filenamePrefix) {
+    // 1. CLEAN CONTENT
+    const cleanContent = contentHtml
+        .replace(/min-height:\s*297mm/g, 'min-height: auto')
+        .replace(/height:\s*297mm/g, 'height: auto')
+        .replace(/width:\s*210mm/g, 'width: 100%') 
+        .replace(/padding:\s*2cm/g, 'padding: 15px')
+        .replace(/mb-8/g, 'mb-4')
+        .replace(/shadow-xl/g, 'shadow-none')
+        .replace(/border-2/g, 'border');
+
+    const dateStr = new Date().toLocaleDateString('en-GB').replace(/\//g, '-');
+    const filename = `${filenamePrefix}_${dateStr}.pdf`;
+
+    const w = window.open('', '_blank');
+    w.document.write(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            ${document.head.innerHTML} 
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"><\/script>
+            <style>
+                body { background-color: #525659; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; font-family: sans-serif; }
+                
+                #pdf-controls {
+                    margin-bottom: 20px; background: white; padding: 10px 20px; 
+                    border-radius: 4px; box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+                    position: sticky; top: 10px; z-index: 9999;
+                }
+
+                /* --- THE ZOOM STRATEGY --- */
+                /* A4 Width = 210mm.
+                   To simulate 85% Zoom, we set width to 210 / 0.85 = ~247mm.
+                   The PDF engine will auto-shrink this to fit A4, effectively "zooming out".
+                */
+                #pdf-wrapper {
+                    width: 245mm; 
+                    background: white;
+                    padding: 0; 
+                    box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+                    box-sizing: border-box;
+                }
+
+                /* PAGE BLOCKS */
+                .print-page, .print-page-daywise, .print-page-sticker {
+                    width: 100% !important;
+                    height: auto !important;
+                    min-height: 0 !important;
+                    margin: 0 !important;
+                    padding: 15mm !important; /* Generous padding (shrinks on PDF) */
+                    border: none !important;
+                    box-shadow: none !important;
+                    page-break-after: always;
+                    page-break-inside: avoid;
+                    display: block;
+                    box-sizing: border-box;
+                }
+                
+                .print-page:last-child { page-break-after: auto !important; margin-bottom: 0 !important; }
+
+                /* TABLE STABILITY */
+                table { 
+                    width: 100% !important; 
+                    table-layout: fixed !important;
+                    border-collapse: collapse !important;
+                }
+                th, td { 
+                    word-wrap: break-word !important;
+                    overflow-wrap: break-word !important;
+                    border: 1px solid #000 !important;
+                }
+
+                ::-webkit-scrollbar { display: none; }
+
+                @media print {
+                    #pdf-controls { display: none !important; }
+                    #pdf-wrapper { width: 100%; box-shadow: none; margin: 0; }
+                    body { padding: 0; background: white; }
+                    @page { margin: 10mm; } 
+                }
+            </style>
+        </head>
+        <body>
+            <div id="pdf-controls">
+                <button onclick="window.print()" class="bg-gray-700 text-white px-4 py-2 rounded font-bold shadow hover:bg-gray-800 mr-2">
+                    🖨️ Print
+                </button>
+                <button onclick="downloadDoc()" class="bg-blue-600 text-white px-4 py-2 rounded font-bold shadow hover:bg-blue-700">
+                    ⬇️ Download PDF
+                </button>
+            </div>
+
+            <div id="pdf-wrapper">
+                ${cleanContent}
+            </div>
+
+            <script>
+                function downloadDoc() {
+                    const element = document.getElementById('pdf-wrapper');
+                    const btn = document.querySelector('button[onclick="downloadDoc()"]');
+                    btn.textContent = "Generating...";
+                    btn.disabled = true;
+
+                    const opt = {
+                        // Tiny margins because the container padding (15mm) handles the spacing
+                        margin: [5, 5, 5, 5], 
+                        filename: '${filename}',
+                        image: { type: 'jpeg', quality: 0.98 },
+                        html2canvas: { scale: 2, useCORS: true, scrollY: 0, windowWidth: 1000 }, 
+                        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+                        pagebreak: { mode: ['avoid-all', 'css', 'legacy'] }
+                    };
+
+                    html2pdf().set(opt).from(element).save().then(() => {
+                        btn.textContent = "✅ Downloaded";
+                        setTimeout(() => { btn.textContent = "⬇️ Download PDF"; btn.disabled = false; }, 3000);
+                    });
+                }
+            <\/script>
+        </body>
+        </html>
+    `);
+    w.document.close();
+}  
+
+// --- NEW: Clear Scribe Room Assignment ---
+window.removeScribeRoom = function(regNo) {
+    if (isScribeAllotmentLocked) return alert("Scribe Allotment is Locked."); // Safety Check
+    if (!confirm("Unassign this student? They will return to the 'Assign Room' state.")) return;
+
+    // 1. Remove from current session mapping
+    delete currentScribeAllotment[regNo];
+
+    // 2. Save to Local Storage
+    const allAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
+    allAllotments[currentSessionKey] = currentScribeAllotment;
+    localStorage.setItem(SCRIBE_ALLOTMENT_KEY, JSON.stringify(allAllotments));
+
+    // 3. Sync & Refresh
+    if (typeof syncDataToCloud === 'function') syncDataToCloud();
+    renderScribeAllotmentList(currentSessionKey);
+};    
+    
 // Initial Call (in case we start on settings page or refresh)
 updateStudentPortalLink();
 // --- NEW: Restore Last Active Tab ---
