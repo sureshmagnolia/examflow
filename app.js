@@ -1707,10 +1707,6 @@ function getRoomCapacitiesFromStorage() {
     return { roomNames, roomCapacities };
 }
 
-// --- *** NEW CENTRAL ALLOCATION FUNCTION *** ---
-// This function performs the *original* (non-scribe) allotment and assigns
-// a definitive seat number to every student.
-// --- *** CENTRAL ALLOCATION FUNCTION (Manual Only) *** ---
 // --- *** CENTRAL ALLOCATION FUNCTION (Manual Only - Fixed Seat Numbers) *** ---
 function performOriginalAllocation(data) {
     const allAllotments = JSON.parse(localStorage.getItem(ROOM_ALLOTMENT_KEY) || '{}');
@@ -1729,8 +1725,11 @@ function performOriginalAllocation(data) {
         const manualAllotment = allAllotments[sessionKeyPipe];
         if (manualAllotment) {
             for (const room of manualAllotment) {
-                // FIX: Get the exact index from the room array to match student.html
-                const studentIndex = room.students.indexOf(row['Register Number']);
+                // FIX: Handle both Object array (New) and String array (Legacy)
+                const studentIndex = room.students.findIndex(s => {
+                    const r = (typeof s === 'object') ? s['Register Number'] : s;
+                    return r === row['Register Number'];
+                });
                 
                 if (studentIndex !== -1) {
                     assignedRoomName = room.roomName;
@@ -2407,16 +2406,17 @@ function checkManualAllotment(sessionKey) {
     const allAllotments = JSON.parse(localStorage.getItem(ROOM_ALLOTMENT_KEY) || '{}');
     const manualAllotment = allAllotments[sessionKey] || [];
 
-    // 3. Get Scribe Allotment (NEW ADDITION)
+    // 3. Get Scribe Allotment
     const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
     const scribeMap = allScribeAllotments[sessionKey] || {};
 
     // 4. Count unique allotted students (Regular + Scribes)
     const allottedRegNos = new Set();
     
-    // Add Regular Allotments
+    // Add Regular Allotments (FIXED: Handles Objects vs Strings)
     manualAllotment.forEach(room => {
-        room.students.forEach(regNo => {
+        room.students.forEach(s => {
+            const regNo = (typeof s === 'object') ? s['Register Number'] : s;
             allottedRegNos.add(regNo);
         });
     });
@@ -2431,8 +2431,10 @@ function checkManualAllotment(sessionKey) {
     // 5. Compare counts
     if (allottedStudentCount < totalUniqueStudents) {
         const remaining = totalUniqueStudents - allottedStudentCount;
-        alert(`Error: Not all students are allotted.\n\nTotal Students: ${totalUniqueStudents}\nAllotted (Regular + Scribe): ${allottedStudentCount}\nRemaining to Allot: ${remaining}\n\nPlease complete the allotment.`);
-        return false;
+        // Optional: Allow generating even if incomplete, but warn
+        if(!confirm(`Warning: Not all students are allotted.\n\nTotal: ${totalUniqueStudents}\nAllotted: ${allottedStudentCount}\nMissing: ${remaining}\n\nGenerate report anyway?`)) {
+            return false;
+        }
     }
 
     return true;
