@@ -1,14 +1,29 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Exam Seating Status (TEST MODE)</title>
     <script src="tailwind.js"></script>
-    
+    <script src="ui-modal.js"></script>
+
     <style>
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        .animate-fade-in { animation: fadeIn 0.3s ease-out; }
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .animate-fade-in {
+            animation: fadeIn 0.3s ease-out;
+        }
     </style>
 
     <script type="module">
@@ -27,21 +42,21 @@
 
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
-        window.firebase = { db, doc, getDoc }; 
+        window.firebase = { db, doc, getDoc };
 
         const urlParams = new URLSearchParams(window.location.search);
         let collegeId = urlParams.get('id');
 
         if (collegeId && collegeId.includes('/')) {
             const parts = collegeId.split('/');
-            collegeId = parts[parts.length - 1]; 
+            collegeId = parts[parts.length - 1];
         }
 
         let allAllotments = {};
-        let allScribes = {}; 
+        let allScribes = {};
         let roomConfigs = {};
-        let studentNames = {}; 
-        let examPapers = {}; 
+        let studentNames = {};
+        let examPapers = {};
         let collegeName = "Exam Centre";
 
         async function loadData() {
@@ -52,7 +67,7 @@
             }
 
             statusEl.textContent = "Loading Exam Data...";
-            
+
             try {
                 const mainRef = doc(db, "public_seating", collegeId);
                 const namesRef = doc(db, "public_seating", collegeId + "_names");
@@ -68,9 +83,9 @@
                     const data = mainSnap.data();
                     collegeName = data.collegeName || "Exam Centre";
                     document.getElementById('college-name').textContent = collegeName;
-                    
+
                     if (data.seatingData) allAllotments = JSON.parse(data.seatingData);
-                    if (data.scribeData) allScribes = JSON.parse(data.scribeData); 
+                    if (data.scribeData) allScribes = JSON.parse(data.scribeData);
                     if (data.roomData) roomConfigs = JSON.parse(data.roomData);
 
                     if (nameSnap.exists() && nameSnap.data().json) {
@@ -86,13 +101,13 @@
                     }
 
                     if (Object.keys(allAllotments).length > 0) {
-                        statusEl.textContent = ""; 
+                        statusEl.textContent = "";
                         document.getElementById('search-section').classList.remove('hidden');
 
                         const savedRegNo = localStorage.getItem('myExamRegNo');
                         if (savedRegNo) {
                             document.getElementById('reg-input').value = savedRegNo;
-                            setTimeout(() => window.searchStudent(), 300); 
+                            setTimeout(() => window.searchStudent(), 300);
                         }
                     } else {
                         statusEl.textContent = "No seating data available yet.";
@@ -106,7 +121,7 @@
             }
         }
 
-        window.searchStudent = function() {
+        window.searchStudent = function () {
             const regInput = document.getElementById('reg-input');
             const regNo = regInput.value.trim().toUpperCase();
             const resultContainer = document.getElementById('result-container');
@@ -120,26 +135,26 @@
             let found = false;
             // Removed date check so old exams also show up for testing
             const now = new Date();
-            
+
             // To test past dates, we can disable this filter or keep it. 
             // I'll keep the midnight filter but remove the 45min lock.
             const todayMidnight = new Date();
-            todayMidnight.setHours(0,0,0,0); 
+            todayMidnight.setHours(0, 0, 0, 0);
 
             const myName = studentNames[regNo] || "";
-            
+
             let myExams = [];
 
             for (const [sessionKey, rooms] of Object.entries(allAllotments)) {
                 const [dateStr, timeStr] = sessionKey.split(' | ');
-                
-                const examDateObject = parseSessionTime(dateStr, "00:00 AM"); 
+
+                const examDateObject = parseSessionTime(dateStr, "00:00 AM");
                 // if (examDateObject < todayMidnight) continue; // Un-comment this line if you still want to hide past days
 
                 let studentRoom = null;
                 let seatNumber = 0;
                 let isScribeRoom = false;
-                
+
                 // 1. Check for Regular Room Allotment
                 for (const room of rooms) {
                     const index = room.students.indexOf(regNo);
@@ -155,7 +170,7 @@
                 if (sessionScribes[regNo]) {
                     studentRoom = sessionScribes[regNo];
                     isScribeRoom = true;
-                    seatNumber = "Scribe"; 
+                    seatNumber = "Scribe";
                 }
 
                 if (studentRoom) {
@@ -179,17 +194,17 @@
                     // *** TIME LOCK REMOVED *** // We no longer check unlockTime. We just show the result.
 
                     const roomInfo = roomConfigs[exam.studentRoom] || {};
-                    const displayLocation = (roomInfo.location && roomInfo.location.trim() !== "") 
-                                            ? roomInfo.location 
-                                            : exam.studentRoom;
-                    
-                    const scribeTag = exam.isScribeRoom 
-                        ? `<span class="bg-orange-100 text-orange-700 text-[10px] px-2 py-0.5 rounded border border-orange-200 font-bold ml-2 uppercase">Scribe Room</span>` 
+                    const displayLocation = (roomInfo.location && roomInfo.location.trim() !== "")
+                        ? roomInfo.location
+                        : exam.studentRoom;
+
+                    const scribeTag = exam.isScribeRoom
+                        ? `<span class="bg-orange-100 text-orange-700 text-[10px] px-2 py-0.5 rounded border border-orange-200 font-bold ml-2 uppercase">Scribe Room</span>`
                         : "";
 
                     const card = document.createElement('div');
                     card.className = "bg-white p-5 rounded-xl shadow-lg border border-gray-100 mb-5 animate-fade-in";
-                    
+
                     let content = `
                         <div class="border-b border-gray-200 pb-3 mb-3">
                             <div class="text-center mb-3">
@@ -259,7 +274,7 @@
             }
         };
 
-        window.clearSavedData = function() {
+        window.clearSavedData = function () {
             localStorage.removeItem('myExamRegNo');
             document.getElementById('reg-input').value = '';
             document.getElementById('result-container').innerHTML = '';
@@ -278,60 +293,80 @@
         loadData();
     </script>
 </head>
+
 <body class="bg-gray-50 min-h-screen flex flex-col items-center p-4 font-sans">
-    
+
     <script>
         var isAuthorized = false;
-        (function() {
-            var pass = prompt("🔐 Admin Access Required\n\nPlease enter the password for tesseat.html:");
+
+        async function checkAccess() {
+            const pass = await UiModal.prompt(
+                "🔐 Admin Access Required",
+                "Please enter the password for tesseat.html:",
+                "Password",
+                "password"
+            );
+
             if (pass === "admin123") {
                 isAuthorized = true;
+                const content = document.getElementById('protected-content');
+                if (content) content.style.display = 'block';
+                // Trigger load if needed, though loadData() runs on init. 
+                // Maybe we want to hide everything until auth? 
+                // Currently loadData() runs nicely in background.
             } else {
-                // If wrong, we wipe the body so users see Access Denied
-                document.body.innerHTML = "<div style='display:flex;justify-content:center;align-items:center;height:100vh;background:#f3f4f6;font-family:sans-serif;color:#ef4444;'><h1>🚫 Access Denied</h1></div>";
+                if (pass !== null) { // If not cancelled
+                    await UiModal.alert("🚫 Access Denied", "Incorrect password.");
+                    // Retry? or just leave blank.
+                    document.body.innerHTML = "<div style='display:flex;justify-content:center;align-items:center;height:100vh;background:#f3f4f6;font-family:sans-serif;color:#ef4444;'><h1>🚫 Access Denied</h1></div>";
+                } else {
+                    // Cancelled
+                    document.body.innerHTML = "<div style='display:flex;justify-content:center;align-items:center;height:100vh;background:#f3f4f6;font-family:sans-serif;color:#6b7280;'><h1>Access Cancelled</h1></div>";
+                }
             }
-        })();
+        }
+
+        // Wait for DOM to be ready for UiModal
+        document.addEventListener('DOMContentLoaded', checkAccess);
     </script>
 
     <div id="protected-content" style="display: none;">
-        
+
         <div class="w-full max-w-md mx-auto">
             <div class="text-center mb-6 mt-2">
                 <h1 class="text-xl font-black text-gray-900 tracking-tight" id="college-name">Exam Centre</h1>
-                <p class="text-xs font-bold text-indigo-600 uppercase tracking-widest mt-1">Student Seating Portal (Test Mode)</p>
+                <p class="text-xs font-bold text-indigo-600 uppercase tracking-widest mt-1">Student Seating Portal (Test
+                    Mode)</p>
             </div>
 
             <div id="status" class="text-center text-sm font-medium text-indigo-600 mb-4 animate-pulse"></div>
 
-            <div id="search-section" class="hidden bg-white p-6 rounded-2xl shadow-xl shadow-indigo-50 border border-indigo-100">
-                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Enter Register Number</label>
+            <div id="search-section"
+                class="hidden bg-white p-6 rounded-2xl shadow-xl shadow-indigo-50 border border-indigo-100">
+                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Enter Register
+                    Number</label>
                 <div class="flex gap-2">
-                    <input type="text" id="reg-input" class="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:border-indigo-500 outline-none uppercase font-mono text-lg font-bold text-gray-800 placeholder-gray-300 transition-all" placeholder="e.g. ABCDE123">
-                    <button onclick="searchStudent()" class="bg-indigo-600 text-white px-5 rounded-xl font-bold hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-200 active:scale-95">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-6 h-6">
-                          <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+                    <input type="text" id="reg-input"
+                        class="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:border-indigo-500 outline-none uppercase font-mono text-lg font-bold text-gray-800 placeholder-gray-300 transition-all"
+                        placeholder="e.g. ABCDE123">
+                    <button onclick="searchStudent()"
+                        class="bg-indigo-600 text-white px-5 rounded-xl font-bold hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-200 active:scale-95">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5"
+                            stroke="currentColor" class="w-6 h-6">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
                         </svg>
                     </button>
                 </div>
             </div>
 
             <div id="result-container" class="mt-8 space-y-4"></div>
-            
+
             <p class="text-center text-[10px] text-gray-300 mt-12 font-medium">Powered by ExamFlow</p>
         </div>
 
     </div>
-    <script>
-        if (isAuthorized) {
-            // Show content
-            var content = document.getElementById('protected-content');
-            if(content) content.style.display = 'block';
-        } else {
-            // Double check: Remove content if authorized is false (in case body wipe failed for some reason)
-            var content = document.getElementById('protected-content');
-            if(content) content.remove();
-        }
-    </script>
 
 </body>
+
 </html>
