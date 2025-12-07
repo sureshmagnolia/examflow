@@ -1,6 +1,6 @@
 import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged }
     from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
-import { getFirestore, doc, getDoc, setDoc, updateDoc, arrayUnion, arrayRemove, collection, query, where, getDocs, orderBy, onSnapshot }
+import { getFirestore, doc, getDoc, setDoc, updateDoc, arrayUnion, arrayRemove, collection, query, where, getDocs, orderBy, onSnapshot, serverTimestamp }
     from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
 const auth = window.firebase.auth;
@@ -129,19 +129,33 @@ async function handleLogin(user) {
         const docSnap = adminSnap.docs[0];
         currentCollegeId = docSnap.id;
         isAdmin = true;
+        
+        // --- NEW: Init Live Presence (Admin Mode = True) ---
+        if (typeof window.initLivePresence === 'function') {
+            window.initLivePresence(user.email, user.displayName || "Admin", true);
+        }
+        // --------------------------------------------------
+
         setupLiveSync(currentCollegeId, 'admin');
         return;
     }
 
-    // 2. Check Staff Access (staffAccessList) - NEW
+    // 2. Check Staff Access (staffAccessList)
     const qStaff = query(collegesRef, where("staffAccessList", "array-contains", user.email));
     const staffSnap = await getDocs(qStaff);
 
     if (!staffSnap.empty) {
-        // STAFF LOGIN (Auto Detected)
+        // STAFF LOGIN
         const docSnap = staffSnap.docs[0];
         currentCollegeId = docSnap.id;
         isAdmin = false;
+
+        // --- NEW: Init Live Presence (Staff Mode = False) ---
+        if (typeof window.initLivePresence === 'function') {
+            window.initLivePresence(user.email, user.displayName || "Staff", false);
+        }
+        // ---------------------------------------------------
+
         setupLiveSync(currentCollegeId, 'staff');
         return;
     }
@@ -158,6 +172,13 @@ async function handleLogin(user) {
             if (me) {
                 currentCollegeId = urlId;
                 isAdmin = false;
+                
+                // --- NEW: Init Live Presence (Staff Mode = False) ---
+                if (typeof window.initLivePresence === 'function') {
+                    window.initLivePresence(user.email, user.displayName || "Staff", false);
+                }
+                // ---------------------------------------------------
+
                 setupLiveSync(currentCollegeId, 'staff');
             } else { alert("Access Denied: Email not in staff list."); signOut(auth); }
         } else { alert("Invalid Link."); signOut(auth); }
@@ -755,6 +776,7 @@ function renderSlotsGridAdmin() {
     ui.adminSlotsGrid.innerHTML += `<div class="col-span-full h-32 w-full"></div>`;
 }
 // Updated: Render Staff List with Clickable Done Count
+// Updated: Render Staff List with Live Status Icon
 function renderStaffTable() {
     if (!ui.staffTableBody) return;
     ui.staffTableBody.innerHTML = '';
@@ -762,24 +784,31 @@ function renderStaffTable() {
     const filter = document.getElementById('staff-search').value.toLowerCase();
     const today = new Date();
 
-    // 1. Filter & Map Data (Updated to include Designation search)
+    // 1. Filter & Map Data
     const filteredItems = staffData
         .map((staff, i) => ({ ...staff, originalIndex: i }))
         .filter(item => {
             if (item.status === 'archived') return false;
 
-            // Search Logic: Name OR Dept OR Designation
+            // Search Logic
             if (filter) {
                 const matchName = item.name.toLowerCase().includes(filter);
                 const matchDept = item.dept.toLowerCase().includes(filter);
-                const matchDesig = (item.designation || "").toLowerCase().includes(filter); // <--- NEW CHECK
-
+                const matchDesig = (item.designation || "").toLowerCase().includes(filter);
                 if (!matchName && !matchDept && !matchDesig) return false;
             }
             return true;
         })
-        // Sort: Dept (A-Z) -> Name (A-Z)
+        // Sort: Online Status First -> Dept -> Name
         .sort((a, b) => {
+            // Live Status Sort (Online users go to top)
+            if (window.globalLiveUsers) {
+                const statusA = window.globalLiveUsers[a.email]?.status || 'offline';
+                const statusB = window.globalLiveUsers[b.email]?.status || 'offline';
+                if (statusA === 'online' && statusB !== 'online') return -1;
+                if (statusA !== 'online' && statusB === 'online') return 1;
+            }
+
             const deptA = (a.dept || "").toLowerCase();
             const deptB = (b.dept || "").toLowerCase();
             if (deptA < deptB) return -1;
@@ -795,8 +824,6 @@ function renderStaffTable() {
     const start = (currentStaffPage - 1) * STAFF_PER_PAGE;
     const end = start + STAFF_PER_PAGE;
     const pageItems = filteredItems.slice(start, end);
-
-    // ... rest of the function remains the same ...
 
     // Update Controls
     const pageInfo = document.getElementById('staff-page-info');
@@ -814,6 +841,9 @@ function renderStaffTable() {
         const done = getDutiesDoneCount(staff.email);
         const pending = Math.max(0, target - done);
 
+        // --- NEW: LIVE STATUS ICON ---
+        const liveIcon = window.getLiveStatusIcon ? window.getLiveStatusIcon(staff.email) : '';
+
         // Role Label
         let activeRoleLabel = "";
         if (staff.roleHistory && staff.roleHistory.length > 0) {
@@ -829,7 +859,7 @@ function renderStaffTable() {
 
         const statusColor = pending > 3 ? 'text-red-600 font-bold' : (pending > 0 ? 'text-orange-600' : 'text-green-600');
 
-        // Lock Logic
+        // Lock Logic for Buttons
         let actionButtons = "";
         if (isStaffListLocked) {
             actionButtons = `<div class="w-full text-center md:text-right pt-2 md:pt-0 border-t border-gray-100 md:border-0 mt-2 md:mt-0"><span class="text-gray-400 text-xs italic mr-2">Locked</span></div>`;
@@ -850,7 +880,7 @@ function renderStaffTable() {
             <td class="block md:table-cell px-0 md:px-6 py-0 md:py-3 border-b-0 md:border-b border-gray-100 w-full md:w-auto">
                 
                 <div class="hidden md:flex items-center">
-                    <div class="h-8 w-8 rounded-full bg-gray-200 text-gray-600 flex items-center justify-center font-bold text-xs mr-3 shrink-0">
+                    <div class="mr-2">${liveIcon}</div> <div class="h-8 w-8 rounded-full bg-gray-200 text-gray-600 flex items-center justify-center font-bold text-xs mr-3 shrink-0">
                         ${staff.name.charAt(0)}
                     </div>
                     <div>
@@ -864,7 +894,7 @@ function renderStaffTable() {
                 <div class="md:hidden">
                     <div class="flex justify-between items-start mb-3">
                         <div class="flex items-center gap-3">
-                             <div class="h-10 w-10 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center font-bold text-sm shadow-sm">
+                             <div class="mr-1">${liveIcon}</div> <div class="h-10 w-10 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center font-bold text-sm shadow-sm">
                                 ${staff.name.charAt(0)}
                             </div>
                             <div>
@@ -3206,27 +3236,35 @@ async function acceptExchange(key, buyerEmail, sellerEmail) {
     initStaffDashboard(buyer);
 }
 window.postForExchange = async function (key, email) {
-    // 1. Confirm Action
+    const slot = invigilationSlots[key];
+    
+    // 1. SECURITY CHECK: Lock Status
+    if (!slot.isLocked) {
+        alert("⚠️ Action Denied.\n\nThis slot is currently OPEN (Unlocked).\n\nIf you cannot do this duty, please use the 'Cancel Duty' button in the calendar detail view instead of posting it for exchange.");
+        return;
+    }
+
+    // 2. Confirm Action
     if (!confirm("Post this duty for exchange?\n\nNOTE: You remain responsible (and assigned) until someone else accepts it.")) return;
 
-    const slot = invigilationSlots[key];
     if (!slot.exchangeRequests) slot.exchangeRequests = [];
 
     if (!slot.exchangeRequests.includes(email)) {
-        // 2. Update Local Data
+        // 3. Update Local Data
         slot.exchangeRequests.push(email);
 
-        // 3. LOGGING
+        // 4. LOGGING
         logActivity("Exchange Posted", `${getNameFromEmail(email)} posted ${key} for exchange.`);
 
-        // 4. IMMEDIATE UI UPDATES
+        // 5. IMMEDIATE UI UPDATES
         try {
             renderStaffCalendar(email);
             if (typeof renderExchangeMarket === "function") renderExchangeMarket(email);
+            if (typeof renderStaffUpcomingSummary === "function") renderStaffUpcomingSummary(email);
             window.closeModal('day-detail-modal');
         } catch (e) { console.error("UI Update Error:", e); }
 
-        // 5. Save to Cloud
+        // 6. Save to Cloud
         await syncSlotsToCloud();
     }
 }
@@ -6356,7 +6394,6 @@ window.addEventListener('offline', () => {
 // ==========================================
 // 📋 STAFF UPCOMING SCHEDULE (Interactive & Auto-Height)
 // ==========================================
-
 function renderStaffUpcomingSummary(email) {
     const viewStaff = document.getElementById('view-staff');
     if (!viewStaff) return;
@@ -6371,7 +6408,6 @@ function renderStaffUpcomingSummary(email) {
         const statsGrid = viewStaff.querySelector('.grid');
         container = document.createElement('div');
         container.id = 'staff-upcoming-summary';
-        // Removed 'min-h' and fixed height classes. Now using flex-col for structure.
         container.className = "mb-6 bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden flex flex-col";
 
         if (statsGrid && statsGrid.nextSibling) {
@@ -6398,10 +6434,24 @@ function renderStaffUpcomingSummary(email) {
             const label = isPosted ? "⏳ Posted" : "✅ Duty";
             const style = isPosted ? "bg-orange-100 text-orange-700 border-orange-200" : "bg-green-100 text-green-700 border-green-200";
 
-            // Determine Action based on status
-            // If Posted -> Click to Withdraw. If Duty -> Click to Post.
-            const action = isPosted ? `withdrawExchange('${key}', '${email}')` : `postForExchange('${key}', '${email}')`;
-            const hint = isPosted ? "Click to Withdraw Request" : "Click to Post for Exchange";
+            // --- FIXED ACTION LOGIC ---
+            let action = "";
+            let hint = "";
+
+            if (isPosted) {
+                action = `withdrawExchange('${key}', '${email}')`;
+                hint = "Click to Withdraw Request";
+            } else if (slot.isLocked) {
+                // Only allow exchange if locked
+                action = `postForExchange('${key}', '${email}')`;
+                hint = "Click to Post for Exchange";
+            } else {
+                // If unlocked, open details (to allow Cancel)
+                const [dStr] = key.split(' | ');
+                action = `openDayDetail('${dStr}', '${email}')`;
+                hint = "Slot Open: Click to View/Cancel";
+            }
+            // --------------------------
 
             upcomingDuties.push({
                 date: date,
@@ -6458,7 +6508,7 @@ function renderStaffUpcomingSummary(email) {
         </div>
     `;
 
-    // Unavailability Warning (Compact)
+    // Unavailability Warning
     if (uniqueUnav.length > 0) {
         htmlContent += `
             <div class="bg-red-50 px-4 py-3 border-b border-red-100 flex items-start gap-2">
@@ -6471,9 +6521,6 @@ function renderStaffUpcomingSummary(email) {
     }
 
     // Duty List Container
-    // - max-height: 60vh (Limits tall lists)
-    // - h-auto (Shrinks for short lists)
-    // - overflow-y-auto (Scrolls only when needed)
     htmlContent += `<div class="overflow-y-auto custom-scroll bg-white" style="max-height: 60vh; height: auto;">`;
 
     if (upcomingDuties.length === 0) {
@@ -6493,7 +6540,6 @@ function renderStaffUpcomingSummary(email) {
             const isToday = item.date.toDateString() === new Date().toDateString();
             const rowBg = isToday ? "bg-blue-50/50" : "hover:bg-indigo-50";
 
-            // Added cursor-pointer and onclick handler
             htmlContent += `
                 <div class="p-3 flex items-center justify-between transition cursor-pointer group ${rowBg}" 
                      onclick="${item.action}" title="${item.hint}">
@@ -6515,7 +6561,7 @@ function renderStaffUpcomingSummary(email) {
                             ${item.label}
                         </div>
                         <div class="text-[9px] text-gray-400 opacity-0 group-hover:opacity-100 transition">
-                            ${item.label.includes('Posted') ? 'Withdraw' : 'Exchange'} ➝
+                            ${item.label.includes('Posted') ? 'Withdraw' : (item.action.includes('postForExchange') ? 'Exchange ➝' : 'Details ➝')}
                         </div>
                     </div>
                 </div>
@@ -6527,6 +6573,7 @@ function renderStaffUpcomingSummary(email) {
     htmlContent += `</div>`;
     container.innerHTML = htmlContent;
 }
+
 
 // --- STAFF PAGINATION LISTENERS ---
 const btnStaffPrev = document.getElementById('btn-staff-prev');
@@ -7317,6 +7364,177 @@ window.startNewAcademicYear = async function() {
     }
 }
 
+
+// ==========================================
+// 🟢 LIVE STAFF PRESENCE SYSTEM (Final Corrected Version)
+// ==========================================
+let globalLiveUsers = {}; 
+let presenceUnsubscribe = null;
+
+// 1. START TRACKING (Call this on Init)
+window.initLivePresence = function(myEmail, myName, isAdmin) {
+    if (!currentCollegeId || !myEmail) return;
+
+     
+    // Sanitize Email for Doc ID
+    const myRef = doc(db, "colleges", currentCollegeId, "live_presence", myEmail);
+
+    // A. EVERYONE BROADCASTS (Writes)
+    const platform = window.innerWidth < 768 ? "Mobile" : "Desktop";
+    
+    const sendHeartbeat = (statusOverride) => {
+        // Default to 'online' unless specified
+        const status = statusOverride || 'online';
+        
+        setDoc(myRef, {
+            name: myName,
+            email: myEmail,
+            lastSeen: serverTimestamp(),
+            device: platform,
+            status: status
+        }, { merge: true });
+    };
+
+    // 1. Send first heartbeat immediately
+    sendHeartbeat('online');
+
+    // 2. Regular Heartbeat (Every 5 mins)
+    setInterval(() => {
+        if (document.visibilityState === 'visible') sendHeartbeat('online');
+    }, 5 * 60 * 1000); 
+
+    // 3. EXIT HOOK (The Fix for "Ghost" Online Users)
+    // Triggers when user closes tab or browser
+    window.addEventListener('beforeunload', () => {
+        sendHeartbeat('offline');
+    });
+
+    // 4. IDLE HOOK (Optional: Mark idle when tab is hidden/minimized)
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+            sendHeartbeat('idle');
+        } else {
+            sendHeartbeat('online');
+        }
+    });
+
+    // B. ONLY ADMINS LISTEN (Reads)
+    if (isAdmin) {
+        console.log("🟢 Live Presence: Admin Mode (Listening enabled)");
+        const presenceCol = collection(db, "colleges", currentCollegeId, "live_presence");
+        
+        if (presenceUnsubscribe) presenceUnsubscribe();
+        
+        presenceUnsubscribe = onSnapshot(presenceCol, (snapshot) => {
+            const now = Date.now();
+            globalLiveUsers = {}; 
+            let onlineCount = 0;
+
+            snapshot.forEach(doc => {
+                const data = doc.data();
+                if (!data.lastSeen) return;
+
+                const lastSeenTime = data.lastSeen.toMillis ? data.lastSeen.toMillis() : Date.now();
+                const diffMinutes = (now - lastSeenTime) / 1000 / 60;
+
+                // Priority: 
+                // 1. Explicit 'offline' status from database (The Fix)
+                // 2. Time-based timeout fallback
+                
+                if (data.status === 'offline') {
+                     globalLiveUsers[data.email] = { status: 'offline', device: data.device || 'Desktop' };
+                } else if (diffMinutes < 6) { 
+                    // If DB says online/idle AND time is recent
+                    globalLiveUsers[data.email] = { status: data.status || 'online', device: data.device || 'Desktop' };
+                    if (data.status !== 'idle') onlineCount++;
+                } else if (diffMinutes < 30) {
+                    globalLiveUsers[data.email] = { status: 'idle', device: data.device || 'Desktop' };
+                } else {
+                    globalLiveUsers[data.email] = { status: 'offline', device: data.device || 'Desktop' };
+                }
+            });
+
+            updateLiveStaffWidget(onlineCount);
+            
+            // Refresh Grids
+            if (typeof renderSlotsGridAdmin === 'function') renderSlotsGridAdmin();
+            if (typeof renderStaffTable === 'function') renderStaffTable(); 
+        });
+
+    } else {
+        console.log("🟢 Live Presence: Staff Mode (Broadcasting only)");
+    }
+};
+
+// 2. HELPER: Get Status Dot
+window.getLiveStatusIcon = function(email) {
+    const user = globalLiveUsers[email];
+    if (!user) return `<span class="text-gray-300 opacity-20" title="Offline">⚪</span>`;
+
+    if (user.status === 'online') {
+        const icon = user.device === 'Mobile' ? '📱' : '🟢';
+        return `<span class="animate-pulse text-green-500 font-bold" title="Online now">${icon}</span>`;
+    } 
+    if (user.status === 'idle') {
+        return `<span class="text-yellow-500" title="Idle">🟡</span>`;
+    }
+    return `<span class="text-gray-300 opacity-20" title="Offline">⚪</span>`;
+};
+
+// 3. UI: Floating Widget
+function updateLiveStaffWidget(count) {
+    let widget = document.getElementById('live-staff-widget');
+    
+    if (!widget) {
+        widget = document.createElement('div');
+        widget.id = 'live-staff-widget';
+        widget.className = "fixed bottom-4 left-4 bg-white/95 backdrop-blur border border-green-200 shadow-lg rounded-full px-4 py-2 flex items-center gap-2 z-50 cursor-pointer hover:scale-105 transition-transform group";
+        widget.onclick = showLiveStaffModal;
+        document.body.appendChild(widget);
+    }
+
+    if (count > 0) {
+        widget.innerHTML = `
+            <span class="relative flex h-3 w-3">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+              <span class="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
+            </span>
+            <span class="text-xs font-bold text-green-800">${count} Staff Online</span>
+        `;
+        widget.classList.remove('hidden');
+    } else {
+        widget.classList.add('hidden');
+    }
+}
+
+// 4. UI: Show List Modal
+window.showLiveStaffModal = function() {
+    const online = [];
+    Object.keys(globalLiveUsers).forEach(email => {
+        const u = globalLiveUsers[email];
+        const staffRec = staffData.find(s => s.email === email);
+        const name = staffRec ? staffRec.name : (u.name || email.split('@')[0]);
+        if (u.status === 'online') online.push({name, device: u.device});
+    });
+
+    let html = `
+        <div class="space-y-2">
+            <h4 class="font-bold text-green-700 border-b pb-1 mb-2">Active Staff (${online.length})</h4>
+            <div class="grid grid-cols-1 gap-2 max-h-60 overflow-y-auto">
+                ${online.map(u => `
+                    <div class="flex items-center gap-2 text-sm p-1 hover:bg-gray-50 rounded">
+                        <span>${u.device === 'Mobile' ? '📱' : '💻'}</span>
+                        <span class="font-medium">${u.name}</span>
+                    </div>
+                `).join('')}
+                ${online.length === 0 ? '<div class="text-gray-400 italic text-xs">No active staff.</div>' : ''}
+            </div>
+        </div>
+    `;
+
+    if(typeof UiModal !== 'undefined') UiModal.show("Live Status", html);
+    else alert(online.map(o => o.name).join('\n'));
+};
 
 // --- ATTENDANCE REPORT - PRINTABLE/PDF ---
 window.printAttendanceReport = function () {
