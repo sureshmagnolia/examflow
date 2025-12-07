@@ -121,74 +121,102 @@ document.getElementById('logout-btn').addEventListener('click', () => signOut(au
 
 async function handleLogin(user) {
     document.getElementById('login-btn').innerText = "Verifying...";
+    console.log("👤 Handling login for:", user.email);
 
-    // 1. Check Admin Access (allowedUsers)
-    const collegesRef = collection(db, "colleges");
-    const qAdmin = query(collegesRef, where("allowedUsers", "array-contains", user.email));
-    const adminSnap = await getDocs(qAdmin);
-
-    if (!adminSnap.empty) {
-        // ADMIN LOGIN
-        const docSnap = adminSnap.docs[0];
-        currentCollegeId = docSnap.id;
-        isAdmin = true;
-        
-        // --- NEW: Init Live Presence (Admin Mode = True) ---
-        if (typeof window.initLivePresence === 'function') {
-            window.initLivePresence(user.email, user.displayName || "Admin", true);
-        }
-        // --------------------------------------------------
-
-        setupLiveSync(currentCollegeId, 'admin');
-        return;
-    }
-
-    // 2. Check Staff Access (staffAccessList)
-    const qStaff = query(collegesRef, where("staffAccessList", "array-contains", user.email));
-    const staffSnap = await getDocs(qStaff);
-
-    if (!staffSnap.empty) {
-        // STAFF LOGIN
-        const docSnap = staffSnap.docs[0];
-        currentCollegeId = docSnap.id;
-        isAdmin = false;
-
-        // --- NEW: Init Live Presence (Staff Mode = False) ---
-        if (typeof window.initLivePresence === 'function') {
-            window.initLivePresence(user.email, user.displayName || "Staff", false);
-        }
-        // ---------------------------------------------------
-
-        setupLiveSync(currentCollegeId, 'staff');
-        return;
-    }
-
-    // 3. Fallback: Check Link ID
+    // --- 1. PRIORITY: Check Link ID (Direct URL Access) ---
+    // We do this FIRST because it's the most reliable method and avoids broad permission errors.
     const urlParams = new URLSearchParams(window.location.search);
     const urlId = urlParams.get('id');
-    if (urlId) {
-        const docRef = doc(db, "colleges", urlId);
-        const snap = await getDoc(docRef);
-        if (snap.exists()) {
-            const sList = JSON.parse(snap.data().examStaffData || '[]');
-            const me = sList.find(s => s.email.toLowerCase() === user.email.toLowerCase());
-            if (me) {
-                currentCollegeId = urlId;
-                isAdmin = false;
-                
-                // --- NEW: Init Live Presence (Staff Mode = False) ---
-                if (typeof window.initLivePresence === 'function') {
-                    window.initLivePresence(user.email, user.displayName || "Staff", false);
-                }
-                // ---------------------------------------------------
 
-                setupLiveSync(currentCollegeId, 'staff');
-            } else { alert("Access Denied: Email not in staff list."); signOut(auth); }
-        } else { alert("Invalid Link."); signOut(auth); }
-    } else {
-        alert("Access Denied. You are not listed as Admin or Staff.");
-        signOut(auth);
+    if (urlId) {
+        console.log("🔗 URL ID found:", urlId);
+        try {
+            const docRef = doc(db, "colleges", urlId);
+            const snap = await getDoc(docRef);
+
+            if (snap.exists()) {
+                const data = snap.data();
+                
+                // A. Check if Admin
+                if (data.allowedUsers && data.allowedUsers.includes(user.email)) {
+                    initializeSession(urlId, true, "Admin");
+                    return;
+                }
+
+                // B. Check if Staff
+                // Parse staff data safely (handle string or object)
+                const sList = JSON.parse(data.examStaffData || '[]');
+                const me = sList.find(s => s.email.toLowerCase() === user.email.toLowerCase());
+
+                // Also check the explicit access list if present
+                const hasAccess = (data.staffAccessList && data.staffAccessList.includes(user.email));
+
+                if (me || hasAccess) {
+                    initializeSession(urlId, false, "Staff");
+                    return;
+                }
+                
+                alert("⛔ Access Denied: Your email is not listed in this college's staff list.");
+                signOut(auth);
+                return;
+            } else {
+                alert("❌ Invalid Link: College not found.");
+            }
+        } catch (e) {
+            console.error("Link Login Error:", e);
+        }
     }
+
+    // --- 2. FALLBACK: Search for Admin Access ---
+    try {
+        const collegesRef = collection(db, "colleges");
+        const qAdmin = query(collegesRef, where("allowedUsers", "array-contains", user.email));
+        const adminSnap = await getDocs(qAdmin);
+
+        if (!adminSnap.empty) {
+            const docSnap = adminSnap.docs[0];
+            initializeSession(docSnap.id, true, "Admin");
+            return;
+        }
+    } catch (e) {
+        console.warn("Admin search skipped/failed (likely permissions):", e.message);
+        // Continue to staff check...
+    }
+
+    // --- 3. FALLBACK: Search for Staff Access ---
+    try {
+        const collegesRef = collection(db, "colleges");
+        const qStaff = query(collegesRef, where("staffAccessList", "array-contains", user.email));
+        const staffSnap = await getDocs(qStaff);
+
+        if (!staffSnap.empty) {
+            const docSnap = staffSnap.docs[0];
+            initializeSession(docSnap.id, false, "Staff");
+            return;
+        }
+    } catch (e) {
+        console.warn("Staff search failed:", e.message);
+    }
+
+    // --- 4. NO ACCESS FOUND ---
+    alert("⛔ Access Denied.\n\nYou are not listed as an Admin or Staff member.\nIf you are staff, please use the direct link provided by your admin.");
+    signOut(auth);
+    document.getElementById('login-btn').innerText = "Login with Google";
+}
+
+// --- Helper to start the session ---
+function initializeSession(id, adminStatus, roleName) {
+    console.log(`✅ Initializing Session: ${id} as ${roleName}`);
+    currentCollegeId = id;
+    isAdmin = adminStatus;
+
+    // Start Live Presence
+    if (typeof window.initLivePresence === 'function') {
+        window.initLivePresence(currentUser.email, currentUser.displayName || roleName, isAdmin);
+    }
+
+    // Start Data Sync
+    setupLiveSync(currentCollegeId, isAdmin ? 'admin' : 'staff');
 }
 
 function setupLiveSync(collegeId, mode) {
@@ -785,40 +813,45 @@ function renderSlotsGridAdmin() {
     // Adds 32 (8rem / 128px) of empty space at the bottom so the last card scrolls above any mobile bars
     ui.adminSlotsGrid.innerHTML += `<div class="col-span-full h-32 w-full"></div>`;
 }
-// Updated: Render Staff List with Clickable Done Count
-// Updated: Render Staff List with Live Status Icon
+// REPLACE your existing renderStaffTable function with this SAFE version
 function renderStaffTable() {
     if (!ui.staffTableBody) return;
     ui.staffTableBody.innerHTML = '';
 
-    const filter = document.getElementById('staff-search').value.toLowerCase();
+    const filterInput = document.getElementById('staff-search');
+    const filter = filterInput ? filterInput.value.toLowerCase() : "";
     const today = new Date();
 
-    // 1. Filter & Map Data
+    // 1. Filter & Map Data (SAFE MODE)
     const filteredItems = staffData
         .map((staff, i) => ({ ...staff, originalIndex: i }))
         .filter(item => {
             if (item.status === 'archived') return false;
 
-            // Search Logic
+            // --- THE FIX: Handle missing data safely ---
             if (filter) {
-                const matchName = item.name.toLowerCase().includes(filter);
-                const matchDept = item.dept.toLowerCase().includes(filter);
-                const matchDesig = (item.designation || "").toLowerCase().includes(filter);
-                if (!matchName && !matchDept && !matchDesig) return false;
+                const name = (item.name || "").toLowerCase();
+                const dept = (item.dept || "").toLowerCase();
+                const desig = (item.designation || "").toLowerCase();
+                const email = (item.email || "").toLowerCase(); // Also search email
+
+                if (!name.includes(filter) && 
+                    !dept.includes(filter) && 
+                    !desig.includes(filter) && 
+                    !email.includes(filter)) {
+                    return false;
+                }
             }
             return true;
         })
-        // Sort: Online Status First -> Dept -> Name
         .sort((a, b) => {
-            // Live Status Sort (Online users go to top)
+            // Sort Logic
             if (window.globalLiveUsers) {
                 const statusA = window.globalLiveUsers[a.email]?.status || 'offline';
                 const statusB = window.globalLiveUsers[b.email]?.status || 'offline';
                 if (statusA === 'online' && statusB !== 'online') return -1;
                 if (statusA !== 'online' && statusB === 'online') return 1;
             }
-
             const deptA = (a.dept || "").toLowerCase();
             const deptB = (b.dept || "").toLowerCase();
             if (deptA < deptB) return -1;
@@ -838,23 +871,20 @@ function renderStaffTable() {
     // Update Controls
     const pageInfo = document.getElementById('staff-page-info');
     if (pageInfo) pageInfo.textContent = `Page ${currentStaffPage} of ${totalPages} (${filteredItems.length} Staff)`;
-    const prevBtn = document.getElementById('btn-staff-prev');
-    const nextBtn = document.getElementById('btn-staff-next');
-    if (prevBtn) prevBtn.disabled = (currentStaffPage === 1);
-    if (nextBtn) nextBtn.disabled = (currentStaffPage === totalPages);
-
+    
     // 3. Render Rows
     pageItems.forEach((staff) => {
         const index = staff.originalIndex;
+        // Fallback for missing names
+        const safeName = staff.name || staff.email.split('@')[0];
+        const safeDept = staff.dept || "General";
 
         const target = calculateStaffTarget(staff);
         const done = getDutiesDoneCount(staff.email);
         const pending = Math.max(0, target - done);
-
-        // --- NEW: LIVE STATUS ICON ---
         const liveIcon = window.getLiveStatusIcon ? window.getLiveStatusIcon(staff.email) : '';
+        const statusColor = pending > 3 ? 'text-red-600 font-bold' : (pending > 0 ? 'text-orange-600' : 'text-green-600');
 
-        // Role Label
         let activeRoleLabel = "";
         if (staff.roleHistory && staff.roleHistory.length > 0) {
             const activeRole = staff.roleHistory.find(r => {
@@ -862,14 +892,9 @@ function renderStaffTable() {
                 const end = new Date(r.end);
                 return start <= today && end >= today;
             });
-            if (activeRole) {
-                activeRoleLabel = `<span class="bg-purple-100 text-purple-800 text-[10px] px-2 py-0.5 rounded ml-1 border border-purple-200 font-bold">${activeRole.role}</span>`;
-            }
+            if (activeRole) activeRoleLabel = `<span class="bg-purple-100 text-purple-800 text-[10px] px-2 py-0.5 rounded ml-1 border border-purple-200 font-bold">${activeRole.role}</span>`;
         }
 
-        const statusColor = pending > 3 ? 'text-red-600 font-bold' : (pending > 0 ? 'text-orange-600' : 'text-green-600');
-
-        // Lock Logic for Buttons
         let actionButtons = "";
         if (isStaffListLocked) {
             actionButtons = `<div class="w-full text-center md:text-right pt-2 md:pt-0 border-t border-gray-100 md:border-0 mt-2 md:mt-0"><span class="text-gray-400 text-xs italic mr-2">Locked</span></div>`;
@@ -879,8 +904,7 @@ function renderStaffTable() {
                     <button onclick="editStaff(${index})" class="flex-1 md:flex-none text-blue-600 hover:text-blue-900 bg-blue-50 px-3 py-1.5 rounded border border-blue-100 transition text-xs font-bold text-center">Edit</button>
                     <button onclick="openRoleAssignmentModal(${index})" class="flex-1 md:flex-none text-indigo-600 hover:text-indigo-900 bg-indigo-50 px-3 py-1.5 rounded border border-indigo-100 transition text-xs font-bold text-center">Role</button>
                     <button onclick="deleteStaff(${index})" class="flex-1 md:flex-none text-red-500 hover:text-red-700 font-bold px-3 py-1.5 rounded hover:bg-red-50 transition bg-white border border-red-100 text-center">&times;</button>
-                </div>
-            `;
+                </div>`;
         }
 
         const row = document.createElement('tr');
@@ -888,76 +912,34 @@ function renderStaffTable() {
 
         row.innerHTML = `
             <td class="block md:table-cell px-0 md:px-6 py-0 md:py-3 border-b-0 md:border-b border-gray-100 w-full md:w-auto">
-                
                 <div class="hidden md:flex items-center">
-                    <div class="mr-2">${liveIcon}</div> <div class="h-8 w-8 rounded-full bg-gray-200 text-gray-600 flex items-center justify-center font-bold text-xs mr-3 shrink-0">
-                        ${staff.name.charAt(0)}
-                    </div>
+                    <div class="mr-2">${liveIcon}</div> 
+                    <div class="h-8 w-8 rounded-full bg-gray-200 text-gray-600 flex items-center justify-center font-bold text-xs mr-3 shrink-0">${safeName.charAt(0)}</div>
                     <div>
-                        <div class="text-sm font-bold text-gray-800">${staff.name}</div>
-                        <div class="text-xs text-gray-500 mt-0.5">
-                            <span class="font-semibold text-gray-600">${staff.dept}</span> | ${staff.designation} ${activeRoleLabel}
-                        </div>
+                        <div class="text-sm font-bold text-gray-800">${safeName}</div>
+                        <div class="text-xs text-gray-500 mt-0.5"><span class="font-semibold text-gray-600">${safeDept}</span> | ${staff.designation || ""} ${activeRoleLabel}</div>
                     </div>
                 </div>
-
                 <div class="md:hidden">
                     <div class="flex justify-between items-start mb-3">
                         <div class="flex items-center gap-3">
-                             <div class="mr-1">${liveIcon}</div> <div class="h-10 w-10 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center font-bold text-sm shadow-sm">
-                                ${staff.name.charAt(0)}
-                            </div>
+                             <div class="mr-1">${liveIcon}</div> 
+                             <div class="h-10 w-10 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center font-bold text-sm shadow-sm">${safeName.charAt(0)}</div>
                             <div>
-                                <div class="text-sm font-bold text-gray-900">${staff.name}</div>
-                                <div class="text-xs text-gray-500 font-medium">${staff.dept} ${activeRoleLabel}</div>
-                                <div class="text-[10px] text-gray-400">${staff.designation}</div>
+                                <div class="text-sm font-bold text-gray-900">${safeName}</div>
+                                <div class="text-xs text-gray-500 font-medium">${safeDept} ${activeRoleLabel}</div>
                             </div>
-                        </div>
-                    </div>
-                    
-                    <div class="grid grid-cols-3 gap-2 mb-3 text-center bg-gray-50 p-2 rounded-lg border border-gray-100">
-                        <div>
-                            <div class="text-[9px] text-gray-400 uppercase font-bold tracking-wider">Target</div>
-                            <div class="font-mono text-sm font-bold text-gray-700">${target}</div>
-                        </div>
-                        <div class="border-l border-gray-200">
-                            <div class="text-[9px] text-gray-400 uppercase font-bold tracking-wider">Done</div>
-                            <div class="font-mono text-sm font-bold text-blue-600 cursor-pointer hover:underline hover:text-blue-800 transition-colors" 
-                                 onclick="openCompletedDutiesModal('${staff.email}')" title="Click to view history">
-                                ${done}
-                            </div>
-                        </div>
-                        <div class="border-l border-gray-200">
-                            <div class="text-[9px] text-gray-400 uppercase font-bold tracking-wider">Pending</div>
-                            <div class="font-mono text-sm font-bold ${statusColor}">${pending}</div>
                         </div>
                     </div>
                 </div>
             </td>
-
             <td class="hidden md:table-cell px-6 py-3 text-center font-mono text-sm text-gray-600">${target}</td>
-
-            <td class="hidden md:table-cell px-6 py-3 text-center font-mono text-sm font-bold">
-                <button onclick="openCompletedDutiesModal('${staff.email}')" 
-                        class="text-blue-600 hover:text-blue-800 hover:underline decoration-blue-400 underline-offset-2 transition-all cursor-pointer focus:outline-none" 
-                        title="View Duty History">
-                    ${done}
-                </button>
-            </td>
-
+            <td class="hidden md:table-cell px-6 py-3 text-center font-mono text-sm font-bold">${done}</td>
             <td class="hidden md:table-cell px-6 py-3 text-center font-mono text-sm ${statusColor}">${pending}</td>
-
-            <td class="block md:table-cell px-0 md:px-6 py-0 md:py-3 md:text-right md:whitespace-nowrap">
-                ${actionButtons}
-            </td>
+            <td class="block md:table-cell px-0 md:px-6 py-0 md:py-3 md:text-right md:whitespace-nowrap">${actionButtons}</td>
         `;
         ui.staffTableBody.appendChild(row);
     });
-
-    const spacer = document.createElement('tr');
-    spacer.className = "block md:hidden h-32 border-none bg-transparent pointer-events-none";
-    spacer.innerHTML = `<td class="block border-none p-0"></td>`;
-    ui.staffTableBody.appendChild(spacer);
 }
 
 function renderStaffRankList(myEmail) {
@@ -2452,7 +2434,9 @@ window.runAutoAllocation = async function () {
 }
 //-------------------
 
+
 window.saveNewStaff = async function () {
+    // 1. Capture Inputs
     const indexStr = document.getElementById('stf-edit-index').value;
     const isEditMode = (indexStr !== "");
     const index = isEditMode ? parseInt(indexStr) : -1;
@@ -2468,96 +2452,129 @@ window.saveNewStaff = async function () {
     let availableDays = [1, 2, 3, 4, 5, 6]; // Default: Full Availability
 
     if (designation === "Guest Lecturer") {
-        // Only respect checkboxes for Guest Faculty
         availableDays = Array.from(document.querySelectorAll('.stf-day-chk:checked')).map(c => parseInt(c.value));
     }
-    // -----------------------------
 
+    // 2. Validation
     if (!name || !email) return alert("Name and Email are required.");
 
-    if (isEditMode) {
-        // --- UPDATE EXISTING STAFF ---
-        const oldData = staffData[index];
-        const oldEmail = oldData.email;
+    // Change Button to Loading State
+    const saveBtn = document.querySelector('#add-staff-modal button[onclick="saveNewStaff()"]');
+    const originalText = saveBtn ? saveBtn.innerText : "Save";
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.innerText = "Saving...";
+    }
 
-        // 1. FULL EMAIL MIGRATION LOGIC
-        if (oldEmail !== email) {
-            if (staffData.some(s => s.email === email && s !== oldData)) {
-                return alert("This email is already used by another staff member.");
-            }
-            if (!confirm(`Change email from ${oldEmail} to ${email}?\n\nThis will update their system access AND migrate all their past records.`)) return;
+    try {
+        if (isEditMode) {
+            // --- UPDATE EXISTING STAFF ---
+            const oldData = staffData[index];
+            const oldEmail = oldData.email;
 
-            await removeStaffAccess(oldEmail);
-            await addStaffAccess(email);
-
-            // Deep Find & Replace in Slots (Migration)
-            let slotsChanged = false;
-            Object.keys(invigilationSlots).forEach(key => {
-                const slot = invigilationSlots[key];
-                if (slot.assigned.includes(oldEmail)) { slot.assigned = slot.assigned.map(e => e === oldEmail ? email : e); slotsChanged = true; }
-                if (slot.attendance && slot.attendance.includes(oldEmail)) { slot.attendance = slot.attendance.map(e => e === oldEmail ? email : e); slotsChanged = true; }
-                if (slot.exchangeRequests && slot.exchangeRequests.includes(oldEmail)) { slot.exchangeRequests = slot.exchangeRequests.map(e => e === oldEmail ? email : e); slotsChanged = true; }
-                if (slot.supervision) { if (slot.supervision.cs === oldEmail) { slot.supervision.cs = email; slotsChanged = true; } if (slot.supervision.sas === oldEmail) { slot.supervision.sas = email; slotsChanged = true; } }
-                if (slot.unavailable) {
-                    let unavChanged = false;
-                    slot.unavailable = slot.unavailable.map(u => {
-                        if (typeof u === 'string' && u === oldEmail) { unavChanged = true; return email; }
-                        if (typeof u === 'object' && u.email === oldEmail) { unavChanged = true; return { ...u, email: email }; }
-                        return u;
-                    });
-                    if (unavChanged) slotsChanged = true;
+            // Email Migration Logic
+            if (oldEmail !== email) {
+                if (staffData.some(s => s.email === email && s !== oldData)) {
+                    throw new Error("This email is already used by another staff member.");
                 }
-            });
-            if (slotsChanged) await syncSlotsToCloud();
+                if (!confirm(`Change email from ${oldEmail} to ${email}?\n\nThis will update their system access AND migrate all their past records.`)) {
+                    throw new Error("Cancelled by user.");
+                }
 
-            // Migrate Advance Unavailability
-            let advanceChanged = false;
-            Object.keys(advanceUnavailability).forEach(dateKey => {
-                ['FN', 'AN'].forEach(sess => {
-                    if (advanceUnavailability[dateKey] && advanceUnavailability[dateKey][sess]) {
-                        advanceUnavailability[dateKey][sess] = advanceUnavailability[dateKey][sess].map(u => {
-                            if (u.email === oldEmail) { advanceChanged = true; return { ...u, email: email }; }
+                await removeStaffAccess(oldEmail);
+                await addStaffAccess(email);
+
+                // Deep Find & Replace in Slots (Migration)
+                let slotsChanged = false;
+                Object.keys(invigilationSlots).forEach(key => {
+                    const slot = invigilationSlots[key];
+                    if (slot.assigned.includes(oldEmail)) { slot.assigned = slot.assigned.map(e => e === oldEmail ? email : e); slotsChanged = true; }
+                    if (slot.attendance && slot.attendance.includes(oldEmail)) { slot.attendance = slot.attendance.map(e => e === oldEmail ? email : e); slotsChanged = true; }
+                    if (slot.exchangeRequests && slot.exchangeRequests.includes(oldEmail)) { slot.exchangeRequests = slot.exchangeRequests.map(e => e === oldEmail ? email : e); slotsChanged = true; }
+                    if (slot.supervision) {
+                        if (slot.supervision.cs === oldEmail) { slot.supervision.cs = email; slotsChanged = true; }
+                        if (slot.supervision.sas === oldEmail) { slot.supervision.sas = email; slotsChanged = true; }
+                    }
+                    if (slot.unavailable) {
+                        let unavChanged = false;
+                        slot.unavailable = slot.unavailable.map(u => {
+                            if (typeof u === 'string' && u === oldEmail) { unavChanged = true; return email; }
+                            if (typeof u === 'object' && u.email === oldEmail) { unavChanged = true; return { ...u, email: email }; }
                             return u;
                         });
+                        if (unavChanged) slotsChanged = true;
                     }
                 });
-            });
-            if (advanceChanged) await saveAdvanceUnavailability();
+                if (slotsChanged) await syncSlotsToCloud();
+
+                // Migrate Advance Unavailability
+                let advanceChanged = false;
+                Object.keys(advanceUnavailability).forEach(dateKey => {
+                    ['FN', 'AN'].forEach(sess => {
+                        if (advanceUnavailability[dateKey] && advanceUnavailability[dateKey][sess]) {
+                            advanceUnavailability[dateKey][sess] = advanceUnavailability[dateKey][sess].map(u => {
+                                if (u.email === oldEmail) { advanceChanged = true; return { ...u, email: email }; }
+                                return u;
+                            });
+                        }
+                    });
+                });
+                if (advanceChanged) await saveAdvanceUnavailability();
+            }
+
+            logActivity("Staff Profile Updated", `Admin updated profile for ${name} (${email}).`);
+            
+            // Update Local Array
+            staffData[index] = {
+                ...oldData,
+                name, email, phone, dept, designation, joiningDate: date,
+                preferredDays: availableDays
+            };
+
+        } else {
+            // --- ADD NEW STAFF ---
+            if (staffData.some(s => s.email === email)) throw new Error("Staff with this email already exists.");
+
+            const newObj = {
+                name, email, phone, dept, designation, joiningDate: date,
+                dutiesDone: 0, roleHistory: [],
+                preferredDays: availableDays
+            };
+            
+            // 1. Update Permissions First
+            await addStaffAccess(email);
+            
+            // 2. Update Local Data
+            staffData.push(newObj);
+            logActivity("New Staff Added", `Admin added new staff: ${name} (${email}).`);
         }
-        logActivity("Staff Profile Updated", `Admin updated profile for ${name} (${email}).`);
-        // 2. Update Local Array
-        staffData[index] = {
-            ...oldData,
-            name, email, phone, dept, designation, joiningDate: date,
-            preferredDays: availableDays // <--- SAVED HERE
-        };
-        alert("Staff profile updated successfully.");
 
-    } else {
-        // --- ADD NEW STAFF ---
-        if (staffData.some(s => s.email === email)) return alert("Staff with this email already exists.");
+        // --- CRITICAL FIX: SYNC BEFORE CLOSING ---
+        await syncStaffToCloud(); 
+        
+        // --- UI Updates ---
+        window.closeModal('add-staff-modal');
+        
+        if (!isAdmin) {
+            window.location.reload();
+        } else {
+            renderStaffTable();
+            updateAdminUI();
+            alert(isEditMode ? "Staff profile updated successfully." : "New staff added successfully.");
+        }
 
-        const newObj = {
-            name, email, phone, dept, designation, joiningDate: date,
-            dutiesDone: 0, roleHistory: [],
-            preferredDays: availableDays
-        };
-        logActivity("New Staff Added", `Admin added new staff: ${name} (${email}).`);
-        staffData.push(newObj);
-        await addStaffAccess(email);
-        alert("New staff added successfully.");
-    }
-
-    await syncStaffToCloud();
-    window.closeModal('add-staff-modal');
-
-    if (!isAdmin) window.location.reload();
-    else {
-        renderStaffTable();
-        updateAdminUI();
+    } catch (e) {
+        console.error(e);
+        if (e.message !== "Cancelled by user.") {
+            alert("❌ Error: " + e.message);
+        }
+    } finally {
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.innerText = originalText;
+        }
     }
 }
-
 
 
 
