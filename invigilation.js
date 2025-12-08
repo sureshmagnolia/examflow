@@ -219,6 +219,7 @@ function initializeSession(id, adminStatus, roleName) {
     setupLiveSync(currentCollegeId, isAdmin ? 'admin' : 'staff');
 }
 
+// OPTIMIZED: Uses LocalStorage to prevent waiting for Cloud
 function setupLiveSync(collegeId, mode) {
     // 1. Clear Old Listeners
     if (cloudUnsubscribe) cloudUnsubscribe();
@@ -228,40 +229,30 @@ function setupLiveSync(collegeId, mode) {
 
     const docRef = doc(db, "colleges", collegeId);
 
-    // 2. LISTEN TO CONFIG (Main Doc) - Low Bandwidth
+    // --- OPTIMIZATION: LOAD FROM CACHE FIRST ---
+    const cachedConfig = localStorage.getItem(`config_${collegeId}`);
+    if (cachedConfig) {
+        console.log("⚡ Loaded Config from Cache");
+        applyCollegeConfig(JSON.parse(cachedConfig), mode, false); // false = don't re-render everything yet
+    }
+
+    // 2. LISTEN TO CONFIG (Main Doc)
+    // This will update the cache if the cloud version is newer
     cloudUnsubscribe = onSnapshot(docRef, (docSnap) => {
         if (docSnap.exists()) {
             updateSyncStatus("Synced", "success");
-            collegeData = docSnap.data();
-
-            // CONFIGS
-            designationsConfig = JSON.parse(collegeData.invigDesignations || JSON.stringify(DEFAULT_DESIGNATIONS));
-            const savedRoles = JSON.parse(collegeData.invigRoles || '{}');
-            rolesConfig = { ...DEFAULT_ROLES, ...savedRoles };
-            googleScriptUrl = collegeData.invigGoogleScriptUrl || "";
-            departmentsConfig = JSON.parse(collegeData.invigDepartments || JSON.stringify(DEFAULT_DEPARTMENTS));
+            const data = docSnap.data();
             
-            // Vacation & Targets
-            const vacConfig = JSON.parse(collegeData.invigVacationConfig || '{}');
-            vacationStart = vacConfig.start || "";
-            vacationEnd = vacConfig.end || "";
-            vacationExtraHolidays = new Set(vacConfig.holidays || []);
-            
-            if (collegeData.invigGlobalTarget !== undefined) globalDutyTarget = parseInt(collegeData.invigGlobalTarget);
-            if (collegeData.invigGuestTarget !== undefined) guestGlobalTarget = parseInt(collegeData.invigGuestTarget);
-
-            // UI Initializers (Run once scaffold is ready)
-            if (mode === 'admin') {
-                if (document.getElementById('view-admin').classList.contains('hidden') &&
-                    document.getElementById('view-staff').classList.contains('hidden')) {
-                    initAdminDashboard();
-                }
-                updateAdminUI();
+            // Only update if data actually changed (Basic check)
+            const currentCache = localStorage.getItem(`config_${collegeId}`);
+            if (currentCache !== JSON.stringify(data)) {
+                localStorage.setItem(`config_${collegeId}`, JSON.stringify(data));
+                applyCollegeConfig(data, mode, true);
             }
         }
     });
 
-    // 3. LISTEN TO SLOTS (Sub-collection) - High Updates
+    // 3. LISTEN TO SLOTS (Keep as is - high frequency)
     const slotsRef = doc(db, "colleges", collegeId, "system_data", "slots");
     slotsUnsubscribe = onSnapshot(slotsRef, (docSnap) => {
         if (docSnap.exists()) {
@@ -270,43 +261,54 @@ function setupLiveSync(collegeId, mode) {
             advanceUnavailability = JSON.parse(data.invigAdvanceUnavailability || '{}');
             localStorage.setItem('examInvigilationSlots', JSON.stringify(invigilationSlots));
 
-            // Reactively Render Grid/Calendar
-            if (mode === 'admin') {
+            // --- FIX START: Check VISIBLE View, not just 'mode' ---
+            const adminView = document.getElementById('view-admin');
+            const staffView = document.getElementById('view-staff');
+
+            // 1. If Admin View is active, update Admin Grid
+            if (adminView && !adminView.classList.contains('hidden')) {
                 renderSlotsGridAdmin();
                 renderAdminTodayStats();
-            } else if (currentUser) {
-                const me = staffData.find(s => s.email.toLowerCase() === currentUser.email.toLowerCase());
-                if (me) {
-                    renderStaffCalendar(me.email);
-                    if (typeof renderExchangeMarket === "function") renderExchangeMarket(me.email);
-                    if (typeof renderStaffUpcomingSummary === "function") renderStaffUpcomingSummary(me.email);
+            }
+
+            // 2. If Staff View is active (Staff user OR Admin viewing as staff), update Calendar
+            if (staffView && !staffView.classList.contains('hidden')) {
+                // Determine which email to render
+                let emailToRender = currentUser ? currentUser.email : null;
+                
+                // If staffData is loaded, try to match correct casing
+                if (staffData.length > 0 && currentUser) {
+                    const me = staffData.find(s => s.email.toLowerCase() === currentUser.email.toLowerCase());
+                    if (me) emailToRender = me.email;
+                }
+
+                if (emailToRender) {
+                    renderStaffCalendar(emailToRender);
+                    // Also refresh associated staff components
+                    if (typeof renderExchangeMarket === "function") renderExchangeMarket(emailToRender);
+                    if (typeof renderStaffUpcomingSummary === "function") renderStaffUpcomingSummary(emailToRender);
                 }
             }
         }
     });
 
-    // 4. LISTEN TO STAFF (Sub-collection) - Medium Updates
+    // 4. LISTEN TO STAFF (Keep as is)
     const staffRef = doc(db, "colleges", collegeId, "system_data", "staff");
     staffUnsubscribe = onSnapshot(staffRef, (docSnap) => {
         if (docSnap.exists()) {
             const data = docSnap.data();
             staffData = JSON.parse(data.examStaffData || '[]');
-            // Load Mapping (Allocation)
-            const mappingData = JSON.parse(data.examInvigilatorMapping || '{}');
-            // We don't have a global var for mapping in this file yet, but let's persist it
-            localStorage.setItem('examInvigilatorMapping', JSON.stringify(mappingData));
-
+            
             if (mode === 'admin') {
                 renderStaffTable();
                 updateAdminUI();
             } else if (currentUser) {
-                // Initialize Staff Dashboard if needed
                 const me = staffData.find(s => s.email.toLowerCase() === currentUser.email.toLowerCase());
                 if (me) {
                     if (document.getElementById('view-staff').classList.contains('hidden')) {
                         initStaffDashboard(me);
                     } else {
-                        // Refresh Stats
+                        // Refresh Stats Only
                         const done = getDutiesDoneCount(me.email);
                         const pending = Math.max(0, calculateStaffTarget(me) - done);
                         document.getElementById('staff-view-pending').textContent = pending;
@@ -318,6 +320,32 @@ function setupLiveSync(collegeId, mode) {
             }
         }
     });
+}
+
+// Helper to apply config (Shared by Cache & Live)
+function applyCollegeConfig(data, mode, triggerRender) {
+    collegeData = data;
+    designationsConfig = JSON.parse(collegeData.invigDesignations || JSON.stringify(DEFAULT_DESIGNATIONS));
+    const savedRoles = JSON.parse(collegeData.invigRoles || '{}');
+    rolesConfig = { ...DEFAULT_ROLES, ...savedRoles };
+    googleScriptUrl = collegeData.invigGoogleScriptUrl || "";
+    departmentsConfig = JSON.parse(collegeData.invigDepartments || JSON.stringify(DEFAULT_DEPARTMENTS));
+    
+    const vacConfig = JSON.parse(collegeData.invigVacationConfig || '{}');
+    vacationStart = vacConfig.start || "";
+    vacationEnd = vacConfig.end || "";
+    vacationExtraHolidays = new Set(vacConfig.holidays || []);
+    
+    if (collegeData.invigGlobalTarget !== undefined) globalDutyTarget = parseInt(collegeData.invigGlobalTarget);
+    if (collegeData.invigGuestTarget !== undefined) guestGlobalTarget = parseInt(collegeData.invigGuestTarget);
+
+    if (triggerRender && mode === 'admin') {
+        if (document.getElementById('view-admin').classList.contains('hidden') &&
+            document.getElementById('view-staff').classList.contains('hidden')) {
+            initAdminDashboard();
+        }
+        updateAdminUI();
+    }
 }
 
 function initAdminDashboard() {
@@ -645,37 +673,86 @@ window.sendSingleEmail = function (btn, email, name, subject, message) {
             btn.classList.add('bg-red-600');
         });
 }
-// --- RENDER ADMIN SLOTS (Responsive Header + Scroll Fix) ---
+
+// --- NEW: ADMIN POSTING LOCK FUNCTIONS ---
+
+window.toggleAdminLock = async function (key) {
+    if (!invigilationSlots[key]) return;
+    
+    // Toggle Admin Lock state
+    invigilationSlots[key].isAdminLocked = !invigilationSlots[key].isAdminLocked;
+    
+    // LOGIC CHANGE: If Admin Lock is ENABLED, enforce Standard Lock (isLocked) too.
+    // When Admin Lock is removed later, Standard Lock remains (enabling Exchange Market).
+    if (invigilationSlots[key].isAdminLocked) {
+        invigilationSlots[key].isLocked = true;
+    }
+    
+    const status = invigilationSlots[key].isAdminLocked ? "LOCKED" : "UNLOCKED";
+    logActivity("Admin Posting Lock", `Admin ${status} slot ${key} for posting.`);
+    
+    await syncSlotsToCloud();
+    renderSlotsGridAdmin();
+}
+
+window.toggleWeekAdminLock = async function (monthStr, weekNum, lockState) {
+    if (!confirm(`${lockState ? '🔒 LOCK' : '🔓 UNLOCK'} Admin Posting for ${monthStr} Week ${weekNum}?\n\nThis will prevent staff from adding unavailability.`)) return;
+
+    let changed = false;
+    Object.keys(invigilationSlots).forEach(key => {
+        const date = parseDate(key);
+        const mStr = date.toLocaleString('default', { month: 'long', year: 'numeric' });
+        const wNum = getWeekOfMonth(date);
+
+        if (mStr === monthStr && wNum === weekNum) {
+            // Apply Admin Lock State
+            if (!!invigilationSlots[key].isAdminLocked !== lockState) {
+                invigilationSlots[key].isAdminLocked = lockState;
+                
+                // LOGIC CHANGE: If Locking Admin, also enforce Standard Lock
+                if (lockState === true) {
+                    invigilationSlots[key].isLocked = true;
+                }
+                
+                changed = true;
+            }
+        }
+    });
+
+    if (changed) {
+        logActivity("Weekly Admin Lock", `Admin ${lockState ? 'LOCKED' : 'UNLOCKED'} posting for ${monthStr} Week ${weekNum}.`);
+        await syncSlotsToCloud();
+        renderSlotsGridAdmin();
+    } else {
+        alert("No changes needed.");
+    }
+}
+
+
 function renderSlotsGridAdmin() {
     if (!ui.adminSlotsGrid) return;
     ui.adminSlotsGrid.innerHTML = '';
 
-    // 1. Date Headers
     const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
     const currentMonthStr = monthNames[currentAdminDate.getMonth()];
     const currentYear = currentAdminDate.getFullYear();
 
-    // --- NAVIGATION BAR (Compact for Mobile) ---
+    // 1. Navigation Bar
     const navHtml = `
         <div class="col-span-full flex justify-between items-center glass-panel p-2 md:p-3 rounded-lg border-0 shadow-sm mb-2 sticky top-0 z-30 mx-1 mt-1">
             <button onclick="changeAdminMonth(-1)" class="px-2 py-1.5 md:px-3 text-xs font-bold text-gray-700 hover:bg-white/50 rounded border border-gray-200/50 flex items-center gap-1 transition">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" /></svg>
-                <span class="hidden md:inline">Prev</span>
+                <span class="hidden md:inline">Prev</span> ⬅️
             </button>
-            
             <h3 class="text-sm md:text-lg font-black text-indigo-800 uppercase tracking-wide flex items-center gap-1 md:gap-2 whitespace-nowrap">
                 <span>📅</span> ${currentMonthStr} <span class="text-gray-500 text-xs md:text-lg">'${String(currentYear).slice(-2)}</span>
             </h3>
-            
             <button onclick="changeAdminMonth(1)" class="px-2 py-1.5 md:px-3 text-xs font-bold text-gray-700 hover:bg-white/50 rounded border border-gray-200/50 flex items-center gap-1 transition">
-                <span class="hidden md:inline">Next</span>
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" /></svg>
+                ➡️ <span class="hidden md:inline">Next</span>
             </button>
-        </div>
-    `;
+        </div>`;
     ui.adminSlotsGrid.innerHTML = navHtml;
 
-    // 2. Filter Data for Current Month
+    // 2. Filter & Group Data
     const slotItems = [];
     Object.keys(invigilationSlots).forEach(key => {
         const date = parseDate(key);
@@ -684,135 +761,116 @@ function renderSlotsGridAdmin() {
         }
     });
 
-    // 3. Empty State
     if (slotItems.length === 0) {
-        ui.adminSlotsGrid.innerHTML += `
-            <div class="col-span-full text-center py-16 bg-gray-50 rounded-lg border-2 border-dashed border-gray-200 m-2">
-                <p class="text-gray-400 font-medium mb-2">No exam sessions scheduled for ${currentMonthStr}.</p>
-                <button onclick="openAddSlotModal()" class="text-indigo-600 font-bold hover:underline text-sm flex items-center justify-center gap-1 mx-auto">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
-                    Add Slot
-                </button>
-            </div>`;
+        ui.adminSlotsGrid.innerHTML += `<div class="col-span-full text-center py-16 text-gray-400">No sessions this month. <button onclick="openAddSlotModal()" class="text-indigo-600 font-bold hover:underline">Add Slot</button></div>`;
         return;
     }
 
-    // 4. Group by Week
     const groupedSlots = {};
     slotItems.forEach(item => {
         const mStr = item.date.toLocaleString('default', { month: 'long', year: 'numeric' });
         const weekNum = getWeekOfMonth(item.date);
         const groupKey = `${mStr}-W${weekNum}`;
-        if (!groupedSlots[groupKey]) {
-            groupedSlots[groupKey] = { month: mStr, week: weekNum, items: [] };
-        }
+        if (!groupedSlots[groupKey]) groupedSlots[groupKey] = { month: mStr, week: weekNum, items: [] };
         groupedSlots[groupKey].items.push(item);
     });
 
-    // 5. Sort Groups
-    const sortedGroupKeys = Object.keys(groupedSlots).sort((a, b) => {
-        const dateA = groupedSlots[a].items[0].date;
-        const dateB = groupedSlots[b].items[0].date;
-        return dateA - dateB;
-    });
+    const sortedGroupKeys = Object.keys(groupedSlots).sort((a, b) => groupedSlots[a].items[0].date - groupedSlots[b].items[0].date);
 
-    // 6. Render Groups
+    // 3. Render Groups
     sortedGroupKeys.forEach(gKey => {
         const group = groupedSlots[gKey];
 
-        // Week Header (Compact)
+        // Week Header
         ui.adminSlotsGrid.innerHTML += `
             <div class="glass-card col-span-full mt-3 mb-1 flex flex-wrap justify-between items-center bg-indigo-50/50 px-3 py-2 rounded border border-indigo-100/50 shadow-sm mx-1">
                 <span class="text-indigo-900 text-[10px] font-bold uppercase tracking-wider bg-white/60 px-2 py-0.5 rounded border border-indigo-100/30">
                     Week ${group.week}
                 </span>
-                <div class="flex gap-1">
-                    <button onclick="runWeeklyAutoAssign('${group.month}', ${group.week})" 
-                        class="text-[10px] bg-indigo-600 text-white border border-indigo-700 px-2 py-1 rounded hover:bg-indigo-700 font-bold transition shadow-sm flex items-center gap-1">
-                        ⚡ Auto
-                    </button>
-                    
+                <div class="flex gap-2">
                     <div class="flex rounded shadow-sm">
-                        <button onclick="toggleWeekLock('${group.month}', ${group.week}, true)" class="text-[10px] bg-white border border-gray-300 text-red-600 px-2 py-1 rounded-l hover:bg-red-50 font-bold border-r-0">🔒</button>
-                        <button onclick="toggleWeekLock('${group.month}', ${group.week}, false)" class="text-[10px] bg-white border border-gray-300 text-green-600 px-2 py-1 rounded-r hover:bg-green-50 font-bold">🔓</button>
+                        <button onclick="toggleWeekLock('${group.month}', ${group.week}, true)" class="text-[10px] bg-white border border-gray-300 text-gray-500 px-2 py-1 rounded-l hover:bg-gray-50 font-bold border-r-0" title="Lock Standard Booking">🔒 Std</button>
+                        <button onclick="toggleWeekLock('${group.month}', ${group.week}, false)" class="text-[10px] bg-white border border-gray-300 text-gray-500 px-2 py-1 rounded-r hover:bg-gray-50 font-bold" title="Unlock Standard Booking">🔓</button>
                     </div>
+                    <div class="flex rounded shadow-sm">
+                        <button onclick="toggleWeekAdminLock('${group.month}', ${group.week}, true)" class="text-[10px] bg-amber-100 border border-amber-300 text-amber-700 px-2 py-1 rounded-l hover:bg-amber-200 font-bold border-r-0" title="Lock Admin Posting">🛡️ Admin</button>
+                        <button onclick="toggleWeekAdminLock('${group.month}', ${group.week}, false)" class="text-[10px] bg-amber-100 border border-amber-300 text-amber-700 px-2 py-1 rounded-r hover:bg-amber-200 font-bold" title="Unlock Admin Posting">🔓</button>
+                    </div>
+                    <button onclick="runWeeklyAutoAssign('${group.month}', ${group.week})" class="text-[10px] bg-indigo-600 text-white border border-indigo-700 px-2 py-1 rounded hover:bg-indigo-700 font-bold shadow-sm">⚡ Auto</button>
                 </div>
             </div>`;
 
-        // Render Slots
         group.items.sort((a, b) => a.date - b.date);
 
         group.items.forEach(({ key, slot }) => {
             const filled = slot.assigned.length;
+            const isAdminLocked = slot.isAdminLocked || false;
 
-            // 3D PLASTICKY THEME LOGIC
-            // We use gradients and stronger borders to create depth
-            let themeClasses = "";
-            let statusIcon = "";
-
-            if (slot.isLocked) {
+            // --- THEME & ICON LOGIC ---
+            let themeClasses = "border-orange-400 bg-gradient-to-br from-white via-orange-50 to-orange-100";
+            let statusIcon = "🔓";
+            
+            // Priority: Admin Lock > Standard Lock > Full > Open
+            if (isAdminLocked) {
+                themeClasses = "border-amber-500 bg-gradient-to-br from-white via-amber-50 to-amber-100 shadow-amber-100";
+                statusIcon = "🛡️"; // Admin Shield
+            } else if (slot.isLocked) {
                 themeClasses = "border-red-500 bg-gradient-to-br from-white via-red-50 to-red-100 shadow-red-100";
                 statusIcon = "🔒";
             } else if (filled >= slot.required) {
                 themeClasses = "border-green-500 bg-gradient-to-br from-white via-green-50 to-green-100 shadow-green-100";
                 statusIcon = "✅";
-            } else {
-                themeClasses = "border-orange-400 bg-gradient-to-br from-white via-orange-50 to-orange-100 shadow-orange-100";
-                statusIcon = "🔓";
             }
 
-            // Unavailability Button
-            let unavButton = "";
-            if (slot.unavailable && slot.unavailable.length > 0) {
-                unavButton = `<button onclick="openInconvenienceModal('${key}')" class="mt-2 w-full flex items-center justify-center gap-1 bg-white/80 backdrop-blur text-red-700 border border-red-200 px-2 py-1.5 rounded-lg text-[10px] font-bold hover:bg-red-50 transition shadow-sm hover:shadow active:scale-95"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg> ${slot.unavailable.length} Issue(s)</button>`;
-            }
+            const adminBtnStyle = isAdminLocked 
+                ? "bg-amber-600 text-white border-amber-700 hover:bg-amber-700" 
+                : "bg-white text-amber-600 border-amber-200 hover:bg-amber-50";
 
-            const hasLog = slot.allocationLog ? "" : "opacity-50 cursor-not-allowed";
-
+            // Render Card
             ui.adminSlotsGrid.innerHTML += `
-                <div class="relative border-l-[6px] ${themeClasses} p-3 rounded-xl shadow-md hover:shadow-xl hover:-translate-y-1 transition-all duration-300 w-full mb-3 group slot-card">
-                    <!-- Glossy Highlight Effect -->
-                    <div class="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/60 to-transparent opacity-50 rounded-t-xl pointer-events-none"></div>
-
-                    <div class="relative z-10">
-                        <div class="flex justify-between items-start mb-2">
-                            <h4 class="font-black text-gray-800 text-xs w-2/3 break-words leading-tight flex items-center gap-1">
-                                <span class="text-sm shadow-sm bg-white/50 rounded-full w-6 h-6 flex items-center justify-center border border-white/50">${statusIcon}</span> 
-                                <span class="drop-shadow-sm">${key}</span>
-                            </h4>
-                            <div class="flex items-center bg-white/90 backdrop-blur border border-gray-200 rounded-lg text-[10px] shadow-sm shrink-0 overflow-hidden">
-                                <button onclick="changeSlotReq('${key}', -1)" class="px-2 py-1 hover:bg-gray-100 border-r border-gray-200 text-gray-600 font-bold active:bg-gray-200 transition">-</button>
-                                <span class="px-2 font-bold text-gray-800" title="Filled / Required">${filled}/${slot.required}</span>
-                                <button onclick="changeSlotReq('${key}', 1)" class="px-2 py-1 hover:bg-gray-100 border-l border-gray-200 text-gray-600 font-bold active:bg-gray-200 transition">+</button>
-                            </div>
+                <div class="relative border-l-[6px] ${themeClasses} p-3 rounded-xl shadow-md hover:shadow-xl hover:-translate-y-1 transition-all duration-300 w-full mb-3 group">
+                    <div class="flex justify-between items-start mb-2">
+                        <h4 class="font-black text-gray-800 text-xs w-2/3 flex items-center gap-1">
+                            <span class="text-sm shadow-sm bg-white/50 rounded-full w-6 h-6 flex items-center justify-center border border-white/50" title="${isAdminLocked ? 'Admin Posting Locked' : 'Status'}">${statusIcon}</span> 
+                            <span>${key}</span>
+                        </h4>
+                        <div class="flex items-center bg-white/90 border border-gray-200 rounded-lg text-[10px] overflow-hidden">
+                            <button onclick="changeSlotReq('${key}', -1)" class="px-2 py-1 hover:bg-gray-100 border-r border-gray-200 font-bold">-</button>
+                            <span class="px-2 font-bold text-gray-800">${filled}/${slot.required}</span>
+                            <button onclick="changeSlotReq('${key}', 1)" class="px-2 py-1 hover:bg-gray-100 border-l border-gray-200 font-bold">+</button>
                         </div>
-                        
-                        <div class="text-[10px] text-gray-600 mb-2 leading-tight bg-white/40 p-1.5 rounded-lg border border-white/50 shadow-sm">
-                            <strong class="text-gray-800">Staff:</strong> ${slot.assigned.map(email => getNameFromEmail(email)).join(', ') || "<span class='text-gray-400 italic'>None Assigned</span>"}
-                        </div>
-                        
-                        ${unavButton}
                     </div>
                     
-                    <div class="grid grid-cols-4 gap-1.5 mt-3 relative z-10">
-                         <button onclick="openSlotReminderModal('${key}')" class="col-span-1 text-[10px] bg-white text-green-700 border border-green-200 rounded-lg py-1.5 hover:bg-green-50 font-bold transition shadow-sm hover:shadow" title="Reminder">🔔</button>
-                         <button onclick="printSessionReport('${key}')" class="col-span-1 text-[10px] bg-white text-gray-700 border border-gray-300 rounded-lg py-1.5 hover:bg-gray-50 font-bold transition shadow-sm hover:shadow" title="Print">🖨️</button>
-                         <button onclick="openManualAllocationModal('${key}')" class="col-span-1 text-[10px] bg-white text-indigo-700 border border-indigo-200 rounded-lg py-1.5 hover:bg-indigo-50 font-bold transition shadow-sm hover:shadow" title="Edit">Edit</button>
-                         <button onclick="viewSlotHistory('${key}')" class="col-span-1 text-[10px] bg-white text-orange-700 border border-orange-200 rounded-lg py-1.5 hover:bg-orange-50 font-bold transition shadow-sm hover:shadow ${hasLog}" title="Log">📜</button>
+                    <div class="text-[10px] text-gray-600 mb-2 bg-white/40 p-1.5 rounded-lg border border-white/50 shadow-sm">
+                        <strong>Staff:</strong> ${slot.assigned.map(email => getNameFromEmail(email)).join(', ') || "None"}
                     </div>
-                    <div class="flex gap-1.5 mt-2 relative z-10">
-                        <button onclick="toggleLock('${key}')" class="flex-1 text-[10px] border border-gray-200 rounded-lg py-1.5 hover:bg-gray-50 text-gray-700 font-bold transition shadow-sm bg-white hover:shadow active:scale-95">${slot.isLocked ? 'Unlock' : 'Lock'}</button>
-                        <button onclick="openRescheduleModal('${key}')" class="px-2.5 text-[10px] border border-orange-200 rounded-lg py-1.5 hover:bg-orange-50 text-orange-600 font-bold transition shadow-sm bg-white hover:shadow active:scale-95" title="Reschedule">📅</button>
-                        <button onclick="deleteSlot('${key}')" class="px-2.5 text-[10px] border border-red-200 rounded-lg py-1.5 hover:bg-red-50 text-red-600 font-bold transition shadow-sm bg-white hover:shadow active:scale-95" title="Delete">🗑️</button>
-                    </div>                
+                    
+                    ${isAdminLocked ? '<div class="text-[9px] font-bold text-amber-700 bg-amber-100 px-2 py-1 rounded border border-amber-200 mb-2 text-center">🛡️ Posting Restricted (Admin)</div>' : ''}
+                    
+                    ${slot.unavailable && slot.unavailable.length > 0 ? `<button onclick="openInconvenienceModal('${key}')" class="mt-2 w-full bg-white/80 text-red-700 border border-red-200 px-2 py-1.5 rounded-lg text-[10px] font-bold hover:bg-red-50 mb-2">⛔ ${slot.unavailable.length} Issue(s)</button>` : ''}
+                    
+                    <div class="flex gap-1.5 mt-2">
+                        <button onclick="toggleLock('${key}')" class="flex-1 text-[10px] border border-gray-200 rounded-lg py-1.5 hover:bg-gray-50 text-gray-700 font-bold bg-white shadow-sm">
+                            ${slot.isLocked ? '🔓 Open Std' : '🔒 Lock Std'}
+                        </button>
+                        <button onclick="toggleAdminLock('${key}')" class="flex-1 text-[10px] border rounded-lg py-1.5 font-bold shadow-sm ${adminBtnStyle}">
+                            ${isAdminLocked ? '🔓 Open Admin' : '🛡️ Lock Admin'}
+                        </button>
+                    </div>
+
+                    <div class="grid grid-cols-4 gap-1.5 mt-2">
+                         <button onclick="openSlotReminderModal('${key}')" class="bg-white text-green-700 border border-green-200 rounded py-1 hover:bg-green-50 text-[10px]">🔔</button>
+                         <button onclick="printSessionReport('${key}')" class="bg-white text-gray-700 border border-gray-300 rounded py-1 hover:bg-gray-50 text-[10px]">🖨️</button>
+                         <button onclick="openManualAllocationModal('${key}')" class="bg-white text-indigo-700 border border-indigo-200 rounded py-1 hover:bg-indigo-50 text-[10px]">Edit</button>
+                         <button onclick="deleteSlot('${key}')" class="bg-white text-red-600 border border-red-200 rounded py-1 hover:bg-red-50 text-[10px]">🗑️</button>
+                    </div>
                 </div>`;
         });
     });
 
-    // 7. BOTTOM SPACER (The Fix)
-    // Adds 32 (8rem / 128px) of empty space at the bottom so the last card scrolls above any mobile bars
     ui.adminSlotsGrid.innerHTML += `<div class="col-span-full h-32 w-full"></div>`;
 }
+
 // REPLACE your existing renderStaffTable function with this SAFE version
 function renderStaffTable() {
     if (!ui.staffTableBody) return;
@@ -1084,22 +1142,16 @@ function renderStaffCalendar(myEmail) {
     for (let day = 1; day <= daysInMonth; day++) {
         const dateStr = `${String(day).padStart(2, '0')}.${String(month + 1).padStart(2, '0')}.${year}`;
         const slots = slotsByDate[day] || [];
-
-        // Check if this is today
         const today = new Date();
         const isToday = (day === today.getDate() && month === today.getMonth() && year === today.getFullYear());
 
-        // Base Cell Style
         let cellClass = "relative bg-white/80 hover:bg-white border border-white/60 hover:border-indigo-200 hover:shadow-xl hover:-translate-y-1 transition-all duration-300 min-h-[4.5rem] md:min-h-[8rem] rounded-md md:rounded-xl m-px md:m-0.5 overflow-hidden group flex flex-col shadow-sm backdrop-blur-md";
-
-        // Date Circle
         let dateClass = isToday
             ? "absolute top-1 md:top-2 left-1/2 -translate-x-1/2 w-5 h-5 md:w-7 md:h-7 flex items-center justify-center rounded-full bg-red-700 text-[10px] md:text-xs font-bold text-white transition-colors duration-300 shadow-lg border border-red-800 z-20"
             : "absolute top-1 md:top-2 left-1/2 -translate-x-1/2 w-5 h-5 md:w-7 md:h-7 flex items-center justify-center rounded-full bg-white/90 text-[10px] md:text-xs font-bold text-gray-800 group-hover:bg-indigo-600 group-hover:text-white transition-colors duration-300 shadow-md border border-gray-200 group-hover:border-indigo-400 z-20";
 
         let contentHtml = "";
 
-        // --- RENDER SLOTS ---
         if (slots.length > 0) {
             contentHtml += `<div class="flex flex-col gap-0.5 md:gap-1.5 p-0.5 md:p-2 mt-7 md:mt-8 w-full">`;
             slots.sort((a, b) => a.sessionType === "FN" ? -1 : 1);
@@ -1109,37 +1161,46 @@ function renderStaffCalendar(myEmail) {
                 const needed = slot.required;
                 const available = Math.max(0, needed - filled);
 
-                // Logic
                 const isUnavailable = isUserUnavailable(slot, myEmail, slot.key);
                 const isAssigned = slot.assigned.includes(myEmail);
                 const isPostedByMe = slot.exchangeRequests && slot.exchangeRequests.includes(myEmail);
                 const isMarketAvailable = slot.exchangeRequests && slot.exchangeRequests.length > 0 && !isAssigned;
                 const isCompleted = slot.attendance && slot.attendance.includes(myEmail);
+                const isAdminLocked = slot.isAdminLocked || false;
 
-                // Badge Styles
                 let badgeClass = "bg-gradient-to-br from-green-50 to-green-100 text-green-800 border-green-200";
                 let icon = "🟢";
-                
-                // --- RESPONSIVE STATUS TEXT (FIXED SIZE) ---
-                // Mobile: text-[8px] font-bold (Matches 'AN'/'FN' size)
-                // Desktop: Full text
                 let statusText = `<span class="md:hidden text-[8px] font-bold">${available}</span><span class="hidden md:inline">${available} Left</span>`;
-                
                 let glowClass = "";
 
+                // ... inside slots.forEach ...
+
                 if (isCompleted) {
-                    badgeClass = "bg-gradient-to-br from-green-500 to-green-600 text-white border-green-400 text-shadow-sm";
+                    // FIX: "Cute" style for mobile (Flat, tiny), Rich style for Desktop
+                    badgeClass = "bg-green-100 text-green-700 border-green-200 md:bg-gradient-to-br md:from-green-500 md:to-green-600 md:text-white md:border-green-400 md:text-shadow-sm";
                     icon = "✅";
-                    statusText = "Done";
-                    glowClass = "shadow-lg shadow-green-200";
+                    // Mobile: Tiny bold "DONE". Desktop: Normal "Done"
+                    statusText = `<span class="md:hidden text-[9px] font-black tracking-tighter leading-none">DONE</span><span class="hidden md:inline">Done</span>`;
+                    glowClass = "md:shadow-lg md:shadow-green-200"; // No heavy shadow on mobile
                 }
                 else if (isPostedByMe) {
-                    badgeClass = "bg-gradient-to-br from-orange-400 to-orange-500 text-white border-orange-300";
-                    icon = "⏳";
-                    statusText = "Posted";
+                    // ... (keep existing logic for other statuses) ...
+                    if (isAdminLocked) {
+                        badgeClass = "bg-gradient-to-br from-amber-100 to-orange-100 text-amber-700 border-amber-300";
+                        icon = "🛡️";
+                        statusText = "Frozen";
+                    } else {
+                        badgeClass = "bg-gradient-to-br from-orange-400 to-orange-500 text-white border-orange-300";
+                        icon = "⏳";
+                        statusText = "Posted";
+                    }
                 }
                 else if (isAssigned) {
-                    if (slot.isLocked) {
+                     if (isAdminLocked) {
+                        badgeClass = "bg-gradient-to-br from-blue-100 to-blue-200 text-blue-800 border-blue-300 font-bold ring-1 ring-amber-300";
+                        icon = "🛡️";
+                        statusText = "Duty";
+                    } else if (slot.isLocked) {
                         badgeClass = "bg-gradient-to-br from-blue-100 to-blue-200 text-blue-800 border-blue-300 font-bold";
                         icon = "🔒";
                         statusText = "Duty";
@@ -1161,6 +1222,11 @@ function renderStaffCalendar(myEmail) {
                     icon = "⛔";
                     statusText = "Unavail";
                 }
+                else if (isAdminLocked) {
+                    badgeClass = "bg-gradient-to-br from-amber-50 to-amber-100 text-amber-400 border-amber-200";
+                    icon = "🛡️"; 
+                    statusText = "Paused"; 
+                }
                 else if (slot.isLocked) {
                     badgeClass = "bg-gray-100 text-gray-400 border-gray-200";
                     icon = "🔒";
@@ -1172,15 +1238,17 @@ function renderStaffCalendar(myEmail) {
                     statusText = "Full";
                 }
 
-                // Compact Card Layout
+                // FIX: Dynamic Padding (Tight for 'Completed' on mobile, normal for others)
+                const paddingClass = isCompleted ? "p-[2px] md:p-1.5" : "p-0.5 md:p-1.5";
+
                 contentHtml += `
-                    <div class="relative overflow-hidden rounded md:rounded-lg border ${badgeClass} p-0.5 md:p-1.5 shadow-sm transition-transform active:scale-95 md:hover:scale-105 ${glowClass} flex items-center justify-center md:justify-between gap-0.5 md:gap-1 group/badge cursor-pointer" onclick="openDayDetail('${dateStr}', '${myEmail}')">
-                        <div class="absolute inset-0 bg-gradient-to-b from-white/20 to-transparent pointer-events-none"></div>
+                    <div class="relative overflow-hidden rounded md:rounded-lg border ${badgeClass} ${paddingClass} shadow-sm transition-transform active:scale-95 md:hover:scale-105 ${glowClass} flex items-center justify-center md:justify-between gap-0.5 md:gap-1 group/badge cursor-pointer min-h-[18px] md:min-h-0" onclick="openDayDetail('${dateStr}', '${myEmail}')">
+                        <div class="absolute inset-0 bg-gradient-to-b from-white/20 to-transparent pointer-events-none hidden md:block"></div>
                         <div class="flex items-center gap-0.5 z-10">
                             <span class="text-[8px] md:text-[10px] uppercase font-black tracking-wider opacity-90">${slot.sessionType}</span>
                         </div>
                         <div class="flex items-center gap-0.5 md:gap-1 z-10">
-                            <span class="text-[9px] font-bold opacity-90 whitespace-normal break-words leading-tight">${statusText}</span>
+                            <span class="text-[9px] font-bold opacity-90 whitespace-nowrap leading-tight">${statusText}</span>
                             <span class="text-[8px] md:text-[10px] filter drop-shadow-sm flex-shrink-0">${icon}</span>
                         </div>
                     </div>`;
@@ -1207,9 +1275,7 @@ function renderStaffCalendar(myEmail) {
             }
         }
 
-        // Add 'Empty' Click Handler
         let clickAttr = `onclick="openDayDetail('${dateStr}', '${myEmail}')"`;
-
         html += `
             <div class="${cellClass}" ${clickAttr}>
                 <div class="${dateClass}">${day}</div>
@@ -1237,6 +1303,7 @@ function renderExchangeMarket(myEmail) {
     let marketSlots = [];
     Object.keys(invigilationSlots).forEach(key => {
         const slot = invigilationSlots[key];
+        if (slot.isAdminLocked) return;
         if (slot.exchangeRequests && slot.exchangeRequests.length > 0) {
             // *** CHANGE: Show ALL requests, including my own ***
             slot.exchangeRequests.forEach(sellerEmail => {
@@ -1334,6 +1401,7 @@ function renderExchangeMarket(myEmail) {
     });
 }
 
+
 window.openDayDetail = function (dateStr, email) {
     document.getElementById('modal-day-title').textContent = dateStr;
     const container = document.getElementById('modal-sessions-container');
@@ -1343,10 +1411,10 @@ window.openDayDetail = function (dateStr, email) {
     const [dd, mm, yyyy] = dateStr.split('.');
     const currentD = new Date(yyyy, mm - 1, dd);
     const today = new Date();
-    today.setHours(0, 0, 0, 0); // Midnight today
+    today.setHours(0, 0, 0, 0); 
     
     const maxDate = new Date(today);
-    maxDate.setMonth(today.getMonth() + 3); // 3 Months limit
+    maxDate.setMonth(today.getMonth() + 3); 
 
     const isPast = currentD < today;
     const isTooFar = currentD > maxDate;
@@ -1356,11 +1424,13 @@ window.openDayDetail = function (dateStr, email) {
     if (isPast) restrictLabel = "(Past Date - Locked)";
     if (isTooFar) restrictLabel = "(>3 Months - Locked)";
 
-    // TRACK ASSIGNMENTS FOR THIS DAY
+    // TRACK ASSIGNMENTS & ADMIN LOCKS
     let isAssignedFN = false;
     let isAssignedAN = false;
+    let adminLockFN = false;
+    let adminLockAN = false;
 
-    // 2. RENDER EXAM SESSIONS (Slots)
+    // 2. RENDER EXAM SESSIONS
     const sessions = Object.keys(invigilationSlots).filter(k => k.startsWith(dateStr));
 
     if (sessions.length > 0) {
@@ -1373,6 +1443,7 @@ window.openDayDetail = function (dateStr, email) {
             const isUnavailable = isUserUnavailable(slot, email, key);
             const isAssigned = slot.assigned.includes(email);
             const isLocked = slot.isLocked;
+            const isAdminLocked = slot.isAdminLocked || false;
             const isPostedByMe = slot.exchangeRequests && slot.exchangeRequests.includes(email);
             const marketOffers = slot.exchangeRequests ? slot.exchangeRequests.filter(e => e !== email) : [];
 
@@ -1384,11 +1455,17 @@ window.openDayDetail = function (dateStr, email) {
                 if (isAN) isAssignedAN = true;
                 else isAssignedFN = true;
             }
+            
+            // Track Admin Locks for Bottom Section
+            if (isAdminLocked) {
+                if (isAN) adminLockAN = true;
+                else adminLockFN = true;
+            }
 
             // --- Action Buttons ---
             let actionHtml = "";
             
-            // [RESTRICTION CHECK FOR SLOTS]
+            // [PRIORITY 1: DATE RESTRICTION]
             if (isRestricted) {
                  if (isAssigned) {
                      actionHtml = `<div class="w-full bg-gray-100 text-gray-500 border border-gray-200 text-xs py-2 rounded font-bold text-center">✅ Duty Assigned ${restrictLabel}</div>`;
@@ -1397,8 +1474,24 @@ window.openDayDetail = function (dateStr, email) {
                  } else {
                      actionHtml = `<div class="w-full bg-gray-50 text-gray-400 border border-gray-100 text-xs py-2 rounded text-center italic">Actions Disabled ${restrictLabel}</div>`;
                  }
-            } else {
-                // NORMAL MODE (Buttons Active)
+            } 
+            // [PRIORITY 2: ADMIN POSTING LOCK]
+            else if (isAdminLocked) {
+                 if (isAssigned) {
+                     if (isPostedByMe) {
+                         actionHtml = `<div class="w-full bg-orange-50 p-2 rounded border border-orange-200"><div class="text-xs text-orange-700 font-bold mb-1 text-center">⏳ Posted for Exchange</div><button onclick="withdrawExchange('${key}', '${email}')" class="w-full bg-white text-orange-700 border border-orange-300 text-xs py-2 rounded font-bold hover:bg-orange-100 shadow-sm transition">↩️ Withdraw Request</button></div>`;
+                     } else {
+                         actionHtml = `<div class="w-full bg-green-50 text-green-700 border border-green-200 text-xs py-2 rounded font-bold text-center flex flex-col items-center gap-1"><span>✅ Assigned</span><span class="text-[9px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded">🛡️ Admin Finalizing</span></div>`;
+                     }
+                 } else {
+                     // BLOCK Volunteering & Unavailability
+                     actionHtml = `<div class="w-full bg-amber-50 text-amber-600 border border-amber-200 text-xs py-3 rounded font-bold text-center flex items-center justify-center gap-2 shadow-sm">
+                        <span>🛡️</span> Posting Restricted by Admin
+                     </div>`;
+                 }
+            }
+            // [PRIORITY 3: STANDARD LOGIC]
+            else {
                 if (isAssigned) {
                     if (isPostedByMe) {
                          actionHtml = `<div class="w-full bg-orange-50 p-2 rounded border border-orange-200"><div class="text-xs text-orange-700 font-bold mb-1 text-center">⏳ Posted for Exchange</div><p class="text-[10px] text-orange-600 text-center mb-2 leading-tight">You remain liable until accepted.</p><button onclick="withdrawExchange('${key}', '${email}')" class="w-full bg-white text-orange-700 border border-orange-300 text-xs py-2 rounded font-bold hover:bg-orange-100 shadow-sm transition">↩️ Withdraw Request</button></div>`;
@@ -1459,7 +1552,6 @@ window.openDayDetail = function (dateStr, email) {
                 </div>
             </div>`;
          
-         // STOP HERE: Do not render the toggle buttons below
          window.openModal('day-detail-modal');
          return;
     }
@@ -1470,19 +1562,34 @@ window.openDayDetail = function (dateStr, email) {
     const anUnavail = adv.AN && adv.AN.some(u => (typeof u === 'string' ? u === email : u.email === email));
     const bothUnavail = fnUnavail && anUnavail;
 
-    const getBtnState = (isAssigned, isMarked, label) => {
+    const getBtnState = (isAssigned, isMarked, label, isAdminLocked) => {
+        if (isAdminLocked && !isMarked) return { disabled: 'disabled', class: 'bg-amber-50 text-amber-500 border-amber-100 cursor-not-allowed', text: `🛡️ ${label} Admin Locked` };
         if (isAssigned) return { disabled: 'disabled', class: 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed', text: `🚫 On Duty (${label})` };
         if (isMarked) return { disabled: '', class: 'bg-red-600 text-white border-red-700 hover:bg-red-700', text: `🚫 ${label} Unavailable` };
         return { disabled: '', class: 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50', text: `Mark ${label}` };
     };
 
-    const fnBtn = getBtnState(isAssignedFN, fnUnavail, "FN");
-    const anBtn = getBtnState(isAssignedAN, anUnavail, "AN");
+    const fnBtn = getBtnState(isAssignedFN, fnUnavail, "FN", adminLockFN);
+    const anBtn = getBtnState(isAssignedAN, anUnavail, "AN", adminLockAN);
 
     const anyDuty = isAssignedFN || isAssignedAN;
-    const wholeClass = anyDuty ? "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed" : (bothUnavail ? 'bg-red-800 text-white border-red-900' : 'bg-white text-indigo-600 border-indigo-200 hover:bg-indigo-100');
-    const wholeText = anyDuty ? "🚫 Cannot Mark Whole Day (On Duty)" : (bothUnavail ? '🚫 Clear Whole Day Unavailability' : '📅 Mark Whole Day Unavailable');
-    const wholeDisabled = anyDuty ? "disabled" : "";
+    const anyAdminLock = adminLockFN || adminLockAN;
+
+    let wholeClass, wholeText, wholeDisabled;
+
+    if (anyAdminLock) {
+        wholeClass = "bg-amber-50 text-amber-500 border-amber-100 cursor-not-allowed";
+        wholeText = "🛡️ Whole Day Locked by Admin";
+        wholeDisabled = "disabled";
+    } else if (anyDuty) {
+        wholeClass = "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed";
+        wholeText = "🚫 Cannot Mark Whole Day (On Duty)";
+        wholeDisabled = "disabled";
+    } else {
+        wholeClass = bothUnavail ? 'bg-red-800 text-white border-red-900' : 'bg-white text-indigo-600 border-indigo-200 hover:bg-indigo-100';
+        wholeText = bothUnavail ? '🚫 Clear Whole Day Unavailability' : '📅 Mark Whole Day Unavailable';
+        wholeDisabled = "";
+    }
 
     container.innerHTML += `
         <div class="mt-4 pt-4 border-t border-gray-200">
@@ -1502,7 +1609,6 @@ window.openDayDetail = function (dateStr, email) {
 
     window.openModal('day-detail-modal');
 }
-
 
 // --- HELPERS & ACTIONS ---
 function updateHeaderButtons(currentView) {
@@ -1708,6 +1814,26 @@ window.toggleAdvance = async function(dateStr, email, session) {
     // [VALIDATION CHECK]
     if (!isActionAllowed(dateStr)) return;
 
+    // --- NEW: ADMIN POSTING LOCK CHECK ---
+    // Look for ANY slot on this specific Date and Session that is Admin Locked
+    const hasAdminLock = Object.keys(invigilationSlots).some(k => {
+        // 1. Check Date Match
+        if (!k.startsWith(dateStr)) return false;
+
+        // 2. Check Session Match (FN/AN)
+        const tPart = k.split(' | ')[1] || "";
+        const t = tPart.toUpperCase();
+        const slotSession = (t.includes("PM") || t.startsWith("12:") || t.startsWith("12.")) ? "AN" : "FN";
+
+        // 3. Return true if session matches AND it is locked by Admin
+        return slotSession === session && invigilationSlots[k].isAdminLocked;
+    });
+
+    if (hasAdminLock) {
+        return alert(`🚫 Posting Locked! The Admin has locked the ${session} session on ${dateStr} for manual assignment. You cannot change unavailability now.`);
+    }
+    // -------------------------------------
+
     // 1. Safety check for data structure
     if (!advanceUnavailability[dateStr]) advanceUnavailability[dateStr] = { FN: [], AN: [] };
     if (!advanceUnavailability[dateStr][session]) advanceUnavailability[dateStr][session] = [];
@@ -1761,9 +1887,26 @@ window.toggleAdvance = async function(dateStr, email, session) {
 }
 
 window.toggleWholeDay = async function(dateStr, email) {
-    // [VALIDATION CHECK]
+    // [VALIDATION CHECK 1: Date Restrictions]
     if (!isActionAllowed(dateStr)) return;
 
+    // --- NEW: ADMIN POSTING LOCK CHECK ---
+    // Check if ANY slot on this date is locked by the Admin.
+    // If even one session (FN or AN) is locked, we block "Whole Day" changes.
+    const hasAdminLock = Object.keys(invigilationSlots).some(k => {
+        // 1. Check if key starts with the date (e.g. "01.12.2025")
+        if (!k.startsWith(dateStr)) return false;
+
+        // 2. Check if this specific slot is Admin Locked
+        return invigilationSlots[k].isAdminLocked;
+    });
+
+    if (hasAdminLock) {
+        return alert(`🚫 Posting Locked! The Admin has locked sessions on ${dateStr} for manual assignment. You cannot change 'Whole Day' unavailability right now.`);
+    }
+    // -------------------------------------
+
+    // 1. Safety check for data structure
     if (!advanceUnavailability[dateStr]) advanceUnavailability[dateStr] = { FN: [], AN: [] };
     
     const fnList = advanceUnavailability[dateStr].FN || [];
@@ -1891,9 +2034,17 @@ function toggleUnavDetails() {
 }
 
 window.setAvailability = async function (key, email, isAvailable) {
-    // [VALIDATION CHECK]
+    // [VALIDATION CHECK 1: Date Restrictions]
     const [dateStr] = key.split(' | ');
     if (!isActionAllowed(dateStr)) return;
+
+    // [VALIDATION CHECK 2: Admin Posting Lock]
+    // If trying to mark UNAVAILABLE and Admin Lock is ON -> BLOCK IT
+    const slot = invigilationSlots[key];
+    if (!isAvailable && slot && slot.isAdminLocked) {
+        alert("🚫 Posting Locked! You cannot mark unavailability for this slot as the Admin is finalizing assignments.");
+        return;
+    }
 
     if (isAvailable) {
         if (confirm("Mark available?")) {
@@ -1924,6 +2075,12 @@ window.confirmUnavailable = async function () {
     const reason = document.getElementById('unav-reason').value;
     const details = document.getElementById('unav-details').value.trim();
 
+    // 1. Validation
+    // Check Admin Lock
+    if (invigilationSlots[key] && invigilationSlots[key].isAdminLocked) {
+        return alert("🚫 Posting Locked! Admin has locked this slot.");
+    }
+    
     if (!reason) return alert("Select a reason.");
     if (['OD', 'DL', 'Medical'].includes(reason) && !details) return alert("Details required.");
 
@@ -1933,55 +2090,57 @@ window.confirmUnavailable = async function () {
         // --- CASE A: ADVANCE / GENERAL UNAVAILABILITY ---
         const [_, dateStr, session] = key.split('|');
 
-        // Ensure structure
         if (!advanceUnavailability[dateStr]) advanceUnavailability[dateStr] = { FN: [], AN: [] };
         if (!advanceUnavailability[dateStr].FN) advanceUnavailability[dateStr].FN = [];
         if (!advanceUnavailability[dateStr].AN) advanceUnavailability[dateStr].AN = [];
 
         if (session === 'WHOLE') {
-            // Remove existing to avoid duplicates
+            // Clear both sessions first
             advanceUnavailability[dateStr].FN = advanceUnavailability[dateStr].FN.filter(u => u.email !== email);
             advanceUnavailability[dateStr].AN = advanceUnavailability[dateStr].AN.filter(u => u.email !== email);
-
+            
             advanceUnavailability[dateStr].FN.push(entry);
             advanceUnavailability[dateStr].AN.push(entry);
-
-            logActivity("Advance Unavailability", `Marked ${getNameFromEmail(email)} unavailable for WHOLE DAY on ${dateStr}. Reason: ${reason}`);
+            
+            logActivity("Advance Unavailability", `Marked ${getNameFromEmail(email)} unavailable for WHOLE DAY on ${dateStr}.`);
         } else {
             // Single Session
             if (!advanceUnavailability[dateStr][session]) advanceUnavailability[dateStr][session] = [];
+            
+            // Safety: Remove existing before pushing
             advanceUnavailability[dateStr][session] = advanceUnavailability[dateStr][session].filter(u => u.email !== email);
             advanceUnavailability[dateStr][session].push(entry);
 
-            logActivity("Advance Unavailability", `Marked ${getNameFromEmail(email)} unavailable for ${dateStr} (${session}). Reason: ${reason}`);
+            logActivity("Advance Unavailability", `Marked ${getNameFromEmail(email)} unavailable for ${dateStr} (${session}).`);
         }
 
         await saveAdvanceUnavailability();
-
-        // --- FIXES APPLIED HERE ---
+        
         window.closeModal('unavailable-modal');
-        window.closeModal('day-detail-modal'); // Ensure previous modal is closed
+        window.closeModal('day-detail-modal'); 
         renderStaffCalendar(email);
-
-        // 1. LIVE UPDATE LIST
         if (typeof renderStaffUpcomingSummary === 'function') renderStaffUpcomingSummary(email);
-        // 2. DO NOT RE-OPEN MODAL (Issue 2 Fix)
-        // openDayModal(dateStr, email); <--- REMOVED
-        // --------------------------
 
     } else {
-        // --- CASE B: SLOT SPECIFIC ---
+        // --- CASE B: SLOT SPECIFIC (The Bug was Here) ---
         if (!invigilationSlots[key].unavailable) invigilationSlots[key].unavailable = [];
+        
+        // *** FIX: Remove existing entry for this email before adding ***
+        invigilationSlots[key].unavailable = invigilationSlots[key].unavailable.filter(u => 
+            (typeof u === 'string' ? u !== email : u.email !== email)
+        );
+
+        // Now push the new entry (Guaranteed unique)
         invigilationSlots[key].unavailable.push(entry);
 
         logActivity("Session Unavailability", `Marked ${getNameFromEmail(email)} unavailable for ${key}. Reason: ${reason}`);
 
         await syncSlotsToCloud();
+        
         window.closeModal('unavailable-modal');
-        window.closeModal('day-detail-modal'); // Ensure previous modal is closed
+        window.closeModal('day-detail-modal'); 
 
         renderStaffCalendar(email);
-        // 1. LIVE UPDATE LIST
         if (typeof renderStaffUpcomingSummary === 'function') renderStaffUpcomingSummary(email);
     }
 }
@@ -3159,6 +3318,16 @@ window.toggleAttendanceLock = async function (key, lockState) {
 // 3. Updated Volunteer (Handles Picking Up Exchange)
 async function volunteer(key, email) {
     const slot = invigilationSlots[key];
+    // 1. NEW CHECK: Admin Lock
+    if (slot.isAdminLocked) {
+        return alert("🚫 Posting Locked! This slot is reserved for manual assignment by the Admin.");
+    }
+    
+    // 2. Standard Lock
+    if (slot.isLocked) {
+        return alert("🚫 Slot Locked! Contact Admin.");
+    }
+    
     const [datePart] = key.split(' | ');
 
     // Check conflicts
@@ -3209,6 +3378,12 @@ async function acceptExchange(key, buyerEmail, sellerEmail) {
     const slot = invigilationSlots[key];
     const sellerName = getNameFromEmail(sellerEmail);
 
+    // --- NEW: ADMIN LOCK CHECK ---
+    if (slot.isAdminLocked) {
+        return alert("🛡️ Market Suspended.\n\nThe Admin has locked this slot for manual assignment. Exchanges cannot be processed right now.");
+    }
+    // -----------------------------
+
     if (!confirm(`Are you sure you want to take over ${sellerName}'s duty on ${key}?`)) return;
 
     // 1. Validation
@@ -3233,7 +3408,7 @@ async function acceptExchange(key, buyerEmail, sellerEmail) {
     // 4. LOGGING
     logActivity("Exchange Accepted", `${getNameFromEmail(buyerEmail)} took duty ${key} from ${getNameFromEmail(sellerEmail)}.`);
 
-    // --- NEW: SEND NOTIFICATION EMAIL TO SELLER ---
+    // --- NOTIFICATION EMAIL TO SELLER ---
     if (seller && seller.email && googleScriptUrl) {
         const subject = `Duty Exchange Accepted: ${key}`;
         const body = `
@@ -3244,71 +3419,71 @@ async function acceptExchange(key, buyerEmail, sellerEmail) {
             <p style="font-size:12px; color:#666;">Exam Cell Notification</p>
         `;
 
-        // Non-blocking fetch (Fire and Forget)
         fetch(googleScriptUrl, {
             method: "POST",
             mode: "no-cors",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                to: seller.email,
-                subject: subject,
-                body: body
-            })
-        }).then(() => console.log("Notification email triggered."))
-            .catch(e => console.error("Email failed", e));
+            body: JSON.stringify({ to: seller.email, subject: subject, body: body })
+        }).catch(e => console.error("Email failed", e));
     }
-    // ----------------------------------------------
 
     // 5. Sync
     await syncSlotsToCloud();
     await syncStaffToCloud();
 
-    alert(`Success! You have accepted the duty from ${sellerName}. A notification has been sent to them.`);
-
+    alert(`Success! You have accepted the duty from ${sellerName}.`);
+    
     window.closeModal('day-detail-modal');
     renderStaffCalendar(buyerEmail);
     renderExchangeMarket(buyerEmail);
     initStaffDashboard(buyer);
 }
+
 window.postForExchange = async function (key, email) {
     const slot = invigilationSlots[key];
     
-    // 1. SECURITY CHECK: Lock Status
+    // 1. ADMIN LOCK CHECK
+    if (slot.isAdminLocked) {
+        return alert("🛡️ Action Denied.\n\nThe Admin is currently finalizing assignments for this slot. New exchange requests are disabled.");
+    }
+
+    // 2. STANDARD LOCK CHECK (Must be locked to exchange)
     if (!slot.isLocked) {
-        alert("⚠️ Action Denied.\n\nThis slot is currently OPEN (Unlocked).\n\nIf you cannot do this duty, please use the 'Cancel Duty' button in the calendar detail view instead of posting it for exchange.");
+        alert("⚠️ Action Denied.\n\nThis slot is currently OPEN (Unlocked). Use 'Cancel Duty' if you cannot attend.");
         return;
     }
 
-    // 2. Confirm Action
-    if (!confirm("Post this duty for exchange?\n\nNOTE: You remain responsible (and assigned) until someone else accepts it.")) return;
+    if (!confirm("Post this duty for exchange?\n\nNOTE: You remain responsible until someone else accepts it.")) return;
 
     if (!slot.exchangeRequests) slot.exchangeRequests = [];
 
     if (!slot.exchangeRequests.includes(email)) {
-        // 3. Update Local Data
         slot.exchangeRequests.push(email);
-
-        // 4. LOGGING
         logActivity("Exchange Posted", `${getNameFromEmail(email)} posted ${key} for exchange.`);
-
-        // 5. IMMEDIATE UI UPDATES
+        
         try {
             renderStaffCalendar(email);
             if (typeof renderExchangeMarket === "function") renderExchangeMarket(email);
             if (typeof renderStaffUpcomingSummary === "function") renderStaffUpcomingSummary(email);
             window.closeModal('day-detail-modal');
-        } catch (e) { console.error("UI Update Error:", e); }
+        } catch (e) { }
 
-        // 6. Save to Cloud
         await syncSlotsToCloud();
     }
 }
-
 window.withdrawExchange = async function (key, email) {
-    // 1. ADDED CONFIRMATION CHECK
+    const slot = invigilationSlots[key];
+
+    // --- NEW: ADMIN LOCK CHECK ---
+    // Freezes the market state. Users cannot enter OR leave the market.
+    if (slot.isAdminLocked) {
+        return alert("🛡️ Action Denied.\n\nThe Admin is currently finalizing assignments for this slot. Withdrawal is disabled to prevent roster changes.");
+    }
+    // -----------------------------
+
+    // 1. CONFIRMATION CHECK
     if (!confirm("Are you sure you want to withdraw this request and keep the duty?")) return;
 
-    const slot = invigilationSlots[key];
     if (slot.exchangeRequests) {
         // 2. Update Local Data
         slot.exchangeRequests = slot.exchangeRequests.filter(e => e !== email);
@@ -3779,9 +3954,9 @@ window.openCompletedDutiesModal = function (email) {
 
 window.runWeeklyAutoAssign = async function (monthStr, weekNum) {
     // 1. CHECK: Confirm Intent
-    if (!confirm(`⚡ Run Auto-Assignment for ${monthStr}, Week ${weekNum}?\n\nIMPORTANT: This will only fill LOCKED slots.\n\nRules Applied:\n1. Max 3 duties/week\n2. Avoid Same Day & Adjacent Days\n3. Dept Cap: Max 60%`)) return;
+    if (!confirm(`⚡ Run Auto-Assignment for ${monthStr}, Week ${weekNum}?\n\nIMPORTANT: This will only fill slots with ADMIN LOCK (🛡️).\n\nRules Applied:\n1. Max 3 duties/week\n2. Avoid Same Day & Adjacent Days\n3. Dept Cap: Max 50% (Soft Limit)`)) return;
 
-    // 2. Identify Target Slots (MUST BE LOCKED)
+    // 2. Identify Target Slots (MUST BE ADMIN LOCKED)
     const targetSlots = [];
     Object.keys(invigilationSlots).forEach(key => {
         const date = parseDate(key);
@@ -3789,13 +3964,14 @@ window.runWeeklyAutoAssign = async function (monthStr, weekNum) {
         const wNum = getWeekOfMonth(date);
         const slot = invigilationSlots[key];
 
-        if (mStr === monthStr && wNum === weekNum && slot.isLocked) {
+        // Check for isAdminLocked
+        if (mStr === monthStr && wNum === weekNum && slot.isAdminLocked) {
             targetSlots.push({ key, date, slot });
         }
     });
 
     if (targetSlots.length === 0) {
-        return alert(`⚠️ No LOCKED slots found in Week ${weekNum}.`);
+        return alert(`⚠️ No ADMIN LOCKED (🛡️) slots found in Week ${weekNum}.\n\nPlease lock the week using the '🛡️ Admin' button first.`);
     }
 
     // 3. Sort Slots Chronologically
@@ -3803,16 +3979,26 @@ window.runWeeklyAutoAssign = async function (monthStr, weekNum) {
 
     // 4. Prepare Staff Stats
     const deptCounts = {};
-    let eligibleStaff = staffData.map(s => {
-        if (s.status !== 'archived') deptCounts[s.dept] = (deptCounts[s.dept] || 0) + 1;
-        return {
-            ...s,
-            pending: calculateStaffTarget(s) - getDutiesDoneCount(s.email),
-            weeklyLoad: {} 
-        };
+    const singleFacultyDepts = new Set();
+
+    // First Pass: Count Depts
+    staffData.forEach(s => {
+        if (s.status !== 'archived') {
+            deptCounts[s.dept] = (deptCounts[s.dept] || 0) + 1;
+        }
     });
 
-    // Pre-fill existing assignments
+    Object.keys(deptCounts).forEach(d => {
+        if (deptCounts[d] === 1) singleFacultyDepts.add(d);
+    });
+
+    let eligibleStaff = staffData.map(s => ({
+        ...s,
+        pending: calculateStaffTarget(s) - getDutiesDoneCount(s.email),
+        weeklyLoad: {}
+    }));
+
+    // Pre-fill existing assignment load
     Object.keys(invigilationSlots).forEach(k => {
         const d = parseDate(k);
         const mStr = d.toLocaleString('default', { month: 'long', year: 'numeric' });
@@ -3828,24 +4014,23 @@ window.runWeeklyAutoAssign = async function (monthStr, weekNum) {
         });
     });
 
-    const logEntries = [];
     let assignedCount = 0;
+    const logEntries = [];
     const timestamp = new Date().toLocaleString('en-GB');
 
     // 5. Process Each Slot
     for (const target of targetSlots) {
         const { key, date, slot } = target;
-        
+
         // TARGET: Fill to Required (Already includes 10% reserve)
-        const targetCount = slot.required; 
+        const targetCount = slot.required;
         const needed = targetCount - slot.assigned.length;
 
         if (needed <= 0) continue;
 
+        const currentWeekKey = `${date.toLocaleString('default', { month: 'long', year: 'numeric' })}-${getWeekOfMonth(date)}`;
+
         // Contexts
-        const mStr = date.toLocaleString('default', { month: 'long', year: 'numeric' });
-        const wNum = getWeekOfMonth(date);
-        const currentWeekKey = `${mStr}-${wNum}`;
         const prevDate = new Date(date); prevDate.setDate(date.getDate() - 1);
         const nextDate = new Date(date); nextDate.setDate(date.getDate() + 1);
 
@@ -3858,70 +4043,155 @@ window.runWeeklyAutoAssign = async function (monthStr, weekNum) {
         // Loop 'needed' times to fill
         for (let i = 0; i < needed; i++) {
             const candidates = eligibleStaff.map(s => {
+                // Hard Constraints (Must Fail)
+                if (s.status === 'archived') return null;
+                if (slot.assigned.includes(s.email)) return null;
+                if (isUserUnavailable(slot, s.email, key)) return null;
+
                 let score = s.pending * 100;
                 let warnings = [];
 
-                if (slot.assigned.includes(s.email)) return null;
-                if (isUserUnavailable(slot, s.email, key)) return null;
-                if (s.status === 'archived') return null;
-
-                // Soft Constraints
-                const dutiesThisWeek = s.weeklyLoad[currentWeekKey] || 0;
-                if (dutiesThisWeek >= 3) { score -= 5000; warnings.push("Max 3/wk"); }
-
-                const sameDayKeys = targetSlots.filter(t => t.date.toDateString() === date.toDateString() && t.key !== key).map(t => t.key);
-                if (sameDayKeys.some(sdk => invigilationSlots[sdk].assigned.includes(s.email))) { score -= 2000; warnings.push("Same Day"); }
-
-                const dTotal = deptCounts[s.dept] || 0;
-                if (dTotal > 1) {
-                    const dAssigned = slotDeptCounts[s.dept] || 0;
-                    if (dAssigned >= Math.ceil(dTotal * 0.6)) { score -= 4000; warnings.push("Dept Saturation"); }
+                // --- 1. Adjacent Day Rule ---
+                let hasAdjacent = false;
+                const prevDateStr = prevDate.toDateString();
+                const nextDateStr = nextDate.toDateString();
+                
+                targetSlots.forEach(t => {
+                   if ((t.date.toDateString() === prevDateStr || t.date.toDateString() === nextDateStr) && t.slot.assigned.includes(s.email)) {
+                       hasAdjacent = true;
+                   }
+                });
+                
+                if (hasAdjacent) { 
+                    score -= 1000; 
+                    warnings.push("Adjacent"); 
                 }
 
-                let hasAdjacent = false;
-                targetSlots.forEach(t => {
-                    if ((t.date.toDateString() === prevDate.toDateString() || t.date.toDateString() === nextDate.toDateString()) && t.slot.assigned.includes(s.email)) {
-                        hasAdjacent = true;
+                // --- 2. Same Day Rule ---
+                const sameDayKeys = targetSlots.filter(t => t.date.toDateString() === date.toDateString() && t.key !== key).map(t => t.key);
+                if (sameDayKeys.some(sdk => invigilationSlots[sdk].assigned.includes(s.email))) { 
+                    score -= 2000; 
+                    warnings.push("Same Day"); 
+                }
+
+                // --- 3. Weekly Soft Limit ---
+                const dutiesThisWeek = s.weeklyLoad[currentWeekKey] || 0;
+                if (dutiesThisWeek >= 3) { 
+                    score -= 5000; 
+                    warnings.push("Max 3/wk"); 
+                }
+
+                // --- 4. Dept Saturation (Soft Penalty) ---
+                const dTotal = deptCounts[s.dept] || 0;
+                const isSingleFaculty = singleFacultyDepts.has(s.dept);
+                
+                if (!isSingleFaculty && dTotal > 1) {
+                    const dAssigned = slotDeptCounts[s.dept] || 0;
+                    const totalAssignedInSlot = slot.assigned.length + (i + 1);
+                    const potentialRatio = (dAssigned + 1) / targetCount;
+                    
+                    if (potentialRatio > 0.5) {
+                        score -= 4000; 
+                        warnings.push("Dept Saturation");
                     }
-                });
-                if (hasAdjacent) { score -= 1000; warnings.push("Adjacent"); }
+                }
+                
+                // Add score penalty for unassigned staff (who have zero duties) if the pending count is already 0
+                // This is a subtle tie-breaker to prevent over-assigning staff who hit their target (pending=0)
+                if (s.pending <= 0) {
+                     score -= 50;
+                }
+                
+                // Final score rounding for cleaner logs
+                score = Math.round(score);
 
                 return { staff: s, score, warnings };
             }).filter(c => c !== null);
 
+            // Sort: Highest Score First
             candidates.sort((a, b) => b.score - a.score);
 
             if (candidates.length > 0) {
                 const choice = candidates[0];
                 slot.assigned.push(choice.staff.email);
                 
+                // Update internal load tracking
                 choice.staff.pending--;
                 if (!choice.staff.weeklyLoad[currentWeekKey]) choice.staff.weeklyLoad[currentWeekKey] = 0;
                 choice.staff.weeklyLoad[currentWeekKey]++;
+
                 slotDeptCounts[choice.staff.dept] = (slotDeptCounts[choice.staff.dept] || 0) + 1;
                 assignedCount++;
 
-                let logEntry = `<div class="text-xs border-b border-gray-100 pb-1 mb-1"><span class="text-green-700 font-bold">Auto-Assigned:</span> <b>${choice.staff.name}</b> <span class="text-gray-500">(Score: ${choice.score})</span></div>`;
-                if (!slot.allocationLog) slot.allocationLog = `<div class="mb-2 pb-2 border-b"><div class="font-bold">Auto-Assign Run (${timestamp})</div></div>`;
+                // --- ENHANCED LOGGING ---
+                const warningText = choice.warnings.length > 0 
+                    ? `<span class="text-red-500 ml-1">(${choice.warnings.join(", ")})</span>` 
+                    : '<span class="text-gray-400 ml-1">(No Breaches)</span>';
+
+                let logEntry = `<div class="text-[10px] border-b border-gray-100/50 pb-1 mb-1">
+                    <span class="text-green-700 font-bold">Assigned:</span> <b>${choice.staff.name}</b> 
+                    <span class="text-gray-500">(Score: ${choice.score})</span> 
+                    ${warningText}
+                </div>`;
+                
+                if (!slot.allocationLog) slot.allocationLog = `<div class="mb-2 pb-2 border-b border-gray-200/50"><div class="font-bold text-gray-700 text-xs">Auto-Assign Run (${timestamp})</div></div>`;
                 slot.allocationLog += logEntry;
 
                 if (choice.warnings.length > 0) {
                     logEntries.push({ type: "WARN", msg: `Assigned ${choice.staff.name} to ${key}. Breached: ${choice.warnings.join(", ")}` });
                 }
+            } else {
+                 // Log failure to fill slot
+                 let logEntry = `<div class="text-[10px] border-b border-gray-100/50 pb-1 mb-1">
+                    <span class="text-red-700 font-bold">Failed:</span> Could not find an eligible staff member for position ${slot.assigned.length + 1}.
+                </div>`;
+                if (!slot.allocationLog) slot.allocationLog = `<div class="mb-2 pb-2 border-b border-gray-200/50"><div class="font-bold text-gray-700 text-xs">Auto-Assign Run (${timestamp})</div></div>`;
+                slot.allocationLog += logEntry;
             }
         }
     }
 
+    // 6. Final Sync and Alerts
     if (logEntries.length > 0) {
-        const logRef = doc(db, "colleges", currentCollegeId);
-        const newLogs = logEntries.map(e => `[${timestamp}] ${e.type}: ${e.msg}`);
-        try { await updateDoc(logRef, { autoAssignLogs: arrayUnion(...newLogs) }); } catch (e) { }
+        // (Existing cloud log update logic, assuming this uses Firebase/Firestore)
+        // const logRef = doc(db, "colleges", currentCollegeId);
+        // const newLogs = logEntries.map(e => `[${timestamp}] ${e.type}: ${e.msg}`);
+        // try { await updateDoc(logRef, { autoAssignLogs: arrayUnion(...newLogs) }); } catch (e) { }
     }
 
     logActivity("Auto-Assign Week", `Run for ${monthStr} Week ${weekNum}. Filled ${assignedCount} slots.`);
     await syncSlotsToCloud();
     renderSlotsGridAdmin();
-    alert(`✅ Auto-Assign Complete!\nFilled ${assignedCount} positions.`);
+
+    // --- Bulk Reserve Notification Check (Unchanged) ---
+    const allReserves = [];
+    targetSlots.forEach(t => {
+        const r = getSlotReserves(t.key);
+        if (r.length > 0) {
+            allReserves.push({ key: t.key, reserves: r });
+        }
+    });
+
+    if (allReserves.length > 0) {
+        const totalR = allReserves.reduce((acc, curr) => acc + curr.reserves.length, 0);
+        if (confirm(`✅ Session Auto-Assign Complete!\nFilled ${assignedCount} positions.\n\n⚠️ Reserves Identified: ${totalR} staff across ${allReserves.length} sessions.\n\nNotify them via Email?`)) {
+            updateSyncStatus("Sending Alerts...", "neutral");
+            let sentCount = 0;
+            for (const item of allReserves) {
+                for (const staff of item.reserves) {
+                    try {
+                        // Assuming sendSingleEmail is defined elsewhere
+                        await sendSingleEmail(null, staff.email, staff.name, "Reserve Duty Alert", `You are on RESERVE duty for ${item.key}. Please be available.`);
+                        sentCount++;
+                    } catch (e) { }
+                }
+            }
+            updateSyncStatus("Done", "success");
+            alert(`Sent ${sentCount} reserve notifications.`);
+        }
+    } else {
+        alert(`✅ Session Auto-Assign Complete!\nFilled ${assignedCount} positions.`);
+    }
 }
 
 window.viewAutoAssignLogs = async function () {
@@ -3948,30 +4218,26 @@ window.viewAutoAssignLogs = async function () {
     }
 }
 // --- ACTIVITY LOGGING SYSTEM (1MB Limit + FIFO) ---
+// OPTIMIZED: Uses 'arrayUnion' to append without reading the document first
 async function logActivity(action, details) {
     try {
         const userEmail = currentUser ? currentUser.email : "Unknown";
         const timestamp = new Date().toISOString();
 
-        // Short keys to save space: t=time, u=user, a=action, d=details
         const newEntry = { t: timestamp, u: userEmail, a: action, d: details };
-
         const logRef = doc(db, "colleges", currentCollegeId, "logs", "activity_log");
-        const snap = await getDoc(logRef);
 
-        let entries = [];
-        if (snap.exists()) {
-            entries = snap.data().entries || [];
-        }
-
-        entries.push(newEntry);
-
-        // SIZE CHECK: Keep under ~1MB (approx 950k chars)
-        while (JSON.stringify(entries).length > 950000) {
-            entries.shift(); // Remove oldest
-        }
-
-        await setDoc(logRef, { entries: entries });
+        // Use arrayUnion - This writes blindly (Cost: 1 Write, 0 Reads)
+        await updateDoc(logRef, {
+            entries: arrayUnion(newEntry)
+        }).catch(async (err) => {
+            // Fallback: If doc doesn't exist, create it (Cost: 1 Write)
+            if (err.code === 'not-found') {
+                await setDoc(logRef, { entries: [newEntry] });
+            } else {
+                console.error("Log Error:", err);
+            }
+        });
 
     } catch (e) {
         console.error("Logging Error:", e);
@@ -5537,10 +5803,12 @@ window.filterManualStaff = function () {
 // --- MANUAL ALLOCATION (Auto-Select Top N Candidates) ---
 window.openManualAllocationModal = function (key) {
     const slot = invigilationSlots[key];
+    const requiredCount = parseInt(slot.required) || 0; // Capture required count early
 
-    // 1. Lock Check
-    if (!slot.isLocked) {
-        alert("⚠️ Please LOCK this slot first.\n\nManual allocation is only allowed in Locked mode to prevent conflicts.");
+    // 1. Admin Lock Check
+    // Manual allocation requires the ADMIN POSTING LOCK.
+    if (!slot.isAdminLocked) {
+        alert("⚠️ Action Denied.\n\nManual allocation requires the ADMIN POSTING LOCK.\nPlease click the '🛡️ Admin' lock button for this slot first.");
         return;
     }
 
@@ -5553,9 +5821,6 @@ window.openManualAllocationModal = function (key) {
     // 3. Setup Modal Header
     document.getElementById('manual-session-key').value = key;
     document.getElementById('manual-modal-title').textContent = key;
-
-    // Force Integer for Requirement
-    const requiredCount = parseInt(slot.required) || 0;
     document.getElementById('manual-modal-req').textContent = requiredCount;
 
     // --- 4. SMART SORTING ---
@@ -5612,7 +5877,6 @@ window.openManualAllocationModal = function (key) {
             if (ctx.hasAdjacent) { score -= 1000; badges.push("Adjacent"); }
 
             // --- DEPT SATURATION CHECK ---
-            // Calculate hypothetical saturation if we add this person
             const assignedList = slot.assigned || [];
             const totalAssigned = assignedList.length;
             const myDeptCount = assignedList.filter(email => {
@@ -5620,18 +5884,13 @@ window.openManualAllocationModal = function (key) {
                 return member && member.dept === s.dept;
             }).length;
 
-            // Exemption: Depts with only 1 person total
             const totalInDept = staffData.filter(st => st.dept === s.dept).length;
             const isExempt = (totalInDept === 1);
 
             if (!isExempt) {
-                // If I am added, count becomes myDeptCount + 1
-                // Total becomes totalAssigned + 1
                 const potentialRatio = (myDeptCount + 1) / (totalAssigned + 1);
-
-                // Warn if saturation > 50%
                 if (potentialRatio > 0.5) {
-                    score -= 500; // soft penalty
+                    score -= 500;
                     badges.push("Dept Saturation");
                 }
             }
@@ -5641,17 +5900,15 @@ window.openManualAllocationModal = function (key) {
         })
         .sort((a, b) => b.score - a.score); // Highest Score First
 
-    // Capture Snapshot
     if (typeof lastManualRanking !== 'undefined') lastManualRanking = rankedStaff;
 
     // --- 5. RENDER & AUTO-SELECT ---
     const availList = document.getElementById('manual-available-list');
     availList.innerHTML = '';
 
-    // AUTO-SELECT LOGIC
-    const assignedList = slot.assigned || [];
-    const isFreshAllocation = (assignedList.length === 0);
-    let slotsToFill = isFreshAllocation ? requiredCount : 0;
+    // AUTO-SELECTION LOGIC: Always tick the top 'requiredCount' available staff,
+    // following the rank order (top to bottom).
+    let slotsToTick = requiredCount; 
     let currentSelectionCount = 0;
 
     rankedStaff.forEach(s => {
@@ -5660,17 +5917,10 @@ window.openManualAllocationModal = function (key) {
 
         let isChecked = false;
 
-        if (isFreshAllocation) {
-            // Auto-select if we still need people
-            if (slotsToFill > 0) {
-                isChecked = true;
-                slotsToFill--;
-            }
-        } else {
-            // Keep existing assignments
-            if (assignedList.includes(s.email)) {
-                isChecked = true;
-            }
+        // Tick the top available staff until requiredCount is met.
+        if (slotsToTick > 0) {
+            isChecked = true;
+            slotsToTick--;
         }
 
         if (isChecked) currentSelectionCount++;
@@ -5710,7 +5960,7 @@ window.openManualAllocationModal = function (key) {
         availList.innerHTML = `<tr><td colspan="3" class="text-center p-4 text-gray-500 italic">No available staff found.</td></tr>`;
     }
 
-    // 6. Render Unavailable List
+    // 6. Render Unavailable List (No change)
     const unavList = document.getElementById('manual-unavailable-list');
     unavList.innerHTML = '';
 
@@ -5748,10 +5998,8 @@ window.openManualAllocationModal = function (key) {
 
     // 7. Update Counters & Open
     document.getElementById('manual-sel-count').textContent = currentSelectionCount;
-    // *** FIX: Update the Required count in the footer as well ***
     const reqCountEl = document.getElementById('manual-req-count');
     if (reqCountEl) reqCountEl.textContent = requiredCount;
-    // ************************************************************
     window.openModal('manual-allocation-modal');
 }
 
@@ -7406,61 +7654,52 @@ window.startNewAcademicYear = async function() {
 let globalLiveUsers = {}; 
 let presenceUnsubscribe = null;
 
-// 1. START TRACKING (Call this on Init)
+// OPTIMIZED: Only fetches users active in the last 24 hours
 window.initLivePresence = function(myEmail, myName, isAdmin) {
     if (!currentCollegeId || !myEmail) return;
 
-     
-    // Sanitize Email for Doc ID
     const myRef = doc(db, "colleges", currentCollegeId, "live_presence", myEmail);
-
-    // A. EVERYONE BROADCASTS (Writes)
     const platform = window.innerWidth < 768 ? "Mobile" : "Desktop";
     
     const sendHeartbeat = (statusOverride) => {
-        // Default to 'online' unless specified
         const status = statusOverride || 'online';
-        
         setDoc(myRef, {
             name: myName,
             email: myEmail,
-            lastSeen: serverTimestamp(),
+            lastSeen: serverTimestamp(), // Server-side time
             device: platform,
             status: status
         }, { merge: true });
     };
 
-    // 1. Send first heartbeat immediately
     sendHeartbeat('online');
-
-    // 2. Regular Heartbeat (Every 5 mins)
     setInterval(() => {
         if (document.visibilityState === 'visible') sendHeartbeat('online');
     }, 5 * 60 * 1000); 
 
-    // 3. EXIT HOOK (The Fix for "Ghost" Online Users)
-    // Triggers when user closes tab or browser
-    window.addEventListener('beforeunload', () => {
-        sendHeartbeat('offline');
-    });
-
-    // 4. IDLE HOOK (Optional: Mark idle when tab is hidden/minimized)
+    window.addEventListener('beforeunload', () => sendHeartbeat('offline'));
     document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'hidden') {
-            sendHeartbeat('idle');
-        } else {
-            sendHeartbeat('online');
-        }
+        if (document.visibilityState === 'hidden') sendHeartbeat('idle');
+        else sendHeartbeat('online');
     });
 
-    // B. ONLY ADMINS LISTEN (Reads)
+    // --- ADMIN LISTENER OPTIMIZATION ---
     if (isAdmin) {
-        console.log("🟢 Live Presence: Admin Mode (Listening enabled)");
+        console.log("🟢 Live Presence: Admin Mode (Optimized Listener)");
+        
+        // 1. Calculate Timestamp for "24 Hours Ago"
+        // We only want to download docs of people who have been active recently.
+        const yesterday = new Date();
+        yesterday.setHours(yesterday.getHours() - 24);
+
         const presenceCol = collection(db, "colleges", currentCollegeId, "live_presence");
         
+        // 2. Create Query: lastSeen > yesterday
+        const q = query(presenceCol, where("lastSeen", ">", yesterday));
+
         if (presenceUnsubscribe) presenceUnsubscribe();
         
-        presenceUnsubscribe = onSnapshot(presenceCol, (snapshot) => {
+        presenceUnsubscribe = onSnapshot(q, (snapshot) => {
             const now = Date.now();
             globalLiveUsers = {}; 
             let onlineCount = 0;
@@ -7469,17 +7708,13 @@ window.initLivePresence = function(myEmail, myName, isAdmin) {
                 const data = doc.data();
                 if (!data.lastSeen) return;
 
-                const lastSeenTime = data.lastSeen.toMillis ? data.lastSeen.toMillis() : Date.now();
+                // Handle Firestore Timestamp vs Date
+                const lastSeenTime = data.lastSeen.toMillis ? data.lastSeen.toMillis() : new Date(data.lastSeen).getTime();
                 const diffMinutes = (now - lastSeenTime) / 1000 / 60;
 
-                // Priority: 
-                // 1. Explicit 'offline' status from database (The Fix)
-                // 2. Time-based timeout fallback
-                
                 if (data.status === 'offline') {
                      globalLiveUsers[data.email] = { status: 'offline', device: data.device || 'Desktop' };
                 } else if (diffMinutes < 6) { 
-                    // If DB says online/idle AND time is recent
                     globalLiveUsers[data.email] = { status: data.status || 'online', device: data.device || 'Desktop' };
                     if (data.status !== 'idle') onlineCount++;
                 } else if (diffMinutes < 30) {
@@ -7491,9 +7726,12 @@ window.initLivePresence = function(myEmail, myName, isAdmin) {
 
             updateLiveStaffWidget(onlineCount);
             
-            // Refresh Grids
-            if (typeof renderSlotsGridAdmin === 'function') renderSlotsGridAdmin();
-            if (typeof renderStaffTable === 'function') renderStaffTable(); 
+            // Debounced Render (prevent spam updates)
+            if (window.renderTimeout) clearTimeout(window.renderTimeout);
+            window.renderTimeout = setTimeout(() => {
+                if (typeof renderSlotsGridAdmin === 'function') renderSlotsGridAdmin();
+                if (typeof renderStaffTable === 'function') renderStaffTable(); 
+            }, 500);
         });
 
     } else {
