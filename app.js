@@ -597,7 +597,7 @@ function updateLocalSlotsFromStudents() {
                     reserveCount: reserve,
                     assigned: [],
                     unavailable: [],
-                    isLocked: false,
+                    isLocked: true, // 🟢 CHANGED: Now Locked by Default
                     scribeCount: stats.totalScribes,
                     studentCount: stats.totalStudents
                 };
@@ -7128,139 +7128,153 @@ if (toggleButton && sidebar) {
 
         return { dateObj, timeObj, courseName };
     }
-    // V33: This function parses the CSV and overwrites the data stores
-    function parseCsvAndLoadData(csvText) {
-        try {
-            const lines = csvText.trim().split('\n');
-            const headersLine = lines.shift().trim();
-            const headers = headersLine.split(',');
-
-            // Find indices, this is more robust
-            const dateIndex = headers.indexOf('Date');
-            const timeIndex = headers.indexOf('Time');
-            const courseIndex = headers.indexOf('Course');
-            const regNumIndex = headers.indexOf('Register Number');
-            const nameIndex = headers.indexOf('Name');
-
-            if (regNumIndex === -1 || nameIndex === -1 || courseIndex === -1) {
-                csvLoadStatus.textContent = "Error: CSV must contain 'Register Number', 'Name', and 'Course' headers.";
-                csvLoadStatus.classList.add('text-red-600');
-                csvLoadStatus.classList.remove('text-green-600');
-                // *** WORKFLOW FIX: Removed logic that re-enables PDF buttons ***
-                return;
-            }
-
-            const jsonData = [];
-            const qPaperSummary = {}; // Use an object for quick lookup
-
-            for (const line of lines) {
-                if (!line.trim()) continue;
-
-                // Regex parser that handles quoted fields (commas inside courses)
-                const regex = /,(?=(?:(?:[^"]*"){2})*[^"]*$)/;
-                const values = line.split(regex).map(val => val.trim().replace(/^"|"$/g, '')); // Trim and remove surrounding quotes
-
-                if (values.length !== headers.length) {
-                    console.warn("Skipping malformed CSV line:", line);
-                    continue;
-                }
-
-                const student = {
-                    'Date': values[dateIndex],
-                    'Time': values[timeIndex],
-                    'Course': values[courseIndex], // V60: This name should be normalized already
-                    'Register Number': values[regNumIndex],
-                    'Name': values[nameIndex]
-                };
-
-                jsonData.push(student);
-
-                // --- Regenerate Q-Paper Summary ---
-                const key = `${student.Date}_${student.Time}_${student.Course}`;
-                if (!qPaperSummary[key]) {
-                    qPaperSummary[key] = {
-                        Date: student.Date,
-                        Time: student.Time,
-                        Course: student.Course,
-                        'Student Count': 0
-                    };
-                }
-                qPaperSummary[key]['Student Count']++;
-            }
-
-            const qPaperArray = Object.values(qPaperSummary);
-
-            // --- NEW: Sort the loaded CSV data by Date, Time, and Course ---
-            try {
-                jsonData.sort((a, b) => {
-                    const keyA = getJsSortKey(a);
-                    const keyB = getJsSortKey(b);
-
-                    if (keyA.dateObj.getTime() !== keyB.dateObj.getTime()) {
-                        return keyA.dateObj - keyB.dateObj;
-                    }
-                    if (keyA.timeObj.getTime() !== keyB.timeObj.getTime()) {
-                        return keyA.timeObj - keyB.timeObj;
-                    }
-                    return keyA.courseName.localeCompare(keyB.courseName);
-                });
-            } catch (e) {
-                console.error("Error during CSV sorting:", e);
-                // Don't block, just log the error
-            }
-            // --- END NEW ---
-
-            // --- Update Data Stores ---
-            jsonDataStore.innerHTML = JSON.stringify(jsonData);
-            qPaperDataStore.innerHTML = JSON.stringify(qPaperArray);
-
-            // V65: Save the base data to localStorage
-            localStorage.setItem(BASE_DATA_KEY, JSON.stringify(jsonData));
-
-            // --- Update UI ---
-            csvLoadStatus.textContent = `Successfully loaded and parsed ${jsonData.length} student records.`;
-            csvLoadStatus.classList.remove('text-red-600');
-            csvLoadStatus.classList.add('text-green-600');
-
-            // Enable report buttons
-            generateReportButton.disabled = false;
-            generateQPaperReportButton.disabled = false;
-            generateQpDistributionReportButton.disabled = false; // <-- ADD THIS
-            generateDaywiseReportButton.disabled = false;
-            generateScribeReportButton.disabled = false; // <-- NEW
-            generateScribeProformaButton.disabled = false; // <-- ADD THIS
-            generateInvigilatorReportButton.disabled = false; // <-- ADD THIS
-
-            // V56: Enable and populate absentee tab
-            disable_absentee_tab(false);
-            populate_session_dropdown();
-
-            // V61: Enable and populate QP Code tab
-            disable_qpcode_tab(false);
-            populate_qp_code_session_dropdown();
-
-            // Enable and populate Room Allotment tab
-            disable_room_allotment_tab(false);
-            populate_room_allotment_session_dropdown();
-
-            // *** NEW: Enable Scribe Tabs ***
-            disable_scribe_settings_tab(false); // MODIFIED
-            loadGlobalScribeList();
-            // *****************************
-            // *** NEW: Enable Edit Data Tab ***
-            disable_edit_data_tab(false);
-            // *********************************
-            // *** WORKFLOW FIX: Removed logic that re-enables PDF buttons ***
 
 
-        } catch (e) {
-            console.error("Error parsing CSV:", e);
-            csvLoadStatus.textContent = "Error parsing CSV file. See console for details.";
+// V34: INTERACTIVE DIFF MERGE (With Add/Delete Permissions)
+function parseCsvAndLoadData(csvText) {
+    try {
+        // --- 1. PARSE THE CSV ---
+        const lines = csvText.trim().split('\n');
+        const headersLine = lines.shift().trim();
+        const headers = headersLine.split(',');
+
+        const dateIndex = headers.indexOf('Date');
+        const timeIndex = headers.indexOf('Time');
+        const courseIndex = headers.indexOf('Course');
+        const regNumIndex = headers.indexOf('Register Number');
+        const nameIndex = headers.indexOf('Name');
+
+        if (regNumIndex === -1 || nameIndex === -1 || courseIndex === -1) {
+            csvLoadStatus.textContent = "Error: Missing required headers (Register Number, Name, Course).";
             csvLoadStatus.classList.add('text-red-600');
-            csvLoadStatus.classList.remove('text-green-600');
-            // *** WORKFLOW FIX: Removed logic that re-enables PDF buttons ***
+            return;
         }
+
+        const newJsonData = [];
+        for (const line of lines) {
+            if (!line.trim()) continue;
+            const regex = /,(?=(?:(?:[^"]*"){2})*[^"]*$)/;
+            const values = line.split(regex).map(val => val.trim().replace(/^"|"$/g, ''));
+            if (values.length !== headers.length) continue;
+
+            newJsonData.push({
+                'Date': values[dateIndex],
+                'Time': values[timeIndex],
+                'Course': values[courseIndex],
+                'Register Number': values[regNumIndex],
+                'Name': values[nameIndex]
+            });
+        }
+
+        if (newJsonData.length === 0) {
+            alert("No valid data found in file.");
+            return;
+        }
+
+        // --- 2. DEFINE SCOPE (Course + Date) ---
+        // We only care about matching existing data for the exams present in this file.
+        const scopesToUpdate = new Set();
+        newJsonData.forEach(s => {
+            if (s.Course && s.Date) {
+                scopesToUpdate.add(`${s.Course}|${s.Date}`);
+            }
+        });
+
+        // Get current DB data
+        const currentDB = JSON.parse(localStorage.getItem(BASE_DATA_KEY) || '[]');
+
+        // Split DB into:
+        // A. IRRELEVANT DATA (Exams not in this file) -> We keep these 100%
+        const ignoredData = currentDB.filter(s => !scopesToUpdate.has(`${s.Course}|${s.Date}`));
+        
+        // B. RELEVANT DATA (Old version of exams in this file) -> We compare these
+        const relevantOldData = currentDB.filter(s => scopesToUpdate.has(`${s.Course}|${s.Date}`));
+
+
+        // --- 3. CALCULATE DIFF ---
+        // Create Sets of Register Numbers for fast lookup
+        const newRegNos = new Set(newJsonData.map(s => s['Register Number']));
+        const oldRegNos = new Set(relevantOldData.map(s => s['Register Number']));
+
+        // A. Students to UPDATE (Present in both) - We automatically take the NEW version (to fix times/names)
+        const commonStudents = newJsonData.filter(s => oldRegNos.has(s['Register Number']));
+
+        // B. Students to ADD (In File, not in DB)
+        const potentialAdds = newJsonData.filter(s => !oldRegNos.has(s['Register Number']));
+
+        // C. Students to DELETE (In DB, missing from File)
+        const potentialDeletes = relevantOldData.filter(s => !newRegNos.has(s['Register Number']));
+
+
+        // --- 4. INTERACTIVE PROMPTS ---
+        
+        let finalBatch = [...commonStudents]; // Start with the updates
+
+        // PROMPT 1: ADDITIONS
+        if (potentialAdds.length > 0) {
+            const userWantsToAdd = confirm(`🟢 NEW RECORDS FOUND\n\nFound ${potentialAdds.length} new student(s) in this file.\n\nClick OK to ADD them.\nClick Cancel to IGNORE them.`);
+            if (userWantsToAdd) {
+                finalBatch = finalBatch.concat(potentialAdds);
+            }
+        }
+
+        // PROMPT 2: DELETIONS
+        if (potentialDeletes.length > 0) {
+            const userWantsToDelete = confirm(`🔴 MISSING RECORDS FOUND\n\nFound ${potentialDeletes.length} student(s) in the System who are MISSING from this new file.\n\nClick OK to DELETE them from the System.\nClick Cancel to KEEP them (Safe Mode).`);
+            
+            if (!userWantsToDelete) {
+                // User said "Cancel" (Don't delete), so we put the old records back into the batch
+                finalBatch = finalBatch.concat(potentialDeletes);
+            }
+            // If User said "OK", we simply do nothing (they are left out of finalBatch, effectively deleted)
+        }
+
+
+        // --- 5. FINAL MERGE & SAVE ---
+        allStudentData = [...ignoredData, ...finalBatch];
+
+        // Sort
+        allStudentData.sort((a, b) => {
+            const keyA = getJsSortKey(a);
+            const keyB = getJsSortKey(b);
+            if (keyA.dateObj.getTime() !== keyB.dateObj.getTime()) return keyA.dateObj - keyB.dateObj;
+            return keyA.courseName.localeCompare(keyB.courseName);
+        });
+
+        // Save
+        jsonDataStore.innerHTML = JSON.stringify(allStudentData);
+        localStorage.setItem(BASE_DATA_KEY, JSON.stringify(allStudentData));
+
+        // Update UI
+        csvLoadStatus.textContent = `Processed. Total Students: ${allStudentData.length}`;
+        csvLoadStatus.classList.remove('text-red-600');
+        csvLoadStatus.classList.add('text-green-600');
+        
+        // Refresh Everything
+        disable_absentee_tab(false);
+        populate_session_dropdown();
+        disable_qpcode_tab(false);
+        populate_qp_code_session_dropdown();
+        disable_room_allotment_tab(false);
+        populate_room_allotment_session_dropdown();
+        disable_scribe_settings_tab(false);
+        loadGlobalScribeList();
+        disable_edit_data_tab(false);
+        
+        // Re-enable Report Buttons
+        document.querySelectorAll('#view-reports button').forEach(btn => btn.disabled = false);
+
+        updateDashboard();
+        
+        alert("✅ Data Processing Complete!");
+
+    } catch (e) {
+        console.error("Error parsing CSV:", e);
+        csvLoadStatus.textContent = "Error parsing file.";
+        csvLoadStatus.classList.add('text-red-600');
     }
+}
+    
 
 window.real_populate_session_dropdown = function () {
         try {
@@ -11903,77 +11917,87 @@ if (mainLoadCsvBtn) {
         });
     }
 
-    // --- Helper: Parse CSV String to JSON (Smart Stream & Source) ---
-    function parseCsvRaw(csvText, streamName = "Regular") {
-        const lines = csvText.trim().split('\n');
-        const headersLine = lines.shift().trim();
-        const headers = headersLine.split(',');
 
-        const dateIndex = headers.indexOf('Date');
-        const timeIndex = headers.indexOf('Time');
-        const courseIndex = headers.indexOf('Course');
-        const regNumIndex = headers.indexOf('Register Number');
-        const nameIndex = headers.indexOf('Name');
-        const streamIndex = headers.indexOf('Stream');
-        const sourceIndex = headers.indexOf('Source File'); // <--- NEW Check
+// --- Helper: Parse CSV String to JSON (Smart Stream & Source) ---
+function parseCsvRaw(csvText, streamName = "Regular") {
+    const lines = csvText.trim().split('\n');
+    const headersLine = lines.shift().trim();
+    const headers = headersLine.split(',');
 
-        if (regNumIndex === -1 || nameIndex === -1 || courseIndex === -1) {
-            throw new Error("Missing required headers (Register Number, Name, Course)");
-        }
+    const dateIndex = headers.indexOf('Date');
+    const timeIndex = headers.indexOf('Time');
+    const courseIndex = headers.indexOf('Course');
+    const regNumIndex = headers.indexOf('Register Number');
+    const nameIndex = headers.indexOf('Name');
+    const streamIndex = headers.indexOf('Stream');
+    const sourceIndex = headers.indexOf('Source File'); // <--- NEW Check
 
-        const parsedData = [];
-
-        for (const line of lines) {
-            if (!line.trim()) continue;
-
-            const regex = /,(?=(?:(?:[^"]*"){2})*[^"]*$)/;
-            const values = line.split(regex).map(val => val.trim().replace(/^"|"$/g, ''));
-
-            if (values.length === headers.length) {
-
-                // 1. Stream Priority
-                let rowStream = streamName;
-                if (streamIndex !== -1) {
-                    const csvValue = values[streamIndex];
-                    if (csvValue && csvValue.trim() !== "") {
-                        rowStream = csvValue.trim();
-                    }
-                }
-
-                // 2. Source File Priority (Capture or Default)
-                let rowSource = "Manual Upload";
-                if (sourceIndex !== -1) {
-                    const sourceVal = values[sourceIndex];
-                    if (sourceVal && sourceVal.trim() !== "") {
-                        rowSource = sourceVal.trim();
-                    }
-                }
-
-                parsedData.push({
-                    'Date': values[dateIndex],
-                    'Time': cleanTime, // <--- USE NORMALIZED TIME
-                    'Course': values[courseIndex],
-                    'Register Number': values[regNumIndex],
-                    'Name': values[nameIndex],
-                    'Stream': rowStream,
-                    'Source File': rowSource // <--- NEW Field
-                });
-            }
-        }
-
-        // Sort the new data
-        try {
-            parsedData.sort((a, b) => {
-                const keyA = getJsSortKey(a);
-                const keyB = getJsSortKey(b);
-                if (keyA.dateObj.getTime() !== keyB.dateObj.getTime()) return keyA.dateObj - keyB.dateObj;
-                if (keyA.timeObj.getTime() !== keyB.timeObj.getTime()) return keyA.timeObj - keyB.timeObj;
-                return keyA.courseName.localeCompare(keyB.courseName);
-            });
-        } catch (e) { console.warn("Sort failed", e); }
-
-        return parsedData;
+    if (regNumIndex === -1 || nameIndex === -1 || courseIndex === -1) {
+        throw new Error("Missing required headers (Register Number, Name, Course)");
     }
+
+    const parsedData = [];
+
+    for (const line of lines) {
+        if (!line.trim()) continue;
+        const regex = /,(?=(?:(?:[^"]*"){2})*[^"]*$)/;
+        const values = line.split(regex).map(val => val.trim().replace(/^"|"$/g, ''));
+
+        if (values.length === headers.length) {
+            // 1. Stream Priority
+            let rowStream = streamName;
+            if (streamIndex !== -1) {
+                const csvValue = values[streamIndex];
+                if (csvValue && csvValue.trim() !== "") {
+                    rowStream = csvValue.trim();
+                }
+            }
+
+            // 2. Source File Priority (Capture or Default)
+            let rowSource = "Manual Upload";
+            if (sourceIndex !== -1) {
+                const sourceVal = values[sourceIndex];
+                if (sourceVal && sourceVal.trim() !== "") {
+                    rowSource = sourceVal.trim();
+                }
+            }
+
+            // 🟢 FIX: Define cleanTime using the helper function
+            const rawTime = values[timeIndex];
+            const cleanTime = (typeof normalizeTime === 'function') ? normalizeTime(rawTime) : rawTime;
+
+            parsedData.push({
+                'Date': values[dateIndex],
+                'Time': cleanTime, // <--- Now this variable exists!
+                'Course': values[courseIndex],
+                'Register Number': values[regNumIndex],
+                'Name': values[nameIndex],
+                'Stream': rowStream,
+                'Source File': rowSource
+            });
+        }
+    }
+
+    // Sort the new data
+    try {
+        parsedData.sort((a, b) => {
+            const keyA = getJsSortKey(a);
+            const keyB = getJsSortKey(b);
+            if (keyA.dateObj.getTime() !== keyB.dateObj.getTime()) return keyA.dateObj - keyB.dateObj;
+            if (keyA.timeObj.getTime() !== keyB.timeObj.getTime()) return keyA.timeObj - keyB.timeObj;
+            return keyA.courseName.localeCompare(keyB.courseName);
+        });
+    } catch (e) {
+        console.warn("Sort failed", e);
+    }
+
+    return parsedData;
+}
+    
+
+
+
+    
     // --- Helper: Convert JSON Data to CSV String (With Source File) ---
     function convertToCSV(objArray) {
         const array = typeof objArray != 'object' ? JSON.parse(objArray) : objArray;
@@ -12076,17 +12100,15 @@ if (mainLoadCsvBtn) {
         // This prevents the "Option 2" button from being overwritten with total data.
     }
 
-    // ==========================================
-    // 🐍 PYTHON INTEGRATION (Connects PDF to Merge Logic)
-    // ==========================================
-
-    window.handlePythonExtraction = function (jsonString) {
+   // ==========================================
+// 🐍 PYTHON INTEGRATION (Connects PDF to Interactive Merge)
+// ==========================================
+window.handlePythonExtraction = function (jsonString) {
     console.log("Received data from Python...");
-    
+
     // 1. GET GLOBAL SETTINGS
     const examSelect = document.getElementById('upload-exam-select');
     const streamSelect = document.getElementById('global-stream-select');
-    
     const selectedExamName = examSelect ? examSelect.value : "";
     const selectedStream = streamSelect ? streamSelect.value : "Regular";
 
@@ -12097,25 +12119,83 @@ if (mainLoadCsvBtn) {
     }
 
     try {
-        let parsedData = JSON.parse(jsonString);
+        let newJsonData = JSON.parse(jsonString);
 
-        if (parsedData.length === 0) {
+        if (newJsonData.length === 0) {
             alert("Extraction completed, but no student data was found.");
             return;
         }
 
-        // 3. INJECT METADATA (Time normalization + Stream + Exam Name)
-        parsedData = parsedData.map(item => ({
+        // 3. INJECT METADATA & NORMALIZE
+        newJsonData = newJsonData.map(item => ({
             ...item,
             "Time": (typeof normalizeTime === 'function') ? normalizeTime(item.Time) : item.Time,
-            "Stream": selectedStream,        // <--- Tag Stream
-            "Exam Name": selectedExamName    // <--- Tag Exam Name
+            "Stream": selectedStream,
+            "Exam Name": selectedExamName
         }));
 
-        // 4. LOAD DATA (Calls existing loader)
-        // Note: You might want to run the same duplicate check logic as CSV here, 
-        // but for now, we load directly as per previous PDF flow.
-        loadStudentData(parsedData);
+        // --- 🟢 INTERACTIVE MERGE LOGIC START (Same as CSV) 🟢 ---
+
+        // 4. DEFINE SCOPE (Course + Date)
+        // We only care about matching existing data for the exams present in this new batch.
+        const scopesToUpdate = new Set();
+        newJsonData.forEach(s => {
+            if (s.Course && s.Date) {
+                scopesToUpdate.add(`${s.Course}|${s.Date}`);
+            }
+        });
+
+        // 5. Get Current DB
+        const currentDB = JSON.parse(localStorage.getItem(BASE_DATA_KEY) || '[]');
+
+        // A. IRRELEVANT DATA (Exams not in this file) -> Keep 100%
+        const ignoredData = currentDB.filter(s => !scopesToUpdate.has(`${s.Course}|${s.Date}`));
+
+        // B. RELEVANT DATA (Old version of exams in this file) -> Compare these
+        const relevantOldData = currentDB.filter(s => scopesToUpdate.has(`${s.Course}|${s.Date}`));
+
+        // 6. CALCULATE DIFF
+        const newRegNos = new Set(newJsonData.map(s => s['Register Number']));
+        const oldRegNos = new Set(relevantOldData.map(s => s['Register Number']));
+
+        // A. UPDATES (Present in both) - Automatically take NEW version
+        const commonStudents = newJsonData.filter(s => oldRegNos.has(s['Register Number']));
+
+        // B. ADDS (In File, not in DB)
+        const potentialAdds = newJsonData.filter(s => !oldRegNos.has(s['Register Number']));
+
+        // C. DELETES (In DB, missing from File)
+        const potentialDeletes = relevantOldData.filter(s => !newRegNos.has(s['Register Number']));
+
+        // 7. INTERACTIVE PROMPTS
+        let finalBatch = [...commonStudents];
+
+        // Prompt 1: Additions
+        if (potentialAdds.length > 0) {
+            const confirmMsg = `🟢 NEW RECORDS FOUND\n\nFound ${potentialAdds.length} new student(s) in this PDF.\n\nClick OK to ADD them.\nClick Cancel to IGNORE them.`;
+            if (confirm(confirmMsg)) {
+                finalBatch = finalBatch.concat(potentialAdds);
+            }
+        }
+
+        // Prompt 2: Deletions
+        if (potentialDeletes.length > 0) {
+            const confirmMsg = `🔴 MISSING RECORDS FOUND\n\nFound ${potentialDeletes.length} student(s) in the System who are MISSING from this PDF.\n\nClick OK to DELETE them from the System.\nClick Cancel to KEEP them (Safe Mode).`;
+            if (!confirm(confirmMsg)) {
+                // User said Cancel (Keep), so put them back
+                finalBatch = finalBatch.concat(potentialDeletes);
+            }
+        }
+
+        // 8. FINAL MERGE & SAVE
+        // Merge ignored data + the resolved batch
+        const finalData = [...ignoredData, ...finalBatch];
+
+        // Call the loader with the FINAL resolved list
+        // (This function handles sorting, saving to localStorage, and refreshing UI)
+        loadStudentData(finalData);
+
+        alert(`✅ PDF Processed Successfully!\n\n• Updated: ${scopesToUpdate.size} Session(s)\n• Total Students: ${finalData.length}`);
 
     } catch (e) {
         console.error("Bridge Error:", e);
@@ -14863,6 +14943,105 @@ if (btnSessionReschedule) {
         });
     }
 
+
+// ==========================================
+    // 🛡️ THE BUNKER: FULL BACKUP & RESTORE (FIXED)
+    // ==========================================
+
+    // 1. FULL BACKUP (Download JSON)
+    if (backupDataButton) {
+        // Remove old listeners to prevent duplicates
+        const newBackupBtn = backupDataButton.cloneNode(true);
+        backupDataButton.parentNode.replaceChild(newBackupBtn, backupDataButton);
+
+        newBackupBtn.addEventListener('click', () => {
+            const backup = {};
+            // Gather all data defined in your ALL_DATA_KEYS constant
+            if (typeof ALL_DATA_KEYS !== 'undefined') {
+                ALL_DATA_KEYS.forEach(key => {
+                    const val = localStorage.getItem(key);
+                    if (val) backup[key] = val;
+                });
+            } else {
+                // Fallback if constant missing
+                Object.keys(localStorage).forEach(key => {
+                    if(key.startsWith('exam')) backup[key] = localStorage.getItem(key);
+                });
+            }
+
+            // Create and download file
+            const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `ExamFlow_Full_Backup_${new Date().toISOString().slice(0, 10)}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        });
+    }
+
+    // 2. FULL RESTORE (Upload JSON)
+    // We attach the listener directly to the file input that the button clicks
+    const fullRestoreInput = document.getElementById('restore-file-input');
+    
+    if (fullRestoreInput) {
+        // Remove old listeners
+        const newInput = fullRestoreInput.cloneNode(true);
+        fullRestoreInput.parentNode.replaceChild(newInput, fullRestoreInput);
+
+        newInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+                try {
+                    const data = JSON.parse(event.target.result);
+                    
+                    if (!data || Object.keys(data).length === 0) {
+                        throw new Error("Invalid or empty backup file.");
+                    }
+
+                    // Restore to Local Storage
+                    let count = 0;
+                    Object.keys(data).forEach(key => {
+                        // Restore known keys or all keys that look like app data
+                        if ((typeof ALL_DATA_KEYS !== 'undefined' && ALL_DATA_KEYS.includes(key)) || key.startsWith('exam')) {
+                            localStorage.setItem(key, data[key]);
+                            count++;
+                        }
+                    });
+
+                    // Sync to Cloud (if online)
+                    if (typeof syncDataToCloud === 'function' && count > 0) {
+                        updateSyncStatus("Restoring Cloud...", "neutral");
+                        await syncDataToCloud('settings');
+                        await syncDataToCloud('ops');
+                        await syncDataToCloud('allocation');
+                        await syncDataToCloud('staff');
+                        await syncDataToCloud('slots');
+                    }
+
+                    alert(`✅ Recovery Successful!\n\nRestored ${count} data modules.\nThe app will now reload.`);
+                    window.location.reload();
+
+                } catch (err) {
+                    console.error("Full Restore Error:", err);
+                    alert("❌ Restore Failed!\n\nThe file appears to be corrupt or invalid.\n" + err.message);
+                }
+            };
+            reader.readAsText(file);
+            
+            // Reset input so same file can be selected again
+            newInput.value = '';
+        });
+    }
+
+
+
+
+    
 // ==========================================
     // 🛠️ MODAL HELPERS (Fixes the "not a function" error)
     // ==========================================
