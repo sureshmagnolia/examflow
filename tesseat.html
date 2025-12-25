@@ -1,17 +1,23 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Exam Seating Status</title>
+    <title>Exam Seating Status (TEST MODE)</title>
     <script src="tailwind.js"></script>
-    
+    <script src="ui-modal.js"></script>
+
     <style>
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
         .animate-fade-in { animation: fadeIn 0.3s ease-out; }
     </style>
 
     <script type="module">
+        // 1. UPDATED IMPORTS: V2 Modular Architecture
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
         import { getFirestore, doc, getDoc, collection, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
@@ -27,16 +33,17 @@
 
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
-        window.firebase = { db, doc, getDoc, collection, getDocs }; 
+        window.firebase = { db, doc, getDoc, collection, getDocs };
 
         const urlParams = new URLSearchParams(window.location.search);
         let collegeId = urlParams.get('id');
 
         if (collegeId && collegeId.includes('/')) {
             const parts = collegeId.split('/');
-            collegeId = parts[parts.length - 1]; 
+            collegeId = parts[parts.length - 1];
         }
 
+        // Global Data Variables
         let allSessions = []; 
         let roomConfigs = {};
         let collegeName = "Exam Centre";
@@ -49,7 +56,7 @@
             }
 
             statusEl.textContent = "Loading Live Exam Data...";
-            
+
             try {
                 // A. FETCH SETTINGS
                 const settingsRef = doc(db, "colleges", collegeId, "system_data", "settings");
@@ -62,28 +69,35 @@
                     getDocs(sessionsRef)
                 ]);
 
+                // Process Settings
                 if (settingsSnap.exists()) {
                     const settings = settingsSnap.data();
                     collegeName = settings.examCollegeName || "Exam Centre";
                     document.getElementById('college-name').textContent = collegeName;
+                    
                     if (settings.examRoomConfig) {
                         roomConfigs = JSON.parse(settings.examRoomConfig);
                     }
                 }
 
+                // Process Sessions
                 if (!sessionsSnap.empty) {
                     allSessions = [];
                     sessionsSnap.forEach(doc => {
                         allSessions.push(doc.data());
                     });
 
-                    statusEl.textContent = ""; 
+                    statusEl.textContent = "";
                     document.getElementById('search-section').classList.remove('hidden');
 
                     const savedRegNo = localStorage.getItem('myExamRegNo');
                     if (savedRegNo) {
                         document.getElementById('reg-input').value = savedRegNo;
-                        setTimeout(() => window.searchStudent(), 300); 
+                        
+                        // Only auto-search if authorized (prevent premature search before modal)
+                        if (typeof isAuthorized !== 'undefined' && isAuthorized) {
+                            setTimeout(() => window.searchStudent(), 300);
+                        }
                     }
                 } else {
                     statusEl.textContent = "No active exam sessions found.";
@@ -95,7 +109,7 @@
             }
         }
 
-        window.searchStudent = function() {
+        window.searchStudent = function () {
             const regInput = document.getElementById('reg-input');
             const regNo = regInput.value.trim().toUpperCase();
             const resultContainer = document.getElementById('result-container');
@@ -110,21 +124,21 @@
             let studentName = "";
             let myExams = [];
 
-            // --- FILTER: Only show Upcoming Exams ---
+            // --- FILTER: Upcoming Exams Only ---
             const todayMidnight = new Date();
             todayMidnight.setHours(0, 0, 0, 0);
 
+            // Iterate Modular Sessions
             allSessions.forEach(session => {
                 const dateStr = session.date;
                 const timeStr = session.time;
-
+                
                 // 1. DATE CHECK: Skip past exams
-                // We construct a date object for the exam day (at 00:00) to compare with todayMidnight
                 const examDayStart = parseSessionTime(dateStr, "00:00 AM");
                 if (examDayStart < todayMidnight) {
-                    return; // Skip this session (it's in the past)
+                    return; // Skip past exams
                 }
-                
+
                 // 2. FIND STUDENT
                 const studentRecord = session.students ? session.students.find(s => s['Register Number'] === regNo) : null;
 
@@ -135,7 +149,7 @@
                     let seatNumber = "-";
                     let isScribeRoom = false;
 
-                    // Check Regular Allotment
+                    // A. Check Regular Allotment
                     if (session.roomAllotment) {
                         for (const room of session.roomAllotment) {
                             const index = room.students.findIndex(s => 
@@ -149,7 +163,7 @@
                         }
                     }
 
-                    // Check Scribe Allotment
+                    // B. Check Scribe Allotment
                     if (session.scribeAllotment && session.scribeAllotment[regNo]) {
                         studentRoom = session.scribeAllotment[regNo];
                         isScribeRoom = true;
@@ -167,32 +181,37 @@
                 }
             });
 
-            // Sort by Date/Time
             myExams.sort((a, b) => a.fullDate - b.fullDate);
 
             if (myExams.length > 0) {
                 found = true;
                 localStorage.setItem('myExamRegNo', regNo);
-                const now = new Date();
 
                 myExams.forEach(exam => {
-                    // --- TIME LOCK LOGIC (45 Mins Before) ---
+                    // *** TIME LOCK REMOVED FOR TEST MODE *** // We calculate it just to show what *would* happen in student view
+                    const now = new Date();
                     const unlockTime = new Date(exam.fullDate.getTime() - (45 * 60 * 1000));
-                    
+                    const isActuallyLocked = now < unlockTime;
+
                     const roomInfo = roomConfigs[exam.studentRoom] || {};
-                    const displayLocation = (roomInfo.location && roomInfo.location.trim() !== "") 
-                                            ? roomInfo.location 
-                                            : exam.studentRoom;
-                    
-                    const scribeTag = exam.isScribeRoom 
-                        ? `<span class="bg-orange-100 text-orange-700 text-[10px] px-2 py-0.5 rounded border border-orange-200 font-bold ml-2 uppercase">Scribe Room</span>` 
+                    const displayLocation = (roomInfo.location && roomInfo.location.trim() !== "")
+                        ? roomInfo.location
+                        : exam.studentRoom;
+
+                    const scribeTag = exam.isScribeRoom
+                        ? `<span class="bg-orange-100 text-orange-700 text-[10px] px-2 py-0.5 rounded border border-orange-200 font-bold ml-2 uppercase">Scribe Room</span>`
                         : "";
+
+                    // Visual indicator if this exam is technically locked for students
+                    const lockIndicator = isActuallyLocked 
+                        ? `<div class="bg-yellow-50 text-yellow-700 text-[10px] px-2 py-1 rounded mb-3 border border-yellow-200 text-center font-bold">🔒 Hidden for students until 45m prior</div>`
+                        : `<div class="bg-green-50 text-green-700 text-[10px] px-2 py-1 rounded mb-3 border border-green-200 text-center font-bold">🔓 Visible to students</div>`;
 
                     const card = document.createElement('div');
                     card.className = "bg-white p-5 rounded-xl shadow-lg border border-gray-100 mb-5 animate-fade-in";
-                    
-                    // HEADER (Always Visible)
+
                     let content = `
+                        ${lockIndicator}
                         <div class="border-b border-gray-200 pb-3 mb-3">
                             <div class="text-center mb-3">
                                 <div class="text-lg font-black text-gray-800 leading-tight">${studentName}</div>
@@ -200,7 +219,7 @@
                             </div>
                             
                             <div class="bg-blue-50 border border-blue-100 p-3 rounded-lg mb-3">
-                                <div class="text-[10px] text-blue-400 uppercase font-bold tracking-wider mb-1">Subject / Paper</div>
+                                <div class="text-[10px] text-blue-400 uppercase font-bold tracking-wider mb-1">Subject</div>
                                 <div class="text-sm font-bold text-blue-900 leading-snug">${exam.paperName}</div>
                             </div>
 
@@ -217,50 +236,30 @@
                         </div>
                     `;
 
-                    // BODY (Conditional based on Time Lock)
-                    if (now >= unlockTime) {
-                        // UNLOCKED: Show Seat & Room
-                        content += `
-                            <div class="text-center py-2">
-                                <p class="text-xs text-gray-400 uppercase tracking-widest font-bold mb-2 flex items-center justify-center">
-                                    Allotted Hall ${scribeTag}
-                                </p>
-                                
-                                <div class="text-2xl font-black text-gray-900 leading-tight mb-5 px-2">${displayLocation}</div>
-                                
-                                <div class="inline-block bg-indigo-50 rounded-xl px-8 py-4 border border-indigo-100 shadow-inner">
-                                     <span class="block text-[10px] text-indigo-400 uppercase font-bold tracking-wider mb-1">Your Seat Number</span>
-                                     <span class="block text-5xl font-black text-indigo-600">${exam.seatNumber === "Scribe" ? "Spl" : "#" + exam.seatNumber}</span>
-                                </div>
-                                
-                                <p class="text-[10px] text-green-600 mt-5 font-bold flex items-center justify-center gap-1.5 uppercase tracking-wide">
-                                    <span class="relative flex h-2.5 w-2.5">
-                                      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                                      <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500"></span>
-                                    </span>
-                                    Seating Live
-                                </p>
+                    // *** ALWAYS RENDER UNLOCKED VIEW ***
+                    content += `
+                        <div class="text-center py-2">
+                            <p class="text-xs text-gray-400 uppercase tracking-widest font-bold mb-2 flex items-center justify-center">
+                                Allotted Hall ${scribeTag}
+                            </p>
+                            
+                            <div class="text-2xl font-black text-gray-900 leading-tight mb-5 px-2">${displayLocation}</div>
+                            
+                            <div class="inline-block bg-indigo-50 rounded-xl px-8 py-4 border border-indigo-100 shadow-inner">
+                                    <span class="block text-[10px] text-indigo-400 uppercase font-bold tracking-wider mb-1">Your Seat Number</span>
+                                    <span class="block text-5xl font-black text-indigo-600">${exam.seatNumber === "Scribe" ? "Spl" : "#" + exam.seatNumber}</span>
                             </div>
-                        `;
-                    } else {
-                        // LOCKED: Show Countdown
-                        const diffMs = unlockTime - now;
-                        const diffMins = Math.ceil(diffMs / (1000 * 60));
-                        let timeDisplay = `${diffMins} mins`;
-                        if (diffMins > 60) timeDisplay = `${Math.ceil(diffMins / 60)} hours`;
-                        if (diffMins > 1440) timeDisplay = `${Math.ceil(diffMins / 1440)} days`;
+                            
+                            <p class="text-[10px] text-green-600 mt-5 font-bold flex items-center justify-center gap-1.5 uppercase tracking-wide">
+                                <span class="relative flex h-2.5 w-2.5">
+                                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                                    <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500"></span>
+                                </span>
+                                Seating Live (Test Mode)
+                            </p>
+                        </div>
+                    `;
 
-                        content += `
-                            <div class="text-center py-6 bg-gray-50 rounded-lg border border-gray-100">
-                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-10 h-10 text-gray-400 mx-auto mb-3">
-                                  <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25 2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" />
-                                </svg>
-                                <p class="text-sm text-gray-700 font-bold">Seating Info Locked</p>
-                                <p class="text-xs text-gray-500 mt-1">Reveals in <span class="font-mono font-bold text-red-500 bg-red-50 px-1 rounded border border-red-100">${timeDisplay}</span></p>
-                                <p class="text-[10px] text-gray-400 mt-2">(Available 45m before exam)</p>
-                            </div>
-                        `;
-                    }
                     card.innerHTML = content;
                     resultContainer.appendChild(card);
                 });
@@ -271,7 +270,6 @@
                     <div class="text-center py-8 bg-white rounded-lg shadow-sm border border-gray-200">
                         <p class="text-gray-800 font-bold text-lg">No Upcoming Exams</p>
                         <p class="text-gray-500 text-sm mt-1">for register number <span class="font-mono font-bold text-black">${regNo}</span></p>
-                        <p class="text-xs text-gray-400 mt-2">Past exams are hidden.</p>
                     </div>
                 `;
             } else {
@@ -282,7 +280,7 @@
             }
         };
 
-        window.clearSavedData = function() {
+        window.clearSavedData = function () {
             localStorage.removeItem('myExamRegNo');
             document.getElementById('reg-input').value = '';
             document.getElementById('result-container').innerHTML = '';
@@ -303,30 +301,76 @@
         loadData();
     </script>
 </head>
+
 <body class="bg-gray-50 min-h-screen flex flex-col items-center p-4 font-sans">
-    <div class="w-full max-w-md">
-        <div class="text-center mb-6 mt-2">
-            <h1 class="text-xl font-black text-gray-900 tracking-tight" id="college-name">Exam Centre</h1>
-            <p class="text-xs font-bold text-indigo-600 uppercase tracking-widest mt-1">Student Seating Portal</p>
-        </div>
 
-        <div id="status" class="text-center text-sm font-medium text-indigo-600 mb-4 animate-pulse"></div>
+    <script>
+        var isAuthorized = false;
 
-        <div id="search-section" class="hidden bg-white p-6 rounded-2xl shadow-xl shadow-indigo-50 border border-indigo-100">
-            <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Enter Register Number</label>
-            <div class="flex gap-2">
-                <input type="text" id="reg-input" class="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:border-indigo-500 outline-none uppercase font-mono text-lg font-bold text-gray-800 placeholder-gray-300 transition-all" placeholder="e.g. ABCDE123">
-                <button onclick="searchStudent()" class="bg-indigo-600 text-white px-5 rounded-xl font-bold hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-200 active:scale-95">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-6 h-6">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
-                    </svg>
-                </button>
+        async function checkAccess() {
+            const pass = await UiModal.prompt(
+                "🔐 Admin Access Required",
+                "Please enter the password for tesseat.html:",
+                "Password",
+                "password"
+            );
+
+            if (pass === "admin123") {
+                isAuthorized = true;
+                const content = document.getElementById('protected-content');
+                if (content) content.style.display = 'block';
+                
+                // Trigger auto-search if Reg No is saved
+                const savedRegNo = localStorage.getItem('myExamRegNo');
+                if (savedRegNo) {
+                    window.searchStudent();
+                }
+            } else {
+                if (pass !== null) { 
+                    await UiModal.alert("🚫 Access Denied", "Incorrect password.");
+                    document.body.innerHTML = "<div style='display:flex;justify-content:center;align-items:center;height:100vh;background:#f3f4f6;font-family:sans-serif;color:#ef4444;'><h1>🚫 Access Denied</h1></div>";
+                } else {
+                    document.body.innerHTML = "<div style='display:flex;justify-content:center;align-items:center;height:100vh;background:#f3f4f6;font-family:sans-serif;color:#6b7280;'><h1>Access Cancelled</h1></div>";
+                }
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', checkAccess);
+    </script>
+
+    <div id="protected-content" style="display: none;">
+
+        <div class="w-full max-w-md mx-auto">
+            <div class="text-center mb-6 mt-2">
+                <h1 class="text-xl font-black text-gray-900 tracking-tight" id="college-name">Exam Centre</h1>
+                <p class="text-xs font-bold text-indigo-600 uppercase tracking-widest mt-1">Student Seating Portal (Test Mode)</p>
             </div>
+
+            <div id="status" class="text-center text-sm font-medium text-indigo-600 mb-4 animate-pulse"></div>
+
+            <div id="search-section" class="hidden bg-white p-6 rounded-2xl shadow-xl shadow-indigo-50 border border-indigo-100">
+                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Enter Register Number</label>
+                <div class="flex gap-2">
+                    <input type="text" id="reg-input"
+                        class="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:border-indigo-500 outline-none uppercase font-mono text-lg font-bold text-gray-800 placeholder-gray-300 transition-all"
+                        placeholder="e.g. ABCDE123">
+                    <button onclick="searchStudent()"
+                        class="bg-indigo-600 text-white px-5 rounded-xl font-bold hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-200 active:scale-95">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5"
+                            stroke="currentColor" class="w-6 h-6">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <div id="result-container" class="mt-8 space-y-4"></div>
+
+            <p class="text-center text-[10px] text-gray-300 mt-12 font-medium">Powered by ExamFlow</p>
         </div>
 
-        <div id="result-container" class="mt-8 space-y-4"></div>
-        
-        <p class="text-center text-[10px] text-gray-300 mt-12 font-medium">Powered by ExamFlow</p>
     </div>
+
 </body>
 </html>

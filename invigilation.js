@@ -708,20 +708,22 @@ window.sendSingleEmail = function (btn, email, name, subject, message) {
 window.toggleAdminLock = async function (key) {
     if (!invigilationSlots[key]) return;
     
-    // Toggle Admin Lock state
+    // Toggle state
     invigilationSlots[key].isAdminLocked = !invigilationSlots[key].isAdminLocked;
     
-    // LOGIC CHANGE: If Admin Lock is ENABLED, enforce Standard Lock (isLocked) too.
-    // When Admin Lock is removed later, Standard Lock remains (enabling Exchange Market).
+    // Force Standard Lock on if Admin Locked
     if (invigilationSlots[key].isAdminLocked) {
         invigilationSlots[key].isLocked = true;
     }
     
+    // 1. Render immediately (Optimistic UI update)
+    renderSlotsGridAdmin();
+    
     const status = invigilationSlots[key].isAdminLocked ? "LOCKED" : "UNLOCKED";
     logActivity("Admin Posting Lock", `Admin ${status} slot ${key} for posting.`);
     
+    // 2. Sync to Cloud
     await syncSlotsToCloud();
-    renderSlotsGridAdmin();
 }
 
 window.toggleWeekAdminLock = async function (monthStr, weekNum, lockState) {
@@ -1027,7 +1029,8 @@ function renderStaffTable() {
                         <div class="text-xs text-gray-500 mt-0.5"><span class="font-semibold text-gray-600">${safeDept}</span> | ${staff.designation || ""} ${activeRoleLabel}</div>
                     </div>
                 </div>
-                <div class="md:hidden">
+
+<div class="md:hidden">
                     <div class="flex justify-between items-start mb-3">
                         <div class="flex items-center gap-3">
                              <div class="mr-1">${liveIcon}</div> 
@@ -1038,11 +1041,53 @@ function renderStaffTable() {
                             </div>
                         </div>
                     </div>
+                    
+                    <div class="flex items-center justify-between bg-gray-50 p-2 rounded-lg border border-gray-100 text-xs mb-3">
+                        <div class="text-center w-1/3">
+                            <div class="text-[9px] text-gray-400 uppercase font-bold tracking-wider">Target</div>
+                            <div class="font-mono text-gray-600 font-bold text-sm">${target}</div>
+                        </div>
+                        <div class="text-center w-1/3 border-l border-gray-200">
+                            <div class="text-[9px] text-gray-400 uppercase font-bold tracking-wider">Done</div>
+                            <div>
+                                <button onclick="openCompletedDutiesModal('${staff.email}')" 
+                                        class="font-mono text-blue-600 font-bold text-sm hover:underline decoration-blue-300">
+                                    ${done}
+                                </button>
+                            </div>
+                        </div>
+                        <div class="text-center w-1/3 border-l border-gray-200">
+                            <div class="text-[9px] text-gray-400 uppercase font-bold tracking-wider">Pending</div>
+                            <div class="font-mono font-bold text-sm ${statusColor}">${pending}</div>
+                        </div>
+                    </div>
                 </div>
+
+
+
+
+
+                
             </td>
-            <td class="hidden md:table-cell px-6 py-3 text-center font-mono text-sm text-gray-600">${target}</td>
-            <td class="hidden md:table-cell px-6 py-3 text-center font-mono text-sm font-bold">${done}</td>
-            <td class="hidden md:table-cell px-6 py-3 text-center font-mono text-sm ${statusColor}">${pending}</td>
+
+
+            <td class="hidden md:table-cell px-6 py-3 text-center font-mono text-sm text-gray-600" title="Target Duty Load">${target}</td>
+            
+            <td class="hidden md:table-cell px-6 py-3 text-center font-mono text-sm font-bold">
+                <button onclick="openCompletedDutiesModal('${staff.email}')" 
+                        class="text-blue-600 hover:text-blue-800 hover:underline decoration-blue-300 underline-offset-4 transition px-2 py-1 rounded hover:bg-blue-50" 
+                        title="Click to view duty history">
+                    ${done}
+                </button>
+            </td>
+            
+            <td class="hidden md:table-cell px-6 py-3 text-center font-mono text-sm ${statusColor}" title="Pending Duties">${pending}</td>
+
+
+
+
+
+
             <td class="block md:table-cell px-0 md:px-6 py-0 md:py-3 md:text-right md:whitespace-nowrap">${actionButtons}</td>
         `;
         ui.staffTableBody.appendChild(row);
@@ -1450,7 +1495,6 @@ function renderExchangeMarket(myEmail) {
     });
 }
 
-
 window.openDayDetail = function (dateStr, email) {
     document.getElementById('modal-day-title').textContent = dateStr;
     const container = document.getElementById('modal-sessions-container');
@@ -1505,7 +1549,7 @@ window.openDayDetail = function (dateStr, email) {
                 else isAssignedFN = true;
             }
             
-            // Track Admin Locks for Bottom Section
+            // Track Admin Locks
             if (isAdminLocked) {
                 if (isAN) adminLockAN = true;
                 else adminLockFN = true;
@@ -1514,7 +1558,6 @@ window.openDayDetail = function (dateStr, email) {
             // --- Action Buttons ---
             let actionHtml = "";
             
-            // [PRIORITY 1: DATE RESTRICTION]
             if (isRestricted) {
                  if (isAssigned) {
                      actionHtml = `<div class="w-full bg-gray-100 text-gray-500 border border-gray-200 text-xs py-2 rounded font-bold text-center">✅ Duty Assigned ${restrictLabel}</div>`;
@@ -1524,7 +1567,6 @@ window.openDayDetail = function (dateStr, email) {
                      actionHtml = `<div class="w-full bg-gray-50 text-gray-400 border border-gray-100 text-xs py-2 rounded text-center italic">Actions Disabled ${restrictLabel}</div>`;
                  }
             } 
-            // [PRIORITY 2: ADMIN POSTING LOCK]
             else if (isAdminLocked) {
                  if (isAssigned) {
                      if (isPostedByMe) {
@@ -1533,13 +1575,9 @@ window.openDayDetail = function (dateStr, email) {
                          actionHtml = `<div class="w-full bg-green-50 text-green-700 border border-green-200 text-xs py-2 rounded font-bold text-center flex flex-col items-center gap-1"><span>✅ Assigned</span><span class="text-[9px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded">🛡️ Admin Finalizing</span></div>`;
                      }
                  } else {
-                     // BLOCK Volunteering & Unavailability
-                     actionHtml = `<div class="w-full bg-amber-50 text-amber-600 border border-amber-200 text-xs py-3 rounded font-bold text-center flex items-center justify-center gap-2 shadow-sm">
-                        <span>🛡️</span> Posting Restricted by Admin
-                     </div>`;
+                     actionHtml = `<div class="w-full bg-amber-50 text-amber-600 border border-amber-200 text-xs py-3 rounded font-bold text-center flex items-center justify-center gap-2 shadow-sm"><span>🛡️</span> Posting Restricted by Admin</div>`;
                  }
             }
-            // [PRIORITY 3: STANDARD LOGIC]
             else {
                 if (isAssigned) {
                     if (isPostedByMe) {
@@ -1562,9 +1600,7 @@ window.openDayDetail = function (dateStr, email) {
                 }
             }
 
-            // Reserve & Staff List
-            const reserves = getSlotReserves(key);
-            const reserveEmails = reserves.map(r => r.email);
+            // --- STAFF LIST RENDER (FIXED) ---
             let staffListHtml = '';
             if (slot.assigned.length > 0) {
                 const listItems = slot.assigned.map(st => {
@@ -1572,11 +1608,11 @@ window.openDayDetail = function (dateStr, email) {
                     if (!s) return '';
                     const isExchanging = slot.exchangeRequests && slot.exchangeRequests.includes(st);
                     const statusIcon = isExchanging ? "⏳" : "✅";
-                    const isReserve = reserveEmails.includes(st);
-                    const reserveBadge = isReserve ? `<span class="bg-yellow-100 text-yellow-800 text-[10px] px-1 rounded ml-1 border border-yellow-200">Reserve</span>` : "";
-                    const rowClass = isReserve ? "bg-yellow-50/50" : "bg-white";
-                    return `<div class="flex justify-between items-center text-xs ${rowClass} p-1.5 rounded border border-gray-100 mb-1"><span class="font-bold text-gray-700 flex items-center">${statusIcon} <span class="ml-1">${s.name}</span>${reserveBadge}</span></div>`;
+                    
+                    // Fixed: Removed Reference to reserveBadge
+                    return `<div class="flex justify-between items-center text-xs bg-white p-1.5 rounded border border-gray-100 mb-1"><span class="font-bold text-gray-700 flex items-center">${statusIcon} <span class="ml-1">${s.name}</span></span></div>`;
                 }).join('');
+                
                 staffListHtml = `<div class="mt-3 pt-2 border-t border-gray-200"><div class="flex justify-between items-center mb-1.5"><div class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Assigned Staff</div></div><div class="space-y-0.5 max-h-24 overflow-y-auto custom-scroll">${listItems}</div></div>`;
             }
 
@@ -1587,25 +1623,13 @@ window.openDayDetail = function (dateStr, email) {
     }
 
     // 3. ADVANCE / GENERAL UNAVAILABILITY SECTION
-    
-    // [RESTRICTION CHECK FOR ADVANCE SECTION]
     if (isRestricted) {
-         let reasonMsg = "Editing disabled.";
-         if (isPast) reasonMsg = "Date in Past";
-         if (isTooFar) reasonMsg = "Date > 3 Months ahead";
-         
-         container.innerHTML += `
-            <div class="mt-4 pt-4 border-t border-gray-200">
-                <div class="bg-gray-100 p-3 rounded-lg border border-gray-200 text-center">
-                    <p class="text-xs text-gray-500 font-bold italic">🚫 Unavailability Editing Locked (${reasonMsg})</p>
-                </div>
-            </div>`;
-         
+         let reasonMsg = isPast ? "Date in Past" : "Date > 3 Months ahead";
+         container.innerHTML += `<div class="mt-4 pt-4 border-t border-gray-200"><div class="bg-gray-100 p-3 rounded-lg border border-gray-200 text-center"><p class="text-xs text-gray-500 font-bold italic">🚫 Unavailability Editing Locked (${reasonMsg})</p></div></div>`;
          window.openModal('day-detail-modal');
          return;
     }
 
-    // --- NORMAL MODE: Render Toggle Buttons ---
     const adv = advanceUnavailability[dateStr] || { FN: [], AN: [] };
     const fnUnavail = adv.FN && adv.FN.some(u => (typeof u === 'string' ? u === email : u.email === email));
     const anUnavail = adv.AN && adv.AN.some(u => (typeof u === 'string' ? u === email : u.email === email));
@@ -1625,7 +1649,6 @@ window.openDayDetail = function (dateStr, email) {
     const anyAdminLock = adminLockFN || adminLockAN;
 
     let wholeClass, wholeText, wholeDisabled;
-
     if (anyAdminLock) {
         wholeClass = "bg-amber-50 text-amber-500 border-amber-100 cursor-not-allowed";
         wholeText = "🛡️ Whole Day Locked by Admin";
@@ -1642,9 +1665,7 @@ window.openDayDetail = function (dateStr, email) {
 
     container.innerHTML += `
         <div class="mt-4 pt-4 border-t border-gray-200">
-            <h4 class="text-xs font-bold text-indigo-900 uppercase mb-2 flex items-center gap-2">
-                <span>🗓️</span> General Unavailability (OD/DL/Leave)
-            </h4>
+            <h4 class="text-xs font-bold text-indigo-900 uppercase mb-2 flex items-center gap-2"><span>🗓️</span> General Unavailability (OD/DL/Leave)</h4>
             <div class="bg-indigo-50 p-3 rounded-lg border border-indigo-100">
                 <p class="text-[10px] text-gray-600 mb-3">Mark leave for sessions or the whole day.</p>
                 <div class="grid grid-cols-2 gap-2 mb-2">
@@ -1658,6 +1679,7 @@ window.openDayDetail = function (dateStr, email) {
 
     window.openModal('day-detail-modal');
 }
+
 
 // --- HELPERS & ACTIONS ---
 function updateHeaderButtons(currentView) {
@@ -2014,9 +2036,16 @@ window.toggleWholeDay = async function(dateStr, email) {
 
 // --- STANDARD EXPORTS ---
 window.toggleLock = async function (key) {
+    if (!invigilationSlots[key]) return;
+
     invigilationSlots[key].isLocked = !invigilationSlots[key].isLocked;
+    
+    // 1. Render immediately
+    renderSlotsGridAdmin();
+
     const status = invigilationSlots[key].isLocked ? "LOCKED" : "UNLOCKED";
     logActivity("Session Lock Toggle", `Admin ${status} session ${key}.`);
+    
     await syncSlotsToCloud();
 }
 
@@ -2217,199 +2246,47 @@ window.waNotify = function (key) {
     window.open(`https://wa.me/${phone}?text=${msg}`, '_blank');
 }
 
+// LIGHTWEIGHT VERSION: Just refreshes the slots from the cloud
 window.calculateSlotsFromSchedule = async function () {
     const btn = document.querySelector('button[onclick="calculateSlotsFromSchedule()"]');
-    if (btn) { btn.disabled = true; btn.innerText = "⏳ Analyzing..."; }
+    if (btn) { btn.disabled = true; btn.innerText = "⏳ Refreshing Slots..."; }
 
     try {
-        if(!currentCollegeId) throw new Error("You are not logged in or College ID is missing.");
+        if(!currentCollegeId) throw new Error("You are not logged in.");
 
-        updateSyncStatus("Downloading...", "neutral");
-        const mainRef = doc(db, "colleges", currentCollegeId);
-        const mainSnap = await getDoc(mainRef);
-        if (!mainSnap.exists()) throw new Error("Cloud data unavailable.");
-
-        let fullData = mainSnap.data();
+        updateSyncStatus("Fetching Slots...", "neutral");
         
-        // Fetch Chunks
-        const dataColRef = collection(db, "colleges", currentCollegeId, "data");
-        const q = query(dataColRef, orderBy("index")); 
-        const querySnapshot = await getDocs(q);
-        let fullPayload = "";
-        querySnapshot.forEach(doc => { 
-            if (doc.data().payload) fullPayload += doc.data().payload; 
-        });
+        // 1. Fetch ONLY the slots document
+        const { db, doc, getDoc } = window.firebase;
+        const slotsRef = doc(db, "colleges", currentCollegeId, "system_data", "slots");
+        const snapshot = await getDoc(slotsRef);
 
-        if (fullPayload) {
-            try {
-                const bulkData = JSON.parse(fullPayload);
-                fullData = { ...fullData, ...bulkData };
-            } catch(e) { console.error("Chunk parse error", e); }
-        }
-
-        const students = JSON.parse(fullData.examBaseData || '[]');
-        const scribeList = JSON.parse(fullData.examScribeList || '[]');
-        const scribeRegNos = new Set(scribeList.map(s => s.regNo));
-
-        if (students.length === 0) {
-            alert("⚠️ No student data found in the cloud.\nPlease save to cloud in the main app first.");
-            return;
-        }
-
-        // 2. Calculate Active Sessions (Stream-Wise Split)
-        const activeSessions = {};
-        
-        students.forEach(s => {
-            const date = s.Date ? s.Date.trim() : "";
-            const time = s.Time ? s.Time.trim() : "";
-            if(!date || !time) return;
-
-            const key = `${date} | ${time}`;
-            if (!activeSessions[key]) {
-                // We track Normal and Scribes separately per stream
-                activeSessions[key] = { 
-                    normalStreams: {}, 
-                    scribeStreams: {}, 
-                    totalStudents: 0,
-                    totalScribes: 0 
-                };
-            }
-
-            activeSessions[key].totalStudents++;
-            const strm = s.Stream || "Regular";
-
-            if (scribeRegNos.has(s['Register Number'])) {
-                // Track Scribe by Stream
-                if (!activeSessions[key].scribeStreams[strm]) activeSessions[key].scribeStreams[strm] = 0;
-                activeSessions[key].scribeStreams[strm]++;
-                activeSessions[key].totalScribes++;
-            } else {
-                // Track Normal by Stream
-                if (!activeSessions[key].normalStreams[strm]) activeSessions[key].normalStreams[strm] = 0;
-                activeSessions[key].normalStreams[strm]++;
-            }
-        });
-
-        let changesLog = [];
-        let removalLog = []; 
-        let newSlots = { ...invigilationSlots }; 
-        let hasChanges = false;
-
-        // Cleanup Legacy
-        Object.keys(newSlots).forEach(k => {
-            if (newSlots[k].courses) { delete newSlots[k].courses; hasChanges = true; }
-        });
-
-        // 3. Process Sessions & Calculate Requirements
-        Object.keys(activeSessions).forEach(key => {
-            const data = activeSessions[key];
-            const [datePart, timePart] = key.split(' | ');
-
-            let baseRequirement = 0;
-
-            // --- A. Normal Candidates (1 Room per 30, Stream-Wise) ---
-            Object.values(data.normalStreams).forEach(count => {
-                baseRequirement += Math.ceil(count / 30);
-            });
-
-            // --- B. Scribes (1 Room per 5, Stream-Wise) ---
-            Object.values(data.scribeStreams).forEach(count => {
-                baseRequirement += Math.ceil(count / 5);
-            });
-
-            // --- C. Reserve (10% of Base, Rounded UP) ---
-            // If base is 0 (impossible here), reserve is 0. 
-            // If base is 1, reserve is ceil(0.1) = 1. Total = 2.
-            const reserve = Math.ceil(baseRequirement * 0.10);
-            const finalReq = baseRequirement + reserve; 
-
-            // Get Exam Name
-            let officialExamName = "";
-            if (typeof window.getExamName === "function") {
-                // Try to find a specific exam name matching the streams present
-                const allStreams = [...Object.keys(data.normalStreams), ...Object.keys(data.scribeStreams)];
-                for (const strm of allStreams) {
-                    officialExamName = window.getExamName(datePart, timePart, strm);
-                    if (officialExamName) break;
-                }
-                if (!officialExamName) officialExamName = window.getExamName(datePart, timePart, "Regular");
-            }
-
-            // Create or Update Slot
-            if (!newSlots[key]) {
-                newSlots[key] = {
-                    required: finalReq,
-                    reserveCount: reserve,
-                    assigned: [],
-                    unavailable: [],
-                    isLocked: true,
-                    examName: officialExamName || "Exam",
-                    scribeCount: data.totalScribes,
-                    studentCount: data.totalStudents
-                };
-                changesLog.push(`🆕 ${key}: Added (Req: ${finalReq}, Res: ${reserve})`);
-                hasChanges = true;
-            } else {
-                // Requirements Check: Only Increase
-                if (newSlots[key].required !== finalReq) {
-                    if (finalReq > newSlots[key].required) {
-                        changesLog.push(`🔄 ${key}: Req increased ${newSlots[key].required} -> ${finalReq}`);
-                        newSlots[key].required = finalReq;
-                        newSlots[key].reserveCount = reserve;
-                        hasChanges = true;
-                    }
-                }
-                // Metadata Update
-                if(newSlots[key].studentCount !== data.totalStudents || newSlots[key].scribeCount !== data.totalScribes) {
-                     newSlots[key].studentCount = data.totalStudents;
-                     newSlots[key].scribeCount = data.totalScribes;
-                     // Ensure reserve field exists
-                     if(newSlots[key].reserveCount === undefined) newSlots[key].reserveCount = reserve;
-                     hasChanges = true;
-                }
-                if (officialExamName && newSlots[key].examName !== officialExamName) {
-                    newSlots[key].examName = officialExamName;
-                    hasChanges = true;
-                }
-            }
-        });
-
-        // Ghost Detection
-        Object.keys(newSlots).forEach(existingKey => {
-            if (!activeSessions[existingKey]) {
-                if (newSlots[existingKey].isVirtual) return; // Ignore history records
-                removalLog.push({ key: existingKey });
-            }
-        });
-
-        if (!hasChanges && removalLog.length === 0) {
-            updateSyncStatus("Synced", "success");
-            alert(`✅ Cloud Check Complete.\n\nAnalyzed ${students.length} students.\nData matches perfectly.`);
-        } else {
-            let msg = "";
-            if (changesLog.length > 0) msg += "⚠️ UPDATES FOUND:\n" + changesLog.join('\n') + "\n\n";
+        if (snapshot.exists()) {
+            const data = snapshot.data();
+            const cloudSlots = JSON.parse(data.examInvigilationSlots || '{}');
             
-            if (removalLog.length > 0) {
-                msg += `🗑️ OBSOLETE SESSIONS FOUND (${removalLog.length}):\n`;
-                const limit = 10;
-                removalLog.slice(0, limit).forEach(r => msg += `• ${r.key}\n`);
-                if (removalLog.length > limit) msg += `...and ${removalLog.length - limit} others.\n`;
-                msg += "\nThese sessions have no students in the current data. They will be removed.";
+            // 2. Update Local State
+            invigilationSlots = cloudSlots;
+            localStorage.setItem('examInvigilationSlots', JSON.stringify(invigilationSlots));
+            
+            if (data.invigAdvanceUnavailability) {
+                advanceUnavailability = JSON.parse(data.invigAdvanceUnavailability || '{}');
+                localStorage.setItem('invigAdvanceUnavailability', data.invigAdvanceUnavailability);
             }
 
-            if (confirm(msg + "\n\nProceed with synchronization?")) {
-                removalLog.forEach(r => delete newSlots[r.key]);
-                invigilationSlots = newSlots;
-                await syncSlotsToCloud();
-                renderSlotsGridAdmin();
-                alert("✅ Sync Complete. System updated.");
-            }
+            // 3. Update UI
+            if (typeof renderSlotsGridAdmin === 'function') renderSlotsGridAdmin();
+            
+            alert("✅ Synced! Loaded latest invigilation requirements from cloud.");
+            updateSyncStatus("Synced", "success");
+        } else {
+            alert("⚠️ No slot data found in cloud. Please save data in the main Exam App first.");
         }
 
     } catch (e) {
-        console.error("Sync Error:", e);
-        alert("❌ Sync Error: " + e.message);
-        updateSyncStatus("Check Failed", "error");
+        console.error("Slot Sync Error:", e);
+        alert("❌ Error: " + e.message);
+        updateSyncStatus("Sync Failed", "error");
     } finally {
         if (btn) { btn.disabled = false; btn.innerText = "Check Cloud for Updates"; }
     }
@@ -2610,35 +2487,7 @@ window.runAutoAllocation = async function () {
     await syncSlotsToCloud();
     renderSlotsGridAdmin();
 
-    // --- NEW: Bulk Reserve Notification Check ---
-    const allReserves = [];
-    // Collect reserves from assigned slots
-    targetSlots.forEach(t => {
-        const r = getSlotReserves(t.key);
-        if (r.length > 0) {
-            allReserves.push({ key: t.key, reserves: r });
-        }
-    });
-
-    if (allReserves.length > 0) {
-        const totalR = allReserves.reduce((acc, curr) => acc + curr.reserves.length, 0);
-        if (confirm(`✅ Session Auto-Assign Complete!\nFilled ${assignedCount} positions.\n\n⚠️ Reserves Identified: ${totalR} staff across ${allReserves.length} sessions.\n\nNotify them via Email?`)) {
-            updateSyncStatus("Sending Alerts...", "neutral");
-            let sentCount = 0;
-            for (const item of allReserves) {
-                for (const staff of item.reserves) {
-                    try {
-                        await sendSingleEmail(null, staff.email, staff.name, "Reserve Duty Alert", `You are on RESERVE duty for ${item.key}. Please be available.`);
-                        sentCount++;
-                    } catch (e) { }
-                }
-            }
-            updateSyncStatus("Done", "success");
-            alert(`Sent ${sentCount} reserve notifications.`);
-        }
-    } else {
-        alert(`✅ Session Auto-Assign Complete!\nFilled ${assignedCount} positions.`);
-    }
+   alert(`✅ Session Auto-Assign Complete!\nFilled ${assignedCount} positions.`);
 }
 //-------------------
 
@@ -3924,9 +3773,7 @@ function renderAdminTodayStats() {
 
 
 
-
-
-// Updated: Show Completed Duties Modal (AY Filtered + Neat UI)
+// Updated: Show Completed Duties Modal (AY Filtered + Neat UI + Admin-Only WhatsApp Share)
 window.openCompletedDutiesModal = function (email) {
     const list = document.getElementById('completed-duties-list');
     if (!list) return;
@@ -3975,7 +3822,6 @@ window.openCompletedDutiesModal = function (email) {
             const [date, time] = item.key.split(' | ');
             const isSup = item.role !== "Invigilator";
 
-            // Neat styling for list items
             const itemHtml = `
                 <div class="flex justify-between items-center p-3 bg-white border border-gray-100 rounded-lg hover:bg-gray-50 transition shadow-sm mb-2">
                     <div class="flex items-center gap-3">
@@ -3998,8 +3844,64 @@ window.openCompletedDutiesModal = function (email) {
         });
     }
 
+    // --- 4. NEW: INJECT WHATSAPP SHARE BUTTON (ADMIN ONLY) ---
+    const footer = document.querySelector('#completed-duties-modal .text-right');
+    
+    if (footer) {
+        let waBtn = '';
+        
+        // CHECK isAdmin HERE
+        if (history.length > 0 && typeof isAdmin !== 'undefined' && isAdmin) {
+            // Find staff phone
+            const staff = staffData.find(s => s.email === email);
+            const phone = staff && staff.phone ? staff.phone.replace(/\D/g, '') : "";
+            const validPhone = phone.length >= 10 ? (phone.length === 10 ? "91" + phone : phone) : "";
+            
+            // Build Message
+            let msg = `*Duty History: ${staffName}*\nAY: ${acYear.label}\n----------------\n`;
+
+            history.forEach((h, i) => {
+                const [dStr, tStr] = h.key.split(' | ');
+                const [d, m, y] = dStr.split('.'); // Get full date components
+                const shortYear = y.slice(-2);     // Extract last 2 digits (e.g., 2025 -> 25)
+                
+                const isAN = (tStr.includes("PM") || tStr.startsWith("12"));
+                const sess = isAN ? "AN" : "FN";
+                
+                // Format: DD.MM.YY
+                msg += `${i+1}. ${d}.${m}.${shortYear} (${sess}) - ${h.role}\n`;
+            });
+
+
+
+            
+            msg += `----------------\n*Total: ${history.length}*`;
+            
+            const link = validPhone ? `https://wa.me/${validPhone}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`;
+            
+            waBtn = `
+                <a href="${link}" target="_blank" class="inline-flex items-center gap-1 bg-green-500 hover:bg-green-600 text-white text-xs font-bold px-3 py-1.5 rounded transition shadow-sm mr-2 no-underline">
+                    <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.008-.57-.008-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></svg>
+                    WhatsApp
+                </a>`;
+        }
+        
+        // Update Footer HTML
+        footer.innerHTML = `
+            ${waBtn}
+            <button onclick="closeModal('completed-duties-modal')" class="text-sm text-gray-500 hover:underline">Close</button>
+        `;
+    }
+
     window.openModal('completed-duties-modal');
 }
+
+
+
+
+
+
+
 
 window.runWeeklyAutoAssign = async function (monthStr, weekNum) {
     // 1. CHECK: Confirm Intent
@@ -4213,34 +4115,7 @@ window.runWeeklyAutoAssign = async function (monthStr, weekNum) {
     renderSlotsGridAdmin();
 
     // --- Bulk Reserve Notification Check (Unchanged) ---
-    const allReserves = [];
-    targetSlots.forEach(t => {
-        const r = getSlotReserves(t.key);
-        if (r.length > 0) {
-            allReserves.push({ key: t.key, reserves: r });
-        }
-    });
-
-    if (allReserves.length > 0) {
-        const totalR = allReserves.reduce((acc, curr) => acc + curr.reserves.length, 0);
-        if (confirm(`✅ Session Auto-Assign Complete!\nFilled ${assignedCount} positions.\n\n⚠️ Reserves Identified: ${totalR} staff across ${allReserves.length} sessions.\n\nNotify them via Email?`)) {
-            updateSyncStatus("Sending Alerts...", "neutral");
-            let sentCount = 0;
-            for (const item of allReserves) {
-                for (const staff of item.reserves) {
-                    try {
-                        // Assuming sendSingleEmail is defined elsewhere
-                        await sendSingleEmail(null, staff.email, staff.name, "Reserve Duty Alert", `You are on RESERVE duty for ${item.key}. Please be available.`);
-                        sentCount++;
-                    } catch (e) { }
-                }
-            }
-            updateSyncStatus("Done", "success");
-            alert(`Sent ${sentCount} reserve notifications.`);
-        }
-    } else {
-        alert(`✅ Session Auto-Assign Complete!\nFilled ${assignedCount} positions.`);
-    }
+    alert(`✅ Session Auto-Assign Complete!\nFilled ${assignedCount} positions.`);
 }
 
 window.viewAutoAssignLogs = async function () {
@@ -6105,13 +5980,7 @@ window.saveManualAllocation = async function () {
         window.closeModal('manual-allocation-modal');
         renderSlotsGridAdmin();
 
-        // --- NEW: Trigger Reserve Notification ---
-        const reserves = getSlotReserves(key);
-        if (reserves.length > 0) {
-            if (confirm(`✅ Allocation Saved.\n\n⚠️ Reserves Identified: ${reserves.length}\n(These are staff assigned beyond the required count).\n\nNotify them now?`)) {
-                await notifySlotReserves(key);
-            }
-        }
+       
     }
 }
 window.switchAdminTab = function (tabName) {
@@ -7857,6 +7726,273 @@ window.showLiveStaffModal = function() {
 
     if(typeof UiModal !== 'undefined') UiModal.show("Live Status", html);
     else alert(online.map(o => o.name).join('\n'));
+};
+// ==========================================
+// 📄 PDF GENERATION LOGIC (Added V25)
+// ==========================================
+
+// 1. ATTENDANCE REGISTER PDF
+window.downloadAttendancePDF = function () {
+    if (!confirm("Download Attendance Register PDF?")) return;
+
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+    const acYear = getCurrentAcademicYear();
+    const collegeName = collegeData.examCollegeName || "Government Victoria College";
+    
+    // --- Data Gathering (Same as Print) ---
+    const facultyMap = new Map();
+    const sortedKeys = Object.keys(invigilationSlots).sort((a, b) => parseDate(a) - parseDate(b));
+
+    sortedKeys.forEach(key => {
+        const slot = invigilationSlots[key];
+        const dateObj = parseDate(key);
+        if (dateObj < acYear.start || dateObj > acYear.end) return;
+        if (!slot.attendance || slot.attendance.length === 0) return;
+
+        const [dateStr, timeStr] = key.split(' | ');
+        const sessionType = (timeStr.includes("PM") || timeStr.startsWith("12")) ? "AN" : "FN";
+
+        slot.attendance.forEach(email => {
+            if (!facultyMap.has(email)) {
+                const staff = staffData.find(s => s.email === email);
+                facultyMap.set(email, {
+                    name: staff ? staff.name : getNameFromEmail(email),
+                    dept: staff ? staff.dept : "N/A",
+                    designation: staff ? staff.designation : "N/A",
+                    sessions: []
+                });
+            }
+            facultyMap.get(email).sessions.push(`${dateStr} (${sessionType})`);
+        });
+    });
+
+    const facultyData = Array.from(facultyMap.values()).sort((a, b) => {
+        if (a.dept !== b.dept) return a.dept.localeCompare(b.dept);
+        return a.name.localeCompare(b.name);
+    });
+
+    if (facultyData.length === 0) return alert("No attendance records found.");
+
+    // --- Table Body ---
+    const tableData = facultyData.map((f, index) => [
+        index + 1,
+        f.name,
+        f.dept,
+        f.designation,
+        f.sessions.length,
+        f.sessions.join(', ')
+    ]);
+
+    // --- Generate PDF ---
+    // Header
+    doc.setFillColor(30, 41, 59); // Dark Blue Header
+    doc.rect(0, 0, 210, 25, 'F');
+    
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(14);
+    doc.text(collegeName.toUpperCase(), 14, 10);
+    
+    doc.setFontSize(10);
+    doc.text(`Faculty Attendance Register: AY ${acYear.label}`, 14, 18);
+    
+    // Table
+    doc.autoTable({
+        head: [['#', 'Name', 'Dept', 'Desig', 'Count', 'Sessions Attended']],
+        body: tableData,
+        startY: 30,
+        theme: 'grid',
+        headStyles: { fillColor: [30, 41, 59], textColor: 255, fontStyle: 'bold' },
+        styles: { fontSize: 8, cellPadding: 2, valign: 'middle' },
+        columnStyles: {
+            0: { cellWidth: 10, halign: 'center' },
+            1: { cellWidth: 40 },
+            4: { cellWidth: 15, halign: 'center', fontStyle: 'bold' },
+            5: { cellWidth: 'auto' }
+        }
+    });
+
+    // Footer
+    const finalY = doc.lastAutoTable.finalY + 15;
+    doc.setTextColor(0, 0, 0);
+    doc.setFontSize(10);
+    doc.text("Senior Asst. Superintendent", 14, finalY);
+    doc.text("Chief Superintendent", 150, finalY);
+
+    doc.save(`Attendance_Register_${acYear.label}.pdf`);
+};
+
+
+// 2. VACATION REPORT PDF (Corrected: 7 Columns)
+window.downloadVacationPDF = function() {
+    const startStr = document.getElementById('vac-start').value;
+    const endStr = document.getElementById('vac-end').value;
+
+    if (!startStr || !endStr) return alert("Please select start and end dates.");
+    
+    const startDate = new Date(startStr);
+    const endDate = new Date(endStr);
+
+    // Helper: Check for Holidays (Sundays, Saturdays, Extra Holidays)
+    const isHoliday = (d) => {
+        const day = d.getDay();
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        const dateString = `${yyyy}-${mm}-${dd}`;
+        return (day === 0 || day === 6 || vacationExtraHolidays.has(dateString));
+    };
+
+    const reportData = [];
+
+    // --- 1. GATHER DATA (Exact match to Print Logic) ---
+    staffData.forEach(staff => {
+        if (staff.status === 'archived') return;
+
+        const dutyDates = [];   // For unique dates count
+        const rawSessions = []; // For displaying FN/AN details
+
+        Object.keys(invigilationSlots).forEach(key => {
+            const slot = invigilationSlots[key];
+            const dateObj = parseDate(key);
+            
+            // Check Range & Attendance
+            if (dateObj >= startDate && dateObj <= endDate && slot.attendance && slot.attendance.includes(staff.email)) {
+                const [dStr, tStr] = key.split(' | ');
+                const isAN = (tStr.includes("PM") || tStr.startsWith("12:") || tStr.startsWith("12."));
+                const sessCode = isAN ? "AN" : "FN";
+                
+                // Add Session Detail
+                rawSessions.push({
+                    dateObj: dateObj,
+                    isAN: isAN,
+                    str: `${dStr} (${sessCode})`
+                });
+
+                // Add to Unique Dates
+                const dateKey = dateObj.toDateString();
+                if (!dutyDates.some(d => d.toDateString() === dateKey)) {
+                    dutyDates.push(dateObj);
+                }
+            }
+        });
+
+        if (dutyDates.length === 0) return;
+
+        // Sort Dates & Sessions
+        dutyDates.sort((a, b) => a - b);
+        rawSessions.sort((a, b) => {
+            const timeDiff = a.dateObj - b.dateObj;
+            if (timeDiff !== 0) return timeDiff;
+            return a.isAN ? 1 : -1;
+        });
+
+        // Calculate Intervening Holidays
+        const interveningDates = [];
+        for (let i = 0; i < dutyDates.length - 1; i++) {
+            const current = dutyDates[i];
+            const next = dutyDates[i+1];
+            let temp = new Date(current); temp.setDate(temp.getDate() + 1);
+            const gapDates = [];
+            let isGapValid = true;
+
+            while (temp < next) {
+                if (!isHoliday(temp)) { isGapValid = false; break; }
+                gapDates.push(new Date(temp));
+                temp.setDate(temp.getDate() + 1);
+            }
+            if (isGapValid && gapDates.length > 0) {
+                gapDates.forEach(gd => interveningDates.push(gd));
+            }
+        }
+
+        // Formats
+        const sessionsStr = rawSessions.map(s => s.str).join(', ');
+        const dutyDatesStr = dutyDates.map(d => d.toLocaleDateString('en-GB')).join(', ');
+        const interveningStr = interveningDates.map(d => d.toLocaleDateString('en-GB')).join(', ');
+
+        reportData.push({
+            name: staff.name,
+            desig: staff.designation || "",
+            dept: staff.dept || "",
+            phone: staff.phone || "-",
+            sessions: sessionsStr,
+            dutyDates: dutyDatesStr,
+            interveningDates: interveningStr || "-",
+            interveningCount: interveningDates.length,
+            total: dutyDates.length + interveningDates.length
+        });
+    });
+
+    if (reportData.length === 0) return alert("No duties found in range.");
+
+    // Sort by Dept, then Name
+    reportData.sort((a, b) => a.dept.localeCompare(b.dept) || a.name.localeCompare(b.name));
+
+    // --- 2. GENERATE PDF ---
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: "landscape" }); 
+    const collegeName = collegeData.examCollegeName || "College";
+
+    // Header
+    doc.setFillColor(30, 41, 59);
+    doc.rect(0, 0, 297, 25, 'F');
+    
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(16);
+    doc.text(collegeName.toUpperCase(), 14, 10);
+    
+    doc.setFontSize(12);
+    doc.text(`Vacation Duty & Earned Leave Report`, 14, 18);
+    doc.text(`${startStr} to ${endStr}`, 240, 18);
+
+    // Table Body (7 Columns)
+    const tableBody = reportData.map((r, i) => [
+        i + 1,
+        `${r.name}\n${r.desig}\n${r.dept}\nPh: ${r.phone}`, // Combined Staff Details
+        r.sessions,         // Sessions Attended
+        r.dutyDates,        // Unique Dates
+        r.interveningDates, // Intervening Holidays
+        r.interveningCount, // Hol. Count
+        r.total             // Total Eligible
+    ]);
+
+    doc.autoTable({
+        head: [['#', 'Staff Details', 'Sessions Attended', 'Duty Dates', 'Intervening Holidays', 'Hol.', 'Total']],
+        body: tableBody,
+        startY: 30,
+        theme: 'grid',
+        headStyles: { 
+            fillColor: [30, 41, 59], 
+            textColor: 255, 
+            fontStyle: 'bold',
+            halign: 'center'
+        },
+        styles: { 
+            fontSize: 9, 
+            cellPadding: 3, 
+            valign: 'top', // Top align for multiline text
+            overflow: 'linebreak'
+        },
+        columnStyles: {
+            0: { cellWidth: 10, halign: 'center' }, // Index
+            1: { cellWidth: 50 },                   // Staff Details (Wider)
+            2: { cellWidth: 60 },                   // Sessions (Widest)
+            3: { cellWidth: 40 },                   // Duty Dates
+            4: { cellWidth: 40 },                   // Intervening
+            5: { cellWidth: 15, halign: 'center' }, // Count
+            6: { cellWidth: 20, halign: 'center', fontStyle: 'bold', fillColor: [240, 253, 244] } // Total (Greenish)
+        }
+    });
+
+    // Footer
+    const finalY = doc.lastAutoTable.finalY + 15;
+    doc.setTextColor(0, 0, 0);
+    doc.setFontSize(10);
+    doc.text("Chief Superintendent", 250, finalY);
+
+    doc.save(`Vacation_Report_${startStr}_${endStr}.pdf`);
+    window.closeModal('vacation-report-modal');
 };
 
 // --- ATTENDANCE REPORT - PRINTABLE/PDF ---
