@@ -1323,7 +1323,26 @@ function updateLocalSlotsFromStudents() {
     const filterSessionRadio = document.getElementById('filter-session');
     const reportsSessionDropdownContainer = document.getElementById('reports-session-dropdown-container');
     const reportsSessionSelect = document.getElementById('reports-session-select');
+// --- NEW: Toggle Visibility of Future Filter ---
+    const futureFilterWrapper = document.getElementById('bulk-future-filter-wrapper');
+    const filterFutureCheckbox = document.getElementById('filter-future-only');
+    
+    function toggleFutureFilterVisibility() {
+        if (filterAllRadio && filterAllRadio.checked) {
+            if(futureFilterWrapper) futureFilterWrapper.classList.remove('hidden');
+        } else {
+            if(futureFilterWrapper) futureFilterWrapper.classList.add('hidden');
+            // Optional: Uncheck it when hiding so it doesn't stick
+            if(filterFutureCheckbox) filterFutureCheckbox.checked = false;
+        }
+    }
 
+    if (filterAllRadio && filterSessionRadio) {
+        filterAllRadio.addEventListener('change', toggleFutureFilterVisibility);
+        filterSessionRadio.addEventListener('change', toggleFutureFilterVisibility);
+        // Run once on load
+        toggleFutureFilterVisibility();
+    }
     // --- Room Allotment Elements ---
     const roomAllotmentLoader = document.getElementById('room-allotment-loader');
     const roomAllotmentContentWrapper = document.getElementById('room-allotment-content-wrapper');
@@ -1433,8 +1452,7 @@ function updateLocalSlotsFromStudents() {
         downloadReportPDF();
     });
 
-// --- MASTER PDF DOWNLOAD DISPATCHER ---
-
+// --- MASTER PDF DOWNLOAD DISPATCHER (Updated for Invigilator Summary) ---
 window.downloadReportPDF = function() {
     const reportType = (typeof lastGeneratedReportType !== 'undefined' && lastGeneratedReportType) 
                      ? lastGeneratedReportType 
@@ -1442,54 +1460,24 @@ window.downloadReportPDF = function() {
 
     console.log("📄 Requesting PDF for:", reportType);
 
-    // 1. Room-wise
-    if (reportType === "Roomwise_Seating_Report") {
-        if(typeof generateRoomWisePDF === 'function') generateRoomWisePDF();
-        else alert("Room-wise PDF generator not found.");
-        return;
-    }
+    // Map Report Types to Generator Functions
+    const generators = {
+        "Roomwise_Seating_Report": generateRoomWisePDF,
+        "Daywise_Seating_Details": generateDayWisePDF,
+        "Question_Paper_Summary": generateQuestionPaperSummaryPDF,
+        "QP_Distribution_Report": generateQPDistributionPDF,
+        "qp-wise": generateQPDistributionPDF,
+        "Scribe_Proforma": generateScribeProformaPDF,
+        "Room_Stickers": generateRoomStickersPDF,
+        "Invigilator_Summary": generateInvigilatorSummaryPDF  // <--- The New Feature
+    };
 
-    // 2. Day-wise
-    if (reportType === "Daywise_Seating_Details") {
-        if(typeof generateDayWisePDF === 'function') generateDayWisePDF();
-        else alert("Day-wise PDF generator not found.");
-        return;
+    if (generators[reportType] && typeof generators[reportType] === 'function') {
+        generators[reportType]();
+    } else {
+        alert("PDF generation for '" + reportType + "' is not yet implemented.");
     }
-
-    // 3. QP Summary
-    if (reportType === "Question_Paper_Summary") {
-        if(typeof generateQuestionPaperSummaryPDF === 'function') generateQuestionPaperSummaryPDF();
-        else alert("QP Summary generator not found.");
-        return;
-    }
-
-    // 4. QP Distribution
-    if (reportType === "QP_Distribution_Report" || reportType === "qp-wise") {
-        if(typeof generateQPDistributionPDF === 'function') generateQPDistributionPDF();
-        else alert("QP Distribution generator not found.");
-        return;
-    }
-
-    // 5. Scribe Proforma
-    if (reportType === "Scribe_Proforma") {
-        if(typeof generateScribeProformaPDF === 'function') generateScribeProformaPDF();
-        else alert("Scribe Proforma generator not found.");
-        return;
-    }
-
-    // 6. Room Stickers (NEW)
-    if (reportType === "Room_Stickers") {
-        if(typeof generateRoomStickersPDF === 'function') {
-            generateRoomStickersPDF();
-        } else {
-            alert("Room Sticker generator not found.");
-        }
-        return;
-    }
-
-    alert("PDF generation for '" + reportType + "' is coming next!");
 };
-
     
 
 
@@ -3806,8 +3794,12 @@ if (toggleButton && sidebar) {
     // --- Update Dashboard Function (Global + Today + Smart Date Picker + Data Status) ---
     // [In app.js - Replace the existing updateDashboard function]
 
+
+// --- Update Dashboard Function (Remaining / Past / Total) ---
     function updateDashboard() {
         const dashContainer = document.getElementById('data-snapshot');
+        
+        // Target Elements
         const dashStudent = document.getElementById('dash-student-count');
         const dashCourse = document.getElementById('dash-course-count');
         const dashDay = document.getElementById('dash-day-count');
@@ -3828,29 +3820,74 @@ if (toggleButton && sidebar) {
             return;
         }
 
-        // 1. UPDATE GLOBAL STATS
-        const totalStudents = allStudentData.length;
-        const uniqueCourses = new Set(allStudentData.map(s => s.Course)).size;
-        const uniqueDaysSet = new Set(allStudentData.map(s => s.Date));
-        const uniqueDays = Array.from(uniqueDaysSet).sort((a, b) => {
-            const d1 = a.split('.').reverse().join('');
-            const d2 = b.split('.').reverse().join('');
-            return d1.localeCompare(d2);
+        // --- 1. CALCULATE METRICS (REMAINING / PAST / TOTAL) ---
+        
+        // A. Setup Dates
+        const today = new Date();
+        today.setHours(0, 0, 0, 0); // Midnight today
+
+        // B. Filter Data
+        const upcomingData = []; // Date >= Today
+        const pastData = [];     // Date < Today
+
+        allStudentData.forEach(s => {
+            if (!s.Date) return;
+            // Parse DD.MM.YYYY
+            const [d, m, y] = s.Date.trim().split('.').map(Number);
+            const examDate = new Date(y, m - 1, d);
+            
+            if (examDate >= today) {
+                upcomingData.push(s);
+            } else {
+                pastData.push(s);
+            }
         });
 
-        if (dashStudent) dashStudent.textContent = totalStudents.toLocaleString();
-        if (dashCourse) dashCourse.textContent = uniqueCourses.toLocaleString();
-        if (dashDay) dashDay.textContent = uniqueDays.length.toLocaleString();
+        // C. Calculate Metrics
+        // 1. Students
+        const remStudents = upcomingData.length;
+        const pstStudents = pastData.length;
+        const totStudents = allStudentData.length;
+
+        // 2. Courses (Unique)
+        const remCourses = new Set(upcomingData.map(s => s.Course)).size;
+        const pstCourses = new Set(pastData.map(s => s.Course)).size;
+        const totCourses = new Set(allStudentData.map(s => s.Course)).size;
+
+        // 3. Days (Unique)
+        const remDays = new Set(upcomingData.map(s => s.Date)).size;
+        const pstDays = new Set(pastData.map(s => s.Date)).size;
+        const totDays = new Set(allStudentData.map(s => s.Date)).size;
+
+        // --- 2. UPDATE UI (Format: Remaining / Past / Total) ---
+        
         if (dashContainer) dashContainer.classList.remove('hidden');
 
-        // Ensure scribe list is loaded
-        if (globalScribeList.length === 0) {
-            globalScribeList = JSON.parse(localStorage.getItem(SCRIBE_LIST_KEY) || '[]');
-        }
+        // Helper: "455 / 100 / 555"
+        const formatMetric3 = (rem, past, total, label) => {
+            const remClass = rem > 0 ? "text-indigo-600" : "text-gray-400";
+            return `
+                <div class="flex items-baseline gap-1.5">
+                    <span class="${remClass} text-2xl md:text-3xl font-bold" title="Remaining">${rem.toLocaleString()}</span>
+                    <span class="text-gray-300 text-xl font-light">/</span>
+                    <span class="text-gray-500 text-lg md:text-xl font-medium" title="Past">${past.toLocaleString()}</span>
+                    <span class="text-gray-300 text-xl font-light">/</span>
+                    <span class="text-gray-400 text-sm md:text-base font-medium" title="Total">${total.toLocaleString()}</span>
+                </div>
+                <div class="text-[9px] md:text-[10px] text-gray-500 font-medium uppercase tracking-wide mt-[-2px]">
+                    Remaining / Past / Total ${label}
+                </div>
+            `;
+        };
 
-        // 2. UPDATE "TODAY'S EXAM" STATS
-        const today = new Date();
-        const todayStr = formatDateToCSV(today);
+        // Inject HTML
+        if (dashStudent) dashStudent.innerHTML = formatMetric3(remStudents, pstStudents, totStudents, "Students");
+        if (dashCourse) dashCourse.innerHTML = formatMetric3(remCourses, pstCourses, totCourses, "Courses");
+        if (dashDay) dashDay.innerHTML = formatMetric3(remDays, pstDays, totDays, "Days");
+
+
+        // --- 3. UPDATE "TODAY'S EXAM" STATS ---
+        const todayStr = formatDateToCSV(today); // Helper returns DD.MM.YYYY
 
         if (todayDateDisplay) todayDateDisplay.textContent = today.toDateString();
 
@@ -3862,7 +3899,7 @@ if (toggleButton && sidebar) {
                 if (todayGrid) todayGrid.innerHTML = todayHtml;
                 todayContainer.classList.remove('hidden');
             } else {
-                // Show "No Exams" Message (Instead of hiding)
+                // Show "No Exams" Message
                 if (todayGrid) todayGrid.innerHTML = `
                 <div class="col-span-full bg-gray-50 p-6 rounded-lg border border-gray-200 text-center">
                     <p class="text-gray-500 font-medium">No exams scheduled for today (${todayStr}).</p>
@@ -3872,34 +3909,30 @@ if (toggleButton && sidebar) {
             }
         }
 
-        // 3. POPULATE SMART DATE DROPDOWN
-        if (dateSelect && specificDateGrid) {
-            dateSelect.innerHTML = '<option value="">-- Select a Date --</option>';
+        // --- 4. POPULATE SMART DATE DROPDOWN ---
+        const uniqueDaysSet = new Set(allStudentData.map(s => s.Date));
+        const uniqueDays = Array.from(uniqueDaysSet).sort((a, b) => {
+            const d1 = a.split('.').reverse().join('');
+            const d2 = b.split('.').reverse().join('');
+            return d1.localeCompare(d2);
+        });
 
+        if (dateSelect && specificDateGrid) {
+            const currentVal = dateSelect.value;
+            dateSelect.innerHTML = '<option value="">-- Select a Date --</option>';
             uniqueDays.forEach(dateStr => {
                 const option = document.createElement('option');
                 option.value = dateStr;
                 option.textContent = dateStr;
                 dateSelect.appendChild(option);
             });
-
-            // Auto-select tomorrow if applicable (optional feature)
-            const tomorrow = new Date();
-            tomorrow.setDate(tomorrow.getDate() + 1);
-            const tomorrowStr = formatDateToCSV(tomorrow);
-
-            if (uniqueDaysSet.has(tomorrowStr)) {
-                // Optional: Pre-select tomorrow if desired
-                // dateSelect.value = tomorrowStr;
-                // updateSpecificDateGrid(tomorrowStr, specificDateGrid);
-            }
-
+            if (currentVal) dateSelect.value = currentVal;
             dateSelect.onchange = (e) => {
                 updateSpecificDateGrid(e.target.value, specificDateGrid);
             };
         }
 
-        // 4. UPDATE DATA LOADING TAB STATUS
+        // --- 5. UPDATE DATA LOADING TAB STATUS ---
         const dataTabStatusText = document.getElementById('data-tab-status-text');
         const btnDownloadCurrentCsv = document.getElementById('btn-download-current-csv');
 
@@ -3925,11 +3958,11 @@ if (toggleButton && sidebar) {
             }
         }
 
-        // 5. REFRESH CALENDAR & SETTINGS
+        // --- 6. REFRESH CALENDAR & SETTINGS ---
         if (typeof renderCalendar === 'function') renderCalendar();
         if (typeof renderExamNameSettings === 'function') renderExamNameSettings();
 
-        // --- NEW: Check for Invigilation Slots (Only if Logged In) ---
+        // Check for Invigilation Slots
         if (currentUser) {
             renderDashboardInvigilation();
         } else {
@@ -3937,6 +3970,8 @@ if (toggleButton && sidebar) {
             if (invigWrapper) invigWrapper.classList.add('hidden');
         }
     }
+
+    
 
     // ==========================================
     // 📅 CALENDAR LOGIC
@@ -10824,14 +10859,16 @@ Are you sure you want to update these records?
     }
 
 
-    // --- Event listener for Invigilator Report (Stream-Wise V2) ---
+// --- Event listener for Invigilator Report (Stream-Wise V2 + Upcoming Filter) ---
     generateInvigilatorReportButton.addEventListener('click', async () => {
         generateInvigilatorReportButton.disabled = true;
         generateInvigilatorReportButton.textContent = "Calculating...";
+        
         reportOutputArea.innerHTML = "";
         reportControls.classList.add('hidden');
         roomCsvDownloadContainer.innerHTML = "";
         lastGeneratedReportType = "";
+
         await new Promise(resolve => setTimeout(resolve, 50));
 
         try {
@@ -10854,7 +10891,6 @@ Are you sure you want to update these records?
 
             for (const student of data) {
                 const sessionKey = `${student.Date} | ${student.Time}`;
-
                 if (!sessionStats[sessionKey]) {
                     sessionStats[sessionKey] = {
                         streams: {}, // Object to hold stream-wise counts
@@ -10863,7 +10899,6 @@ Are you sure you want to update these records?
                 }
 
                 const isScribe = scribeRegNos.has(student['Register Number']);
-
                 if (isScribe) {
                     sessionStats[sessionKey].scribeCount++;
                 } else {
@@ -10877,9 +10912,35 @@ Are you sure you want to update these records?
             }
 
             // 4. Build Report Data
-            const sortedSessionKeys = Object.keys(sessionStats).sort(compareSessionStrings);
-            let tableRowsHtml = '';
+            let sortedSessionKeys = Object.keys(sessionStats).sort(compareSessionStrings);
 
+            // --- NEW: Filter "Upcoming Exams only" if checkbox is checked ---
+            const filterFutureOnly = document.getElementById('filter-future-only');
+            if (filterFutureOnly && filterFutureOnly.checked && !document.getElementById('bulk-future-filter-wrapper').classList.contains('hidden')) {
+                const today = new Date();
+                today.setHours(0, 0, 0, 0); // Midnight today
+
+                sortedSessionKeys = sortedSessionKeys.filter(key => {
+                    // key format: "DD.MM.YYYY | HH:MM AM"
+                    const [dStr, tStr] = key.split('|');
+                    if(!dStr) return false;
+                    
+                    // Robust Date Parsing
+                    const [dd, mm, yyyy] = dStr.trim().split(/[\.\-\/]/).map(Number);
+                    const sessionDate = new Date(yyyy, mm - 1, dd);
+                    
+                    // Keep if Date is Today or Future
+                    return sessionDate >= today;
+                });
+            }
+            // -------------------------------------------------------------
+
+            if (sortedSessionKeys.length === 0) {
+                alert("No upcoming exams found.");
+                return;
+            }
+
+            let tableRowsHtml = '';
             // Grand Totals
             let grandTotalInvigs = 0;
 
@@ -10901,17 +10962,15 @@ Are you sure you want to update these records?
                     const count = stats.streams[strm];
                     const requiredInvigs = Math.ceil(count / 30); // 1 per 30 rule PER STREAM
                     streamInvigTotal += requiredInvigs;
-
+                    
                     streamHtmlParts.push(`
-                    <div class="flex justify-between items-center text-sm mb-1 border-b border-gray-200 pb-1 last:border-0">
-                        <span class="font-medium text-gray-700">${strm}:</span>
-                        <span class="text-gray-600">
-                            <strong>${count}</strong> Students 
-                            <span class="text-xs text-gray-400">→</span> 
-                            <strong class="text-blue-600">${requiredInvigs}</strong> Inv
-                        </span>
-                    </div>
-                `);
+                        <div class="flex justify-between items-center text-sm mb-1 border-b border-gray-200 pb-1 last:border-0">
+                            <span class="font-medium text-gray-700">${strm}:</span>
+                            <span class="text-gray-600">
+                                <strong>${count}</strong> Students <span class="text-xs text-gray-400">→</span> <strong class="text-blue-600">${requiredInvigs}</strong> Inv
+                            </span>
+                        </div>
+                    `);
                 });
 
                 // B. Scribe Breakdown
@@ -10923,80 +10982,75 @@ Are you sure you want to update these records?
                 grandTotalInvigs += sessionTotalInvigs;
 
                 tableRowsHtml += `
-                <tr>
-                    <td style="border: 1px solid #ccc; padding: 8px; font-weight: bold;">${key}</td>
-                    <td style="border: 1px solid #ccc; padding: 8px; vertical-align: top;">
-                        ${streamHtmlParts.join('')}
-                    </td>
-                    <td style="border: 1px solid #ccc; padding: 8px; text-align: center; vertical-align: top;">
-                        <div class="text-sm">
-                            <strong>${scribeCount}</strong> Students<br>
-                            <span class="text-xs text-gray-500">↓</span><br>
-                            <strong class="text-orange-600">${scribeInvigs}</strong> Inv
-                        </div>
-                    </td>
-                    <td style="border: 1px solid #ccc; padding: 8px; text-align: center; font-weight: bold; font-size: 1.1em; vertical-align: middle; background-color: #f9fafb;">
-                        ${sessionTotalInvigs}
-                    </td>
-                </tr>
-            `;
+                    <tr>
+                        <td style="border: 1px solid #ccc; padding: 8px; font-weight: bold;">${key}</td>
+                        <td style="border: 1px solid #ccc; padding: 8px; vertical-align: top;">
+                            ${streamHtmlParts.join('')}
+                        </td>
+                        <td style="border: 1px solid #ccc; padding: 8px; vertical-align: top;">
+                             ${scribeCount > 0 ? `<strong>${scribeCount}</strong> Scribes <span class="text-xs text-gray-400">→</span> <strong class="text-orange-600">${scribeInvigs}</strong> Inv` : '<span class="text-gray-400">-</span>'}
+                        </td>
+                        <td style="border: 1px solid #ccc; padding: 8px; text-align: center; font-weight: bold; font-size: 1.1em; color: #0d9488;">
+                            ${sessionTotalInvigs}
+                        </td>
+                    </tr>
+                `;
             });
 
-            // 5. Generate HTML
-            const allPagesHtml = `
-            <div class="print-page">
-                <div class="print-header-group" style="border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 20px;">
-                    <h1>${currentCollegeName}</h1>
-                    <h2>Invigilator Requirement Summary (Stream-Wise)</h2>
-                    <h3 style="font-size: 10pt; font-style: italic; margin-top: 5px; color: #555;">
-                        <strong>Norms:</strong> 1 Invigilator per 30 Candidates (Calculated separately per stream) | 1 Invigilator per 5 Scribes
-                    </h3>
-                </div>
-                
-                <table class="invigilator-report-table" style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
-                    <thead>
-                        <tr style="background-color: #f3f4f6;">
-                            <th style="border: 1px solid #000; padding: 10px; width: 20%;">Session</th>
-                            <th style="border: 1px solid #000; padding: 10px; width: 45%;">Candidate Breakdown (Stream-wise)</th>
-                            <th style="border: 1px solid #000; padding: 10px; width: 20%; text-align: center;">Scribe Req.</th>
-                            <th style="border: 1px solid #000; padding: 10px; width: 15%; text-align: center;">Total Required</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${tableRowsHtml}
-                    </tbody>
-                    <tfoot>
-                        <tr style="background-color: #eee;">
-                            <td colspan="3" style="border: 1px solid #000; padding: 10px; text-align: right; font-weight: bold; text-transform: uppercase;">Grand Total Invigilator Duties:</td>
-                            <td style="border: 1px solid #000; padding: 10px; text-align: center; font-weight: bold; font-size: 1.2em;">${grandTotalInvigs}</td>
-                        </tr>
-                    </tfoot>
-                </table>
-                
-                <div style="margin-top: 40px; display: flex; justify-content: space-between; align-items: flex-end;">
-                    <div style="font-size: 9pt; color: #666;">Generated by ExamFlow</div>
-                    <div class="signature" style="text-align: center; width: 200px; border-top: 1px solid #000; padding-top: 5px;">
-                        Chief Superintendent
+            // Summary Row
+            tableRowsHtml += `
+                <tr style="background-color: #f0fdf4; border-top: 2px solid #0d9488;">
+                    <td colspan="3" style="border: 1px solid #ccc; padding: 10px; text-align: right; font-weight: bold;">GRAND TOTAL DUTIES REQUIRED:</td>
+                    <td style="border: 1px solid #ccc; padding: 10px; text-align: center; font-weight: bold; font-size: 1.2em; color: #0d9488;">${grandTotalInvigs}</td>
+                </tr>
+            `;
+
+            const fullHtml = `
+                <div class="print-page">
+                    <div class="print-header-group text-center mb-6 border-b-2 border-black pb-4">
+                        <h1 class="text-xl font-bold text-gray-900 uppercase">${currentCollegeName}</h1>
+                        <h2 class="text-lg font-bold text-gray-700 mt-1">Invigilator Requirement Summary</h2>
+                        <p class="text-sm text-gray-500 mt-1">Generated on: ${new Date().toLocaleString()}</p>
+                        ${filterFutureOnly && filterFutureOnly.checked ? '<span class="inline-block mt-1 px-2 py-0.5 bg-teal-100 text-teal-800 text-xs font-bold rounded">Filtered: Upcoming Exams Only</span>' : ''}
+                    </div>
+
+                    <table style="width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 10pt;">
+                        <thead>
+                            <tr style="background-color: #f3f4f6;">
+                                <th style="border: 1px solid #ccc; padding: 8px; text-align: left; width: 25%;">Date | Time</th>
+                                <th style="border: 1px solid #ccc; padding: 8px; text-align: left;">Stream-wise Requirements (1:30)</th>
+                                <th style="border: 1px solid #ccc; padding: 8px; text-align: left; width: 20%;">Scribe Requirements (1:5)</th>
+                                <th style="border: 1px solid #ccc; padding: 8px; text-align: center; width: 10%;">Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${tableRowsHtml}
+                        </tbody>
+                    </table>
+                    
+                    <div class="mt-8 text-xs text-gray-500">
+                        <p><strong>Note:</strong> Calculation based on 1 Invigilator per 30 Candidates (Normal) and 1 Invigilator per 5 Scribes.</p>
                     </div>
                 </div>
-            </div>
-        `;
+            `;
 
-            reportOutputArea.innerHTML = allPagesHtml;
+            reportOutputArea.innerHTML = fullHtml;
             reportOutputArea.style.display = 'block';
-            reportStatus.textContent = `Generated Invigilator Requirement Summary.`;
+            reportStatus.textContent = `Generated summary for ${sortedSessionKeys.length} sessions.`;
             reportControls.classList.remove('hidden');
             lastGeneratedReportType = "Invigilator_Summary";
 
         } catch (e) {
-            console.error("Error generating invigilator report:", e);
-            reportStatus.textContent = "An error occurred generating the report.";
-            reportControls.classList.remove('hidden');
+            console.error("Report Error:", e);
+            alert("Error: " + e.message);
         } finally {
             generateInvigilatorReportButton.disabled = false;
             generateInvigilatorReportButton.textContent = "Generate Invigilator Requirement Summary";
         }
     });
+
+
+    
    
     // --- Event listener for the "Print" button ---
     if (finalPrintButton) {
@@ -15408,6 +15462,111 @@ function confirmDialSelection() {
 window.closeDialModal = closeDialModal;
 window.confirmDialSelection = confirmDialSelection;
 
+
+// --- GENERATOR: INVIGILATOR REQUIREMENT SUMMARY (Fixed & Safe) ---
+function generateInvigilatorSummaryPDF() {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    
+    // Feedback Button State
+    const btn = document.getElementById('download-pdf-report-btn');
+    if(btn) { btn.disabled = true; btn.innerHTML = "⏳ Processing..."; }
+
+    try {
+        // 1. Header Information
+        const collegeName = localStorage.getItem(COLLEGE_NAME_KEY) || "University of Calicut";
+        
+        doc.setFontSize(14);
+        doc.setFont("helvetica", "bold");
+        doc.text(collegeName.toUpperCase(), 105, 15, { align: "center" });
+        
+        doc.setFontSize(11);
+        doc.text("Invigilator Requirement Summary", 105, 22, { align: "center" });
+        
+        doc.setFontSize(9);
+        doc.setFont("helvetica", "normal");
+        doc.text(`Generated on: ${new Date().toLocaleString()}`, 105, 28, { align: "center" });
+
+        // Check for "Upcoming Only" Filter Badge (matches HTML visual)
+        const filterBadge = document.querySelector('.print-header-group span.bg-teal-100');
+        if (filterBadge) {
+            doc.setTextColor(13, 148, 136); // Teal Color to match HTML
+            doc.setFont("helvetica", "bold");
+            doc.text("Filtered: Upcoming Exams Only", 105, 34, { align: "center" });
+            doc.setTextColor(0, 0, 0); // Reset color
+        }
+
+        // 2. Generate Table from HTML
+        const tableEl = document.querySelector('#report-output-area table');
+        if (!tableEl) throw new Error("Table not found in report area.");
+
+        doc.autoTable({
+            html: tableEl,
+            startY: 40,
+            theme: 'grid',
+            styles: {
+                font: 'helvetica',
+                fontSize: 9,
+                cellPadding: 3,
+                valign: 'middle',
+                lineColor: [200, 200, 200],
+                lineWidth: 0.1
+            },
+            headStyles: {
+                fillColor: [243, 244, 246], // Gray-100 background
+                textColor: 20,              // Dark Gray text
+                fontStyle: 'bold',
+                halign: 'left',
+                lineWidth: 0.1,
+                lineColor: [200, 200, 200]
+            },
+            columnStyles: {
+                0: { fontStyle: 'bold', cellWidth: 40 }, // Date | Time column
+                3: { halign: 'center', fontStyle: 'bold', textColor: [13, 148, 136] } // Total Column (Teal)
+            },
+            didParseCell: function(data) {
+                // Formatting Hacks: Clean up HTML content inside cells
+                if (data.section === 'body' && data.column.index === 1) {
+                    // Safety check for cell raw data
+                    if (data.cell && data.cell.raw && data.cell.raw.innerText) {
+                        let text = data.cell.raw.innerText;
+                        // Replace double newlines with single to save vertical space
+                        data.cell.text = text.split('\n').filter(t => t.trim().length > 0).join('\n');
+                    }
+                }
+                
+                // Style the Grand Total Row (Green Background)
+                // 🟢 FIX: Added robust safety check for row.raw and innerText
+                if (data.row && data.row.raw && typeof data.row.raw.innerText === 'string') {
+                    if (data.row.raw.innerText.toUpperCase().includes("GRAND TOTAL")) {
+                        data.cell.styles.fillColor = [240, 253, 244]; // Light Green (Green-50)
+                        data.cell.styles.textColor = [13, 148, 136];  // Teal Text
+                        data.cell.styles.fontStyle = 'bold';
+                    }
+                }
+            }
+        });
+
+        // 3. Footer Note
+        const finalY = doc.lastAutoTable.finalY || 40;
+        doc.setFontSize(8);
+        doc.setTextColor(100);
+        doc.text("Note: Calculation based on 1 Invigilator per 30 Candidates (Normal) and 1 Invigilator per 5 Scribes.", 14, finalY + 10);
+
+        // 4. Save File
+        doc.save(`Invigilator_Summary_${new Date().toISOString().slice(0,10)}.pdf`);
+
+    } catch (e) {
+        console.error("PDF Gen Error:", e);
+        alert("Error generating PDF: " + e.message);
+    } finally {
+        if(btn) { btn.disabled = false; btn.innerHTML = "📄 Download PDF"; }
+    }
+}
+
+
+
+    
 //----------------Remunereation Bill PDF---------------------
 // --- REMUNERATION BILL PDF (Multi-Bill Support + Layout Fixes) ---
 function generateRemunerationBillPDF() {
