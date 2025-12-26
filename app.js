@@ -533,13 +533,10 @@ function populateAllExamDropdowns() {
 
 
 
-
-
-    
 // --- HELPER: Calculate Slot Requirements from Student Data ---
 function updateLocalSlotsFromStudents() {
     const localBaseData = localStorage.getItem('examBaseData');
-    if (!localBaseData) return false; // No data to process
+    if (!localBaseData) return false;
 
     try {
         const students = JSON.parse(localBaseData);
@@ -547,22 +544,24 @@ function updateLocalSlotsFromStudents() {
         const scribeRegNos = new Set(scribeListRaw.map(s => s.regNo));
         const sessionStats = {};
 
-        // 1. Count Candidates
+        // 1. Process Student Data
         students.forEach(s => {
             const d = s.Date ? s.Date.trim() : "";
             const t = s.Time ? s.Time.trim() : "";
             if (!d || !t) return;
 
             const key = `${d} | ${t}`;
+            
             if (!sessionStats[key]) {
                 sessionStats[key] = {
                     normalStreams: {},
                     scribeStreams: {},
                     totalScribes: 0,
-                    totalStudents: 0
+                    totalStudents: 0,
+                    dateStr: d,
+                    timeStr: t
                 };
             }
-
             sessionStats[key].totalStudents++;
             const strm = s.Stream || "Regular";
 
@@ -576,35 +575,111 @@ function updateLocalSlotsFromStudents() {
             }
         });
 
-        // 2. Merge with Existing Slots
+        // 2. Merge with Existing Slots (Smart FN/AN Logic)
         let existingSlots = JSON.parse(localStorage.getItem('examInvigilationSlots') || '{}');
         let hasChanges = false;
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
 
-        Object.keys(sessionStats).forEach(key => {
-            const stats = sessionStats[key];
+        // Helper to check Period (FN < 1 PM <= AN)
+        const getPeriod = (timeStr) => {
+            let [t, mod] = timeStr.trim().split(' ');
+            let [h] = t.split(':').map(Number);
+            if (mod === 'PM' && h !== 12) h += 12;
+            if (mod === 'AM' && h === 12) h = 0;
+            return h < 13 ? 'FN' : 'AN';
+        };
+
+        Object.keys(sessionStats).forEach(generatedKey => {
+            const stats = sessionStats[generatedKey];
+            const genPeriod = getPeriod(stats.timeStr);
+            
+            // --- 🟢 SMART MATCH: Find existing Virtual Slot in same FN/AN block ---
+            let targetKey = generatedKey;
+            
+            if (!existingSlots[generatedKey]) {
+                // No exact match? Look for a "Virtual" slot (0 students) on same Date & Period
+                const virtualMatchKey = Object.keys(existingSlots).find(k => {
+                    if (!k.includes('|')) return false;
+                    const [exDate, exTime] = k.split('|').map(s => s.trim());
+                    
+                    // Must be same Date
+                    if (exDate !== stats.dateStr) return false;
+                    
+                    // Must be same Period (FN or AN)
+                    if (getPeriod(exTime) !== genPeriod) return false;
+
+                    // Must be "Virtual" (Created by attendance, so 0 students or undefined)
+                    const slot = existingSlots[k];
+                    return (!slot.studentCount || slot.studentCount === 0);
+                });
+
+                if (virtualMatchKey) {
+                    // FOUND IT! We will Migrate this virtual slot to the real time key
+                    targetKey = generatedKey; // We use the new (Correct) time
+                    existingSlots[targetKey] = { ...existingSlots[virtualMatchKey] }; // Copy staff data
+                    delete existingSlots[virtualMatchKey]; // Remove the old 9:30 slot
+                    hasChanges = true; 
+                }
+            }
+
+            // --- DATE CHECK (Robust Parsing) ---
+            let isPastSession = false;
+            try {
+                // Handle DD.MM.YYYY or YYYY-MM-DD or DD/MM/YYYY
+                const parts = stats.dateStr.split(/[\.\-\/]/); 
+                let day, month, year;
+                
+                if (parts[0].length === 4) { // YYYY-MM-DD
+                    year = parts[0]; month = parts[1]; day = parts[2];
+                } else { // DD.MM.YYYY
+                    day = parts[0]; month = parts[1]; year = parts[2];
+                }
+                
+                const sessionDate = new Date(year, month - 1, day);
+                sessionDate.setHours(0,0,0,0); // Compare dates only
+                isPastSession = sessionDate < today;
+            } catch(e) {
+                console.warn("Date parse error, assuming Future:", stats.dateStr);
+                isPastSession = false; // Default to Future (Locked) if date is weird
+            }
+
+            // Calculate Required Invigilators
             let baseRequirement = 0;
-
-            // Calculate Norms
             Object.values(stats.normalStreams).forEach(count => baseRequirement += Math.ceil(count / 30));
             Object.values(stats.scribeStreams).forEach(count => baseRequirement += Math.ceil(count / 5));
             const reserve = Math.ceil(baseRequirement * 0.10);
             const totalRequired = baseRequirement + reserve;
 
-            if (!existingSlots[key]) {
-                // Create New Slot
-                existingSlots[key] = {
+            if (!existingSlots[targetKey]) {
+                // CASE A: Create Brand New Slot
+                existingSlots[targetKey] = {
                     required: totalRequired,
                     reserveCount: reserve,
                     assigned: [],
                     unavailable: [],
-                    isLocked: true, // 🟢 CHANGED: Now Locked by Default
+                    isLocked: !isPastSession, // 🔒 Lock Future, Unlock Past
                     scribeCount: stats.totalScribes,
                     studentCount: stats.totalStudents
                 };
                 hasChanges = true;
             } else {
-                // Update Existing (Only if counts changed)
-                const slot = existingSlots[key];
+                // CASE B: Update Existing Slot
+                const slot = existingSlots[targetKey];
+                
+                // 🟢 RE-LOCKING LOGIC:
+                // If the slot WAS empty (Virtual) and is NOW getting students (Real Data),
+                // we treat it as a "New Upload" and FORCE LOCK if it is in the future.
+                const isNewDataUpload = (!slot.studentCount || slot.studentCount === 0) && stats.totalStudents > 0;
+                
+                if (isNewDataUpload) {
+                     if (!isPastSession) {
+                         slot.isLocked = true; // Force Lock
+                     }
+                     hasChanges = true;
+                }
+
+                // Update Counts
                 if (slot.required !== totalRequired || slot.studentCount !== stats.totalStudents) {
                     slot.required = totalRequired;
                     slot.reserveCount = reserve;
@@ -617,13 +692,22 @@ function updateLocalSlotsFromStudents() {
 
         if (hasChanges) {
             localStorage.setItem('examInvigilationSlots', JSON.stringify(existingSlots));
-            return true; // Indicates slots were updated
+            return true;
         }
     } catch (e) {
         console.error("Slot Calc Error:", e);
     }
     return false;
 }
+
+    
+
+    
+
+
+
+
+    
     // ==========================================
     // ☁️ CLOUD SYNC FUNCTIONS (Fixed & Updated)
     // ==========================================
