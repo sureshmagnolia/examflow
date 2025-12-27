@@ -1238,6 +1238,9 @@ function updateLocalSlotsFromStudents() {
     const viewRoomAllotment = document.getElementById('view-room-allotment');
     const viewScribeSettings = document.getElementById('view-scribe-settings');
 
+
+    const navHelp = document.getElementById('nav-help');
+    const viewHelp = document.getElementById('view-help');
     // *** NEW SEARCH ELEMENTS ***
     const navSearch = document.getElementById('nav-search');
     const viewSearch = document.getElementById('view-search');
@@ -1266,8 +1269,8 @@ function updateLocalSlotsFromStudents() {
 
     const viewEditData = document.getElementById('view-edit-data');
     // Update these two lines to include 'navRemuneration' and 'viewRemuneration'
-    const allNavButtons = [navHome, navExtractor, navEditData, navScribeSettings, navRoomAllotment, navQPCodes, navSearch, navReports, navAbsentees, navSettings, navRemuneration];
-    const allViews = [viewHome, viewExtractor, viewEditData, viewScribeSettings, viewRoomAllotment, viewQPCodes, viewSearch, viewReports, viewAbsentees, viewSettings, viewRemuneration];
+    const allNavButtons = [navHome, navExtractor, navEditData, navScribeSettings, navRoomAllotment, navQPCodes, navSearch, navReports, navAbsentees, navSettings, navRemuneration, navHelp];
+    const allViews = [viewHome, viewExtractor, viewEditData, viewScribeSettings, viewRoomAllotment, viewQPCodes, viewSearch, viewReports, viewAbsentees, viewSettings, viewRemuneration, viewHelp];
 
     // --- (V26) Get references to NEW Room Settings elements (Now in Settings Tab) ---
     const collegeNameInput = document.getElementById('college-name-input');
@@ -6915,6 +6918,10 @@ if (toggleButton && sidebar) {
     navReports.addEventListener('click', () => showView(viewReports, navReports));
     navAbsentees.addEventListener('click', () => showView(viewAbsentees, navAbsentees));
     navSettings.addEventListener('click', () => showView(viewSettings, navSettings));
+    // Add this line with your other navigation listeners
+    if (navHelp) {
+    navHelp.addEventListener('click', () => showView(viewHelp, navHelp));
+    }
 
     function showView(viewToShow, buttonToActivate) {
         // 1. Hide all views (Safety Check Added)
