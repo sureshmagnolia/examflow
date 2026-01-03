@@ -157,6 +157,85 @@ function disable_edit_data_tab(disabled) {
 window.disable_edit_data_tab = disable_edit_data_tab;
 
 // --- END FUNCTIONS FOR PYTHON BRIDGE ---
+
+
+
+// ==========================================
+// 🧹 AUTOMATED GHOST DATA CLEANUP (Place at TOP of app.js)
+// ==========================================
+async function autoCleanPastGhostData() {
+    console.log("🚀 [System] Checking for expired exam data...");
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    let slots = JSON.parse(localStorage.getItem('examInvigilationSlots') || '{}');
+    let availability = JSON.parse(localStorage.getItem('invigAdvanceUnavailability') || '{}');
+    let deletedCount = 0;
+    let hasChanges = false;
+
+    // Scan Slots
+    Object.keys(slots).forEach(slotId => {
+        const dateStr = slotId.split('_')[0]; // Extract "2025-10-26"
+        const slotDate = new Date(dateStr);
+        slotDate.setHours(0, 0, 0, 0);
+
+        // Delete if date is strictly in the past
+        if (slotDate < today) {
+            delete slots[slotId];
+            deletedCount++;
+            hasChanges = true;
+        }
+    });
+
+    // Scan Availability
+    Object.keys(availability).forEach(dateStr => {
+        const availDate = new Date(dateStr);
+        availDate.setHours(0, 0, 0, 0);
+
+        if (availDate < today) {
+            delete availability[dateStr];
+            hasChanges = true;
+        }
+    });
+
+    if (hasChanges) {
+        localStorage.setItem('examInvigilationSlots', JSON.stringify(slots));
+        localStorage.setItem('invigAdvanceUnavailability', JSON.stringify(availability));
+        
+        // Sync to cloud if available
+        if (typeof syncDataToCloud === 'function') {
+            await syncDataToCloud('slots');
+        }
+        
+        // Notify
+        setTimeout(() => {
+            alert(`🧹 System Maintenance\n\nRemoved ${deletedCount} expired records from previous dates.`);
+        }, 2000);
+    } else {
+        console.log("✅ [System] No expired data found.");
+    }
+}
+
+// Smart Trigger (Safe to be at the top)
+document.addEventListener('DOMContentLoaded', () => {
+    // Check every 500ms for app readiness
+    const initCheck = setInterval(() => {
+        // We wait for a signal that the app is ready (e.g., syncDataToCloud exists)
+        if (typeof syncDataToCloud === 'function' && window.firebase) {
+            clearInterval(initCheck);
+            autoCleanPastGhostData();
+        }
+    }, 500);
+});
+// ==========================================
+
+
+
+
+
+
+
+
 function dismissLoader() {
     const loader = document.getElementById('initial-app-loader');
     const msgInterval = window.loaderMessageInterval; // Get the interval ID if defined
@@ -16065,6 +16144,460 @@ window.openManualNewTab = function() {   // <--- CHANGE THIS LINE ONLY
     }
 }
 
+// ==========================================
+// 🩺 EXAMFLOW PRE-FLIGHT CHECK (FINAL FIX)
+// ==========================================
+
+async function runSystemHealthCheck() {
+    // 1. Show Loading State
+    const btn = document.getElementById('btn-run-self-check');
+    const originalText = btn ? btn.innerHTML : 'Run Check';
+    if(btn) {
+        btn.disabled = true;
+        btn.innerHTML = `<svg class="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Checking...`;
+    }
+
+    let score = 100;
+    let report = [];
+    let criticalErrors = 0;
+
+    const log = (status, title, message) => {
+        let icon = status === 'ok' ? '✅' : (status === 'warn' ? '⚠️' : '🛑');
+        let color = status === 'ok' ? 'text-green-600' : (status === 'warn' ? 'text-orange-600' : 'text-red-600');
+        if (status === 'warn') score -= 10;
+        if (status === 'fail') { score -= 25; criticalErrors++; }
+        report.push(`
+            <div class="flex items-start gap-3 p-3 border-b border-gray-100 last:border-0">
+                <span class="text-xl shrink-0">${icon}</span>
+                <div>
+                    <h4 class="font-bold text-sm ${color}">${title}</h4>
+                    <p class="text-xs text-gray-600 mt-0.5 leading-snug">${message}</p>
+                </div>
+            </div>
+        `);
+    };
+
+    // --- Helper: Bulletproof Date Parser ---
+    const parseDate = (dateStr) => {
+        if (!dateStr) return null;
+        try {
+            // Handle DD.MM.YYYY (29.12.2025)
+            if (dateStr.includes('.')) {
+                const [d, m, y] = dateStr.trim().split('.');
+                return new Date(`${y}-${m}-${d}T00:00:00`);
+            }
+            // Handle DD/MM/YYYY (29/12/2025)
+            if (dateStr.includes('/')) {
+                const [d, m, y] = dateStr.trim().split('/');
+                return new Date(`${y}-${m}-${d}T00:00:00`);
+            }
+            // Handle YYYY-MM-DD (2025-12-29)
+            return new Date(dateStr + (dateStr.includes('T') ? '' : 'T00:00:00'));
+        } catch (e) { return null; }
+    };
+
+    try {
+        // LAYER 1: INFRASTRUCTURE
+        const collegeName = localStorage.getItem('examCollegeName');
+        if (!collegeName || collegeName === "University of Calicut") {
+            log('warn', 'Settings', 'Default College Name detected.');
+        }
+
+        const rooms = JSON.parse(localStorage.getItem('examRoomConfig') || '{}');
+        if (Object.keys(rooms).length === 0) {
+            log('fail', 'Infrastructure', 'No rooms configured.');
+        }
+
+        const streams = JSON.parse(localStorage.getItem('examStreamsConfig') || '["Regular"]');
+        if (!streams || streams.length === 0) log('fail', 'Settings', 'No Exam Streams defined.');
+
+        // LAYER 2: SESSION SCOPE & DATA
+        const allStudents = JSON.parse(localStorage.getItem('examBaseData') || '[]');
+        const scribesList = JSON.parse(localStorage.getItem('examScribes') || '[]');
+        
+        if (allStudents.length === 0) {
+            log('warn', 'Database', 'No student data loaded.');
+        } else {
+            const uniqueDateStrings = [...new Set(allStudents.map(s => s.Date))];
+            
+            // Get "Today" at Midnight (Local Time)
+            const now = new Date();
+            now.setHours(0, 0, 0, 0);
+
+            // Filter for Today & Future
+            const activeDates = uniqueDateStrings
+                .filter(dateStr => {
+                    const d = parseDate(dateStr);
+                    // Compare timestamps to be safe
+                    return d && d.getTime() >= now.getTime();
+                })
+                .sort((a, b) => parseDate(a) - parseDate(b));
+
+            const targetDates = [];
+            if (activeDates.length > 0) {
+                // Add the very first upcoming date (Could be Today or Future)
+                targetDates.push(activeDates[0]);
+                
+                // If the first date is Today, also grab the next one (Tomorrow/Next Exam)
+                const firstDate = parseDate(activeDates[0]);
+                if (firstDate.getTime() === now.getTime() && activeDates.length > 1) {
+                    targetDates.push(activeDates[1]);
+                }
+            }
+
+            if (targetDates.length === 0) {
+                log('ok', 'Schedule', 'No upcoming exams found.');
+            } else {
+                log('ok', 'Target Scope', `Checking: <strong>${targetDates.join(', ')}</strong>`);
+
+                const targetStudents = allStudents.filter(s => targetDates.includes(s.Date));
+                const targetSessions = new Set(targetStudents.map(s => `${s.Date} | ${s.Time}`));
+
+                const allotments = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+                const qpCodes = JSON.parse(localStorage.getItem('examQPCodes') || '{}');
+                const invigilators = JSON.parse(localStorage.getItem('examInvigilatorMapping') || '{}');
+
+                targetSessions.forEach(sessionKey => {
+                    const sessionName = `<span class="font-mono text-gray-500">${sessionKey}</span>`;
+                    
+                    // CHECK 1: ALLOTMENT
+                    if (!allotments[sessionKey] || Object.keys(allotments[sessionKey]).length === 0) {
+                        log('fail', 'Regular Allotment', `Missing for ${sessionName}`);
+                    }
+
+                    // CHECK 2: SCRIBES
+                    const sessionScribes = scribesList.filter(scribeReg => 
+                        targetStudents.find(s => s.RegNo === scribeReg)
+                    );
+                    
+                    if (sessionScribes.length > 0) {
+                        let allottedScribesCount = 0;
+                        if (allotments[sessionKey]) {
+                             Object.values(allotments[sessionKey]).forEach(room => {
+                                 if (room.students) {
+                                     room.students.forEach(s => { 
+                                         if (sessionScribes.includes(s.RegNo)) allottedScribesCount++; 
+                                     });
+                                 }
+                             });
+                        }
+                        if (allottedScribesCount < sessionScribes.length) {
+                             log('warn', 'Scribe Issue', `Pending scribe allotment in ${sessionName}`);
+                        }
+                    }
+
+                    // CHECK 3: QP CODES
+                    if (!qpCodes[sessionKey] || Object.keys(qpCodes[sessionKey]).length === 0) {
+                        log('warn', 'QP Codes', `Missing QP Codes for ${sessionName}`);
+                    }
+
+                    // CHECK 4: INVIGILATORS (Only if logged in)
+                    const currentUser = window.firebase?.auth?.currentUser;
+                    if (currentUser) {
+                        const sessionInvigilation = invigilators[sessionKey] || [];
+                        if (sessionInvigilation.length === 0 && allotments[sessionKey]) {
+                            log('warn', 'Staffing', `No invigilators assigned for ${sessionName}`);
+                        } else if (allotments[sessionKey]) {
+                            log('ok', 'Staffing', `Invigilators assigned.`);
+                        }
+                    }
+                });
+            }
+        }
+
+        // LAYER 3: SYNC CHECK (ROBUST SCOPE)
+        const currentUser = window.firebase?.auth?.currentUser;
+        if (currentUser) {
+            // STRATEGY: Try finding the ID in variable scope OR storage
+            let activeId = null;
+
+            // 1. Try Variable Scope (Handle ReferenceError if not defined)
+            try { if(typeof currentCollegeId !== 'undefined') activeId = currentCollegeId; } catch(e){}
+            
+            // 2. Try Window Scope
+            if(!activeId && window.currentCollegeId) activeId = window.currentCollegeId;
+
+            // 3. Try Storage (Backup)
+            if (!activeId) activeId = localStorage.getItem('adminCollegeId') || localStorage.getItem('collegeId');
+
+            if (activeId) {
+                // AUTO-REPAIR: Save it to localStorage so we don't lose it next time
+                localStorage.setItem('adminCollegeId', activeId);
+                
+                // Real Ping
+                const docRef = window.firebase.doc(window.firebase.db, "colleges", activeId);
+                await window.firebase.getDoc(docRef); 
+                log('ok', 'Cloud Sync', `Database Connected (ID: ...${activeId.slice(-4)})`);
+            } else {
+                log('fail', 'Account', 'Logged in, but College ID missing. Reload Page.');
+            }
+        } else {
+            log('ok', 'Mode', 'Local Offline Mode (Guest).');
+        }
+
+    } catch (e) {
+        if(e.code === 'unavailable' || e.message.includes('offline')) {
+             log('fail', 'Sync Error', 'Internet connection lost or Firewall blocking Firebase.');
+        } else {
+             log('fail', 'System Error', `Check failed: ${e.message}`);
+        }
+    }
+
+    if(btn) { btn.disabled = false; btn.innerHTML = originalText; }
+
+    const scoreColor = score > 85 ? 'text-green-600' : (score > 50 ? 'text-orange-500' : 'text-red-600');
+    const finalHtml = `
+        <div class="space-y-4">
+            <div class="text-center p-4 bg-gray-50 rounded-xl border border-gray-200">
+                <div class="text-4xl font-black ${scoreColor} mb-1">${score}%</div>
+                <div class="text-xs font-bold text-gray-400 uppercase tracking-widest">Flight Readiness</div>
+            </div>
+            <div class="max-h-[50vh] overflow-y-auto custom-scroll border border-gray-100 rounded-lg bg-white">
+                ${report.join('')}
+            </div>
+        </div>
+    `;
+
+    UiModal.alert("Pre-Flight Check Report", finalHtml);
+}
+
+// --- AUTO-INJECT BUTTON INTO DASHBOARD (HOME) ---
+(function injectSelfCheckButton() {
+    setTimeout(() => {
+        // 1. Target the Home/Dashboard View
+        const homeTab = document.getElementById('view-home');
+        if (!homeTab) return;
+
+        // 2. Find the main white card container inside Home
+        const dashboardCard = homeTab.querySelector('.bg-white.shadow-xl');
+        
+        if (dashboardCard) {
+            let checkContainer = document.getElementById('system-check-container');
+            
+            // Create if it doesn't exist
+            if (!checkContainer) {
+                checkContainer = document.createElement('div');
+                checkContainer.id = 'system-check-container';
+                // Added 'mt-8' for spacing from the calendar/other content
+                checkContainer.className = "mt-8 p-5 bg-gradient-to-r from-indigo-50 to-blue-50 rounded-xl border border-indigo-100 flex flex-col sm:flex-row items-center justify-between shadow-sm gap-4";
+                
+                checkContainer.innerHTML = `
+                    <div class="text-center sm:text-left">
+                        <h3 class="font-bold text-indigo-900 text-lg flex items-center justify-center sm:justify-start gap-2">
+                            <span>🚀</span> System Pre-Flight Check
+                        </h3>
+                        <p class="text-sm text-indigo-600 opacity-80 mt-1">Scan Today & Upcoming exams for missing rooms or data errors.</p>
+                    </div>
+                    <button id="btn-run-self-check" class="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-lg shadow-md transition transform hover:scale-105 flex items-center justify-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        Run Check
+                    </button>
+                `;
+
+                // 3. Append to the bottom of the dashboard card
+                dashboardCard.appendChild(checkContainer);
+            }
+
+            // Re-attach event listener (safe to do multiple times)
+            const btn = document.getElementById('btn-run-self-check');
+            if(btn) btn.onclick = runSystemHealthCheck;
+        }
+
+    }, 1000); // 1s delay to ensure Dashboard HTML is ready
+})();
+
+// ==========================================
+// BULK DELETE FUNCTIONS (Global Scope & Corrected Data Source)
+// ==========================================
+
+// 1. Toggle Lock Function
+window.toggleBulkLock = function() {
+    const bulkLockBtn = document.getElementById('btn-toggle-bulk-lock');
+    const startSelect = document.getElementById('edit-bulk-start-session');
+    const endSelect = document.getElementById('edit-bulk-end-session');
+    const deleteBtn = document.getElementById('btn-edit-bulk-delete');
+    const controlsDiv = document.getElementById('bulk-delete-controls');
+
+    // Check if currently locked (disabled)
+    const isLocked = startSelect.disabled;
+
+    if (isLocked) {
+        // --- UNLOCKING ---
+        
+        // 1. Populate Dropdowns (Using CORRECT Global Variable)
+        // ensure sessions are loaded
+        if (typeof populate_session_dropdown === 'function') populate_session_dropdown(); 
+
+        if (typeof allStudentSessions !== 'undefined' && allStudentSessions.length > 0) {
+            
+            // Clear and Add Default
+            startSelect.innerHTML = '<option value="">-- Select Start --</option>';
+            endSelect.innerHTML = '<option value="">-- Select End --</option>';
+
+            allStudentSessions.forEach(session => {
+                const opt1 = new Option(session, session);
+                startSelect.add(opt1);
+                
+                const opt2 = new Option(session, session);
+                endSelect.add(opt2);
+            });
+        } else {
+            alert("No exam sessions found to delete! (List empty)");
+            return;
+        }
+
+        // 2. Enable Inputs
+        startSelect.disabled = false;
+        endSelect.disabled = false;
+        deleteBtn.disabled = false;
+
+        // 3. Visual Updates
+        startSelect.classList.remove('bg-gray-100');
+        startSelect.classList.add('bg-white');
+        endSelect.classList.remove('bg-gray-100');
+        endSelect.classList.add('bg-white');
+        controlsDiv.classList.remove('opacity-50', 'pointer-events-none');
+
+        // 4. Update Button State
+        bulkLockBtn.innerHTML = `
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 11V7a4 4 0 118 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z" />
+            </svg>
+            <span class="text-rose-600 font-bold">Unlocked</span>
+        `;
+        bulkLockBtn.classList.add('border-rose-300', 'bg-rose-50');
+
+    } else {
+        // --- LOCKING ---
+        startSelect.disabled = true;
+        endSelect.disabled = true;
+        deleteBtn.disabled = true;
+
+        startSelect.classList.add('bg-gray-100');
+        endSelect.classList.add('bg-gray-100');
+        controlsDiv.classList.add('opacity-50', 'pointer-events-none');
+
+        // Update Button State
+        bulkLockBtn.innerHTML = `
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+            <span>Locked</span>
+        `;
+        bulkLockBtn.classList.remove('border-rose-300', 'bg-rose-50');
+    }
+};
+
+// 2. Execute Delete Function (Updated to Preserve Invigilation Data)
+window.executeBulkDelete = async function() {
+    const startSession = document.getElementById('edit-bulk-start-session').value;
+    const endSession = document.getElementById('edit-bulk-end-session').value;
+    const deleteBtn = document.getElementById('btn-edit-bulk-delete');
+
+    // Validation
+    if (!startSession || !endSession) {
+        alert("Please select both Start and End sessions.");
+        return;
+    }
+
+    // Sort order check (using existing array order)
+    const startIndex = allStudentSessions.indexOf(startSession);
+    const endIndex = allStudentSessions.indexOf(endSession);
+
+    if (startIndex === -1 || endIndex === -1) {
+        alert("Selected sessions not found in database.");
+        return;
+    }
+
+    if (startIndex > endIndex) {
+        alert("Start Session cannot be after End Session (chronologically).");
+        return;
+    }
+
+    // Identify Range
+    const sessionsToDelete = allStudentSessions.slice(startIndex, endIndex + 1);
+
+    // Confirmation
+    const confirmMsg = `🛑 CRITICAL WARNING 🛑\n\nYou are about to DELETE ${sessionsToDelete.length} SESSIONS.\nFrom: ${startSession}\nTo: ${endSession}\n\nThis will remove Student Data, Rooms, and Scribes.\n\nNOTE: Invigilation Volunteers & Availability will be PRESERVED.\n\nType 'DELETE' to confirm:`;
+    const userInput = prompt(confirmMsg);
+
+    if (userInput !== 'DELETE') {
+        return;
+    }
+
+    // Execution
+    let deletedCount = 0;
+    try {
+        deleteBtn.innerHTML = "Deleting...";
+        deleteBtn.disabled = true;
+
+        const sessionSet = new Set(sessionsToDelete);
+
+        // 1. Remove Students (Filter Global Array)
+        // Format in data is "DD.MM.YYYY" and "HH:MM AM"
+        // Session Key is "DD.MM.YYYY | HH:MM AM"
+        allStudentData = allStudentData.filter(s => {
+            const key = `${s.Date} | ${s.Time}`;
+            return !sessionSet.has(key);
+        });
+        localStorage.setItem('examBaseData', JSON.stringify(allStudentData));
+
+        // 2. Remove Aux Data (Assignments, Rooms, etc.)
+        // 🟢 UPDATE: Removed 'examInvigilationSlots' and 'examInvigilatorMapping' from this list
+        // This ensures Volunteer/Availability data survives the delete.
+        const auxKeys = [
+            'examRoomAllotment', 
+            'examScribeAllotment', 
+            'examAbsenteeList', 
+            'examQPCodes' 
+        ];
+        
+        auxKeys.forEach(key => {
+            const raw = localStorage.getItem(key);
+            if(raw) {
+                const data = JSON.parse(raw);
+                let changed = false;
+                sessionsToDelete.forEach(s => {
+                    if(data[s]) { delete data[s]; changed = true; }
+                });
+                if(changed) localStorage.setItem(key, JSON.stringify(data));
+            }
+        });
+
+        // 3. Sync to Cloud
+        // We sync 'ops' and 'allocation' to reflect the deletions.
+        // We do NOT sync 'slots' here to avoid overwriting the preserved data with empty data if logic was different.
+        // Actually, since we didn't touch localStorage for slots, we don't strictly need to sync it, 
+        // but 'allocation' sync covers rooms/scribes.
+        if (typeof syncDataToCloud === 'function') {
+            await syncDataToCloud('ops');
+            await syncDataToCloud('allocation'); 
+            // await syncDataToCloud('slots'); // Optional: Leaving this out prevents accidental wiping if cloud has newer data
+        }
+        
+        alert(`✅ Successfully deleted ${sessionsToDelete.length} sessions.\nInvigilation Volunteers have been preserved.`);
+        
+        // Refresh App
+        window.location.reload();
+
+    } catch (error) {
+        console.error("Delete Error:", error);
+        alert("An error occurred: " + error.message);
+    } finally {
+        deleteBtn.innerHTML = "Delete Range";
+    }
+};
+
+
+
+
+    
+
+    
+
+    
 // Helper to switch language inside the new tab
 // Note: This function string is already embedded in the template HTML, 
 // so you don't strictly need it here, but the openManualNewTab logic handles the rest.
