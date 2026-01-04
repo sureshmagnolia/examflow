@@ -309,6 +309,7 @@ function setupLiveSync(collegeId, mode) {
                 if (emailToRender) {
                     renderStaffCalendar(emailToRender);
                     if (typeof renderExchangeMarket === "function") renderExchangeMarket(emailToRender);
+                    if (typeof renderStaffUpcomingSummary === "function") renderStaffUpcomingSummary(emailToRender);
                 }
             }
         }
@@ -655,9 +656,10 @@ function getFirstName(fullName) {
     return fullName.split(' ')[0]; // "Abdul Raheem" -> "Abdul"
 }
 
-// --- AUTOMATIC EMAIL SYSTEM (Google Apps Script - Fixed) ---
+// --- AUTOMATIC EMAIL SYSTEM (Google Apps Script) ---
 window.sendSingleEmail = function (btn, email, name, subject, message) {
     if (!email) return alert("No email address for this faculty.");
+    // Use the global variable from your settings
     if (!googleScriptUrl) return alert("⚠️ Email Service Not Configured.\n\nPlease go to 'Settings & Roles' and paste your Google Apps Script Web App URL.");
 
     const originalText = btn.innerHTML;
@@ -666,42 +668,40 @@ window.sendSingleEmail = function (btn, email, name, subject, message) {
     btn.classList.remove('bg-gray-700', 'hover:bg-gray-800');
     btn.classList.add('bg-gray-400', 'cursor-wait');
 
-    // Convert newlines to <br> for HTML email
+    // Convert newlines to <br> for HTML email if the script expects HTML
+    // Or send as is if it handles text. Based on your "beautiful" request, HTML is better.
     const htmlBody = message.replace(/\n/g, '<br>');
 
     // Send via Proxy (Google Script)
-    // FIX: Use 'text/plain' to avoid CORS Preflight issues
     fetch(googleScriptUrl, {
         method: "POST",
         mode: "no-cors",
-        headers: { "Content-Type": "text/plain" },
+        headers: { "Content-Type": "application/json" }, // Changed to json for body
         body: JSON.stringify({
             to: email,
             subject: subject,
-            body: htmlBody
+            body: htmlBody 
         })
     })
-        .then(() => {
-            // Success Assumption (no-cors hides actual response)
-            console.log('Request sent to Google Script');
-
-            btn.innerHTML = `
+    .then(() => {
+        console.log('Request sent to Google Script');
+        btn.innerHTML = `
             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
             Sent
         `;
-            btn.classList.remove('bg-gray-400', 'cursor-wait');
-            btn.classList.add('bg-green-600', 'hover:bg-green-700', 'cursor-default');
+        btn.classList.remove('bg-gray-400', 'cursor-wait');
+        btn.classList.add('bg-green-600', 'hover:bg-green-700', 'cursor-default');
 
-            // Log Activity
-            if (typeof logActivity === 'function') logActivity("Email Sent", `Auto-email sent to ${name} (${email}).`);
-        })
-        .catch(error => {
-            console.error('FAILED...', error);
-            alert("Network Error: Could not reach Google Script.\nCheck your internet or the Script URL.");
-            btn.disabled = false;
-            btn.innerHTML = originalText;
-            btn.classList.add('bg-red-600');
-        });
+        // Log Activity
+        if (typeof logActivity === 'function') logActivity("Email Sent", `Auto-email sent to ${name} (${email}).`);
+    })
+    .catch(error => {
+        console.error('FAILED...', error);
+        alert("Network Error: Could not reach Google Script.\nCheck your internet or the Script URL.");
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+        btn.classList.add('bg-red-600');
+    });
 }
 
 // --- NEW: ADMIN POSTING LOCK FUNCTIONS ---
@@ -761,6 +761,9 @@ window.toggleWeekAdminLock = async function (monthStr, weekNum, lockState) {
 }
 
 
+
+
+
 function renderSlotsGridAdmin() {
     if (!ui.adminSlotsGrid) return;
     ui.adminSlotsGrid.innerHTML = '';
@@ -784,20 +787,58 @@ function renderSlotsGridAdmin() {
         </div>`;
     ui.adminSlotsGrid.innerHTML = navHtml;
 
-    // 2. Filter & Group Data
     const slotItems = [];
+
+    // 2A. COLLECT REAL SLOTS
     Object.keys(invigilationSlots).forEach(key => {
+        if (invigilationSlots[key].isHidden) return; // Skip deleted
+
         const date = parseDate(key);
         if (date.getMonth() === currentAdminDate.getMonth() && date.getFullYear() === currentAdminDate.getFullYear()) {
-            slotItems.push({ key, date: date, slot: invigilationSlots[key] });
+            slotItems.push({ key, date: date, slot: invigilationSlots[key], type: 'REAL' });
         }
     });
+
+    // 2B. COLLECT GHOST SLOTS (Unavailability without Exam)
+    if (typeof advanceUnavailability !== 'undefined') {
+        Object.keys(advanceUnavailability).forEach(dateStr => {
+            const [d, m, y] = dateStr.split('.').map(Number);
+            if (m - 1 !== currentAdminDate.getMonth() || y !== currentAdminDate.getFullYear()) return;
+
+            const dateObj = new Date(y, m - 1, d);
+            const leaves = advanceUnavailability[dateStr];
+
+            const hasRealSlot = (sessionType) => {
+                return slotItems.some(item => {
+                    if (item.type !== 'REAL') return false;
+                    const [kDate, kTime] = item.key.split(' | ');
+                    if (kDate !== dateStr) return false;
+                    
+                    let [h] = kTime.trim().split(':')[0].split(' '); 
+                    let t = kTime.trim().toUpperCase();
+                    if (t.includes('PM') && !t.startsWith('12')) h = parseInt(h) + 12;
+                    if (t.includes('AM') && parseInt(h) === 12) h = 0;
+                    
+                    const slotPeriod = h < 13 ? 'FN' : 'AN';
+                    return slotPeriod === sessionType;
+                });
+            };
+
+            if (leaves.FN && leaves.FN.length > 0 && !hasRealSlot('FN')) {
+                slotItems.push({ key: `${dateStr} | FN`, date: dateObj, type: 'GHOST', session: 'FN', count: leaves.FN.length, list: leaves.FN });
+            }
+            if (leaves.AN && leaves.AN.length > 0 && !hasRealSlot('AN')) {
+                slotItems.push({ key: `${dateStr} | AN`, date: dateObj, type: 'GHOST', session: 'AN', count: leaves.AN.length, list: leaves.AN });
+            }
+        });
+    }
 
     if (slotItems.length === 0) {
         ui.adminSlotsGrid.innerHTML += `<div class="col-span-full text-center py-16 text-gray-400">No sessions this month. <button onclick="openAddSlotModal()" class="text-indigo-600 font-bold hover:underline">Add Slot</button></div>`;
         return;
     }
 
+    // 3. Group by Week
     const groupedSlots = {};
     slotItems.forEach(item => {
         const mStr = item.date.toLocaleString('default', { month: 'long', year: 'numeric' });
@@ -809,11 +850,10 @@ function renderSlotsGridAdmin() {
 
     const sortedGroupKeys = Object.keys(groupedSlots).sort((a, b) => groupedSlots[a].items[0].date - groupedSlots[b].items[0].date);
 
-    // 3. Render Groups
+    // 4. Render Groups
     sortedGroupKeys.forEach(gKey => {
         const group = groupedSlots[gKey];
 
-        // Week Header
         ui.adminSlotsGrid.innerHTML += `
             <div class="glass-card col-span-full mt-3 mb-1 flex flex-wrap justify-between items-center bg-indigo-50/50 px-3 py-2 rounded border border-indigo-100/50 shadow-sm mx-1">
                 <span class="text-indigo-900 text-[10px] font-bold uppercase tracking-wider bg-white/60 px-2 py-0.5 rounded border border-indigo-100/30">
@@ -829,23 +869,67 @@ function renderSlotsGridAdmin() {
                         <button onclick="toggleWeekAdminLock('${group.month}', ${group.week}, false)" class="text-[10px] bg-amber-100 border border-amber-300 text-amber-700 px-2 py-1 rounded-r hover:bg-amber-200 font-bold" title="Unlock Admin Posting">🔓</button>
                     </div>
                     <button onclick="runWeeklyAutoAssign('${group.month}', ${group.week})" class="text-[10px] bg-indigo-600 text-white border border-indigo-700 px-2 py-1 rounded hover:bg-indigo-700 font-bold shadow-sm">⚡ Auto</button>
+                    
+                    <button onclick="openWeeklyNotificationModal('${group.month}', ${group.week})" class="text-[10px] bg-green-600 text-white border border-green-700 px-2 py-1 rounded hover:bg-green-700 font-bold shadow-sm flex items-center gap-1">📢 Notify</button>
                 </div>
             </div>`;
 
-        group.items.sort((a, b) => a.date - b.date);
+        group.items.sort((a, b) => {
+            if (a.date - b.date !== 0) return a.date - b.date;
+            const aS = a.key.includes('FN') || (a.key.includes('AM') && !a.key.includes('12:')) ? 0 : 1;
+            const bS = b.key.includes('FN') || (b.key.includes('AM') && !b.key.includes('12:')) ? 0 : 1;
+            return aS - bS;
+        });
 
-        group.items.forEach(({ key, slot }) => {
+        group.items.forEach((item) => {
+            if (item.type === 'GHOST') {
+                const encodedList = encodeURIComponent(JSON.stringify(item.list));
+                ui.adminSlotsGrid.innerHTML += `
+                    <div class="relative border-l-[6px] border-gray-300 bg-gray-50 p-3 rounded-xl shadow-sm hover:shadow-md transition w-full mb-3 opacity-90 border border-gray-200 border-l-gray-400">
+                        <div class="flex justify-between items-start mb-2">
+                            <h4 class="font-bold text-gray-500 text-xs flex items-center gap-1">
+                                <span class="text-sm">🗓️</span> 
+                                <span>${item.key}</span>
+                            </h4>
+                            <span class="text-[9px] uppercase font-bold text-gray-400 bg-gray-200 px-1.5 py-0.5 rounded">No Exam</span>
+                        </div>
+                        <div class="text-[10px] text-gray-500 mb-3 italic">No exam scheduled, but staff have reported unavailability.</div>
+                        <button onclick="openGhostUnavailabilityModal('${item.key}', '${encodedList}')" class="w-full bg-white text-red-600 border border-red-200 px-2 py-1.5 rounded-lg text-[10px] font-bold hover:bg-red-50 flex items-center justify-center gap-1 shadow-sm">⛔ View ${item.count} Unavailability</button>
+                    </div>`;
+                return;
+            }
+
+            const { key, slot } = item;
             const filled = slot.assigned.length;
             const isAdminLocked = slot.isAdminLocked || false;
 
-            // --- THEME & ICON LOGIC ---
+            // --- 🟢 NEW: Calculate TOTAL Issues (Session + Advance) ---
+            const [dateStr, timeStr] = key.split(' | ');
+            let session = "FN";
+            const t = timeStr ? timeStr.toUpperCase() : "";
+            if (t.includes("PM") || t.startsWith("12:") || t.startsWith("12.")) session = "AN";
+
+            const uniqueIssues = new Set();
+            
+            // 1. Add Session Specific
+            if (slot.unavailable) {
+                slot.unavailable.forEach(u => uniqueIssues.add(typeof u === 'string' ? u : u.email));
+            }
+            
+            // 2. Add Advance Leave
+            if (typeof advanceUnavailability !== 'undefined' && advanceUnavailability[dateStr] && advanceUnavailability[dateStr][session]) {
+                advanceUnavailability[dateStr][session].forEach(u => uniqueIssues.add(typeof u === 'string' ? u : u.email));
+            }
+            
+            const totalIssues = uniqueIssues.size;
+            // -----------------------------------------------------------
+
             let themeClasses = "border-orange-400 bg-gradient-to-br from-white via-orange-50 to-orange-100";
             let statusIcon = "🔓";
             
-            // Priority: Admin Lock > Standard Lock > Full > Open
             if (isAdminLocked) {
                 themeClasses = "border-amber-500 bg-gradient-to-br from-white via-amber-50 to-amber-100 shadow-amber-100";
-                statusIcon = "🛡️"; // Admin Shield
+                statusIcon = "🛡️";
             } else if (slot.isLocked) {
                 themeClasses = "border-red-500 bg-gradient-to-br from-white via-red-50 to-red-100 shadow-red-100";
                 statusIcon = "🔒";
@@ -858,12 +942,11 @@ function renderSlotsGridAdmin() {
                 ? "bg-amber-600 text-white border-amber-700 hover:bg-amber-700" 
                 : "bg-white text-amber-600 border-amber-200 hover:bg-amber-50";
 
-            // Render Card
             ui.adminSlotsGrid.innerHTML += `
                 <div class="relative border-l-[6px] ${themeClasses} p-3 rounded-xl shadow-md hover:shadow-xl hover:-translate-y-1 transition-all duration-300 w-full mb-3 group">
                     <div class="flex justify-between items-start mb-2">
                         <h4 class="font-black text-gray-800 text-xs w-2/3 flex items-center gap-1">
-                            <span class="text-sm shadow-sm bg-white/50 rounded-full w-6 h-6 flex items-center justify-center border border-white/50" title="${isAdminLocked ? 'Admin Posting Locked' : 'Status'}">${statusIcon}</span> 
+                            <span class="text-sm shadow-sm bg-white/50 rounded-full w-6 h-6 flex items-center justify-center border border-white/50">${statusIcon}</span> 
                             <span>${key}</span>
                         </h4>
                         <div class="flex items-center bg-white/90 border border-gray-200 rounded-lg text-[10px] overflow-hidden">
@@ -873,13 +956,13 @@ function renderSlotsGridAdmin() {
                         </div>
                     </div>
                     
-                    <div class="text-[10px] text-gray-600 mb-2 bg-white/40 p-1.5 rounded-lg border border-white/50 shadow-sm">
+                    <div class="text-[10px] text-gray-600 mb-2 bg-white/40 p-1.5 rounded-lg border border-white/50 shadow-sm min-h-[1.5rem]">
                         <strong>Staff:</strong> ${slot.assigned.map(email => getNameFromEmail(email)).join(', ') || "None"}
                     </div>
                     
                     ${isAdminLocked ? '<div class="text-[9px] font-bold text-amber-700 bg-amber-100 px-2 py-1 rounded border border-amber-200 mb-2 text-center">🛡️ Posting Restricted (Admin)</div>' : ''}
                     
-                    ${slot.unavailable && slot.unavailable.length > 0 ? `<button onclick="openInconvenienceModal('${key}')" class="mt-2 w-full bg-white/80 text-red-700 border border-red-200 px-2 py-1.5 rounded-lg text-[10px] font-bold hover:bg-red-50 mb-2">⛔ ${slot.unavailable.length} Issue(s)</button>` : ''}
+                    ${totalIssues > 0 ? `<button onclick="openInconvenienceModal('${key}')" class="mt-2 w-full bg-white/80 text-red-700 border border-red-200 px-2 py-1.5 rounded-lg text-[10px] font-bold hover:bg-red-50 mb-2 shadow-sm transition">⛔ ${totalIssues} Issue(s) Reported</button>` : ''}
                     
                     <div class="flex gap-1.5 mt-2">
                         <button onclick="toggleLock('${key}')" class="flex-1 text-[10px] border border-gray-200 rounded-lg py-1.5 hover:bg-gray-50 text-gray-700 font-bold bg-white shadow-sm">
@@ -891,6 +974,7 @@ function renderSlotsGridAdmin() {
                     </div>
 
                     <div class="grid grid-cols-4 gap-1.5 mt-2">
+                        <button onclick="openDashboardInvigModal('${key}')" class="bg-white text-blue-600 border border-blue-200 rounded py-1 hover:bg-blue-50 text-[10px] font-bold" title="View Dashboard / God Mode">👁️</button>
                          <button onclick="openSlotReminderModal('${key}')" class="bg-white text-green-700 border border-green-200 rounded py-1 hover:bg-green-50 text-[10px]">🔔</button>
                          <button onclick="printSessionReport('${key}')" class="bg-white text-gray-700 border border-gray-300 rounded py-1 hover:bg-gray-50 text-[10px]">🖨️</button>
                          <button onclick="openManualAllocationModal('${key}')" class="bg-white text-indigo-700 border border-indigo-200 rounded py-1 hover:bg-indigo-50 text-[10px]">Edit</button>
@@ -899,9 +983,16 @@ function renderSlotsGridAdmin() {
                 </div>`;
         });
     });
-
     ui.adminSlotsGrid.innerHTML += `<div class="col-span-full h-32 w-full"></div>`;
 }
+
+
+
+
+
+
+
+
 
 // REPLACE your existing renderStaffTable function with this SAFE version
 function renderStaffTable() {
@@ -1212,13 +1303,13 @@ function renderStaffCalendar(myEmail) {
 
     const firstDayIndex = new Date(year, month, 1).getDay();
     const daysInMonth = new Date(year, month + 1, 0).getDate();
-    
-    // --- 1. CURRENT TIME CHECK ---
     const now = new Date();
 
     // Group Slots
     const slotsByDate = {};
     Object.keys(invigilationSlots).forEach(key => {
+        if (invigilationSlots[key].isHidden) return;
+
         const [dStr, tStr] = key.split(' | ');
         const [dd, mm, yyyy] = dStr.split('.');
         if (parseInt(mm) === month + 1 && parseInt(yyyy) === year) {
@@ -1259,9 +1350,7 @@ function renderStaffCalendar(myEmail) {
                 const needed = slot.required;
                 const available = Math.max(0, needed - filled);
 
-                // --- 2. TIME & STATUS CALCULATIONS ---
                 const slotDateObj = parseDate(slot.key);
-                // Assume session ends 3 hours after start for visual purposes
                 const sessionEndTime = new Date(slotDateObj);
                 sessionEndTime.setHours(sessionEndTime.getHours() + 3);
                 const isPast = sessionEndTime < now;
@@ -1271,11 +1360,6 @@ function renderStaffCalendar(myEmail) {
                 const isPostedByMe = slot.exchangeRequests && slot.exchangeRequests.includes(myEmail);
                 const isMarketAvailable = slot.exchangeRequests && slot.exchangeRequests.length > 0 && !isAssigned;
                 const isAdminLocked = slot.isAdminLocked || false;
-                
-                // --- 3. SMART COMPLETION CHECK ---
-                // It is "Done" if: 
-                // A) Attendance explicitly marked OR 
-                // B) I was assigned AND the time has passed
                 const isCompleted = (slot.attendance && slot.attendance.includes(myEmail)) || (isAssigned && isPast);
 
                 let badgeClass = "bg-gradient-to-br from-green-50 to-green-100 text-green-800 border-green-200";
@@ -1284,70 +1368,33 @@ function renderStaffCalendar(myEmail) {
                 let glowClass = "";
 
                 if (isCompleted) {
-                    // COMPLETED / PAST DUTY -> DARK GREEN
                     badgeClass = "bg-green-800 text-white border-green-900 md:bg-gradient-to-br md:from-green-700 md:to-green-800 md:border-green-600";
-                    icon = "✅"; 
-                    statusText = ""; // Minimal text
-                    glowClass = "md:shadow-lg md:shadow-green-900";
-                }
-                else if (isPostedByMe) {
-                    if (isAdminLocked) {
-                        badgeClass = "bg-gradient-to-br from-amber-100 to-orange-100 text-amber-700 border-amber-300";
-                        icon = "🛡️";
-                        statusText = "Frozen";
-                    } else {
-                        badgeClass = "bg-gradient-to-br from-orange-400 to-orange-500 text-white border-orange-300";
-                        icon = "⏳";
-                        statusText = "Posted";
-                    }
-                }
-                else if (isAssigned) {
-                     if (isAdminLocked) {
-                        badgeClass = "bg-gradient-to-br from-blue-100 to-blue-200 text-blue-800 border-blue-300 font-bold ring-1 ring-amber-300";
-                        icon = "🛡️";
-                        statusText = "Duty";
-                    } else if (slot.isLocked) {
-                        badgeClass = "bg-gradient-to-br from-blue-100 to-blue-200 text-blue-800 border-blue-300 font-bold";
-                        icon = "🔒";
-                        statusText = "Duty";
-                        glowClass = "shadow-sm shadow-blue-100";
-                    } else {
-                        badgeClass = "bg-gradient-to-br from-blue-500 to-indigo-600 text-white border-blue-400 font-bold";
-                        icon = "👮";
-                        statusText = "Duty";
-                        glowClass = "shadow-lg shadow-blue-200 ring-1 ring-blue-300";
-                    }
-                }
-                else if (isMarketAvailable) {
-                    badgeClass = "bg-gradient-to-br from-purple-500 to-purple-600 text-white border-purple-400 animate-pulse";
-                    icon = "♻️";
-                    statusText = "Exchange";
-                }
-                else if (isUnavailable) {
+                    icon = "✅"; statusText = ""; glowClass = "md:shadow-lg md:shadow-green-900";
+                } else if (isPostedByMe) {
+                    if (isAdminLocked) { badgeClass = "bg-gradient-to-br from-amber-100 to-orange-100 text-amber-700 border-amber-300"; icon = "🛡️"; statusText = "Frozen"; }
+                    else { badgeClass = "bg-gradient-to-br from-orange-400 to-orange-500 text-white border-orange-300"; icon = "⏳"; statusText = "Posted"; }
+                } else if (isAssigned) {
+                     if (isAdminLocked) { badgeClass = "bg-gradient-to-br from-blue-100 to-blue-200 text-blue-800 border-blue-300 font-bold ring-1 ring-amber-300"; icon = "🛡️"; statusText = "Duty"; }
+                     else if (slot.isLocked) { badgeClass = "bg-gradient-to-br from-blue-100 to-blue-200 text-blue-800 border-blue-300 font-bold"; icon = "🔒"; statusText = "Duty"; glowClass = "shadow-sm shadow-blue-100"; }
+                     else { badgeClass = "bg-gradient-to-br from-blue-500 to-indigo-600 text-white border-blue-400 font-bold"; icon = "👮"; statusText = "Duty"; glowClass = "shadow-lg shadow-blue-200 ring-1 ring-blue-300"; }
+                } else if (isMarketAvailable) {
+                    badgeClass = "bg-gradient-to-br from-purple-500 to-purple-600 text-white border-purple-400 animate-pulse"; icon = "♻️"; statusText = "Exchange";
+                } else if (isUnavailable) {
+                    // ✅ CHECK IF MARKED BY ADMIN
+                    const uEntry = slot.unavailable ? slot.unavailable.find(u => (typeof u === 'string' ? u : u.email) === myEmail) : null;
+                    const isAdminMarked = uEntry && uEntry.markedBy === 'Admin';
+                    
                     badgeClass = "bg-gradient-to-br from-red-50 to-red-100 text-red-600 border-red-200 opacity-60 grayscale-[50%]";
-                    icon = "⛔";
-                    statusText = "Unavail";
-                }
-                else if (isAdminLocked) {
-                    badgeClass = "bg-gradient-to-br from-amber-50 to-amber-100 text-amber-400 border-amber-200";
-                    icon = "🛡️"; 
-                    statusText = "Paused"; 
-                }
-                else if (slot.isLocked) {
-                    badgeClass = "bg-gray-100 text-gray-400 border-gray-200";
-                    icon = "🔒";
-                    statusText = "Locked";
-                }
-                // --- 4. PAST UNASSIGNED SLOTS (Fixes "Light Green" Issue) ---
-                else if (isPast) {
-                    badgeClass = "bg-gray-50 text-gray-400 border-gray-100 opacity-75";
-                    icon = "⏹️";
-                    statusText = "Done";
-                }
-                else if (filled >= needed) {
-                    badgeClass = "bg-gradient-to-br from-gray-50 to-gray-100 text-gray-400 border-gray-200";
-                    icon = "🈵";
-                    statusText = "Full";
+                    icon = isAdminMarked ? "🛡️" : "⛔";
+                    statusText = isAdminMarked ? "Admin" : "Unavail";
+                } else if (isAdminLocked) {
+                    badgeClass = "bg-gradient-to-br from-amber-50 to-amber-100 text-amber-400 border-amber-200"; icon = "🛡️"; statusText = "Paused"; 
+                } else if (slot.isLocked) {
+                    badgeClass = "bg-gray-100 text-gray-400 border-gray-200"; icon = "🔒"; statusText = "Locked";
+                } else if (isPast) {
+                    badgeClass = "bg-gray-50 text-gray-400 border-gray-100 opacity-75"; icon = "⏹️"; statusText = "Done";
+                } else if (filled >= needed) {
+                    badgeClass = "bg-gradient-to-br from-gray-50 to-gray-100 text-gray-400 border-gray-200"; icon = "🈵"; statusText = "Full";
                 }
 
                 const paddingClass = isCompleted ? "p-[2px] md:p-1.5" : "p-0.5 md:p-1.5";
@@ -1372,16 +1419,26 @@ function renderStaffCalendar(myEmail) {
                 let hasUnavail = false;
                 let unavailHtml = `<div class="flex flex-col gap-0.5 p-0.5 md:p-2 mt-7 md:mt-8 w-full">`;
 
-                if (adv.FN && adv.FN.some(u => (typeof u === 'string' ? u === myEmail : u.email === myEmail))) {
-                    hasUnavail = true;
-                    unavailHtml += `<div onclick="openDayDetail('${dateStr}', '${myEmail}')" class="bg-red-50/80 border border-red-100 text-red-500 rounded md:rounded-lg p-0.5 md:p-1 text-[8px] md:text-[9px] font-bold text-center shadow-sm cursor-pointer hover:bg-red-100 transition truncate"><span class="md:hidden">FN ⛔</span><span class="hidden md:inline">FN ⛔ Unavail</span></div>`;
-                }
-                if (adv.AN && adv.AN.some(u => (typeof u === 'string' ? u === myEmail : u.email === myEmail))) {
-                    hasUnavail = true;
-                    unavailHtml += `<div onclick="openDayDetail('${dateStr}', '${myEmail}')" class="bg-red-50/80 border border-red-100 text-red-500 rounded md:rounded-lg p-0.5 md:p-1 text-[8px] md:text-[9px] font-bold text-center shadow-sm cursor-pointer hover:bg-red-100 transition truncate"><span class="md:hidden">AN ⛔</span><span class="hidden md:inline">AN ⛔ Unavail</span></div>`;
-                }
-                unavailHtml += `</div>`;
+                // Helper to find entry
+                const findEntry = (list) => list ? list.find(u => (typeof u === 'string' ? u === myEmail : u.email === myEmail)) : null;
 
+                const fnEntry = findEntry(adv.FN);
+                if (fnEntry) {
+                    hasUnavail = true;
+                    const isAdm = fnEntry.markedBy === 'Admin';
+                    const icon = isAdm ? "🛡️" : "⛔";
+                    unavailHtml += `<div onclick="openDayDetail('${dateStr}', '${myEmail}')" class="bg-red-50/80 border border-red-100 text-red-500 rounded md:rounded-lg p-0.5 md:p-1 text-[8px] md:text-[9px] font-bold text-center shadow-sm cursor-pointer hover:bg-red-100 transition truncate"><span class="md:hidden">FN ${icon}</span><span class="hidden md:inline">FN ${icon} Unavail</span></div>`;
+                }
+                
+                const anEntry = findEntry(adv.AN);
+                if (anEntry) {
+                    hasUnavail = true;
+                    const isAdm = anEntry.markedBy === 'Admin';
+                    const icon = isAdm ? "🛡️" : "⛔";
+                    unavailHtml += `<div onclick="openDayDetail('${dateStr}', '${myEmail}')" class="bg-red-50/80 border border-red-100 text-red-500 rounded md:rounded-lg p-0.5 md:p-1 text-[8px] md:text-[9px] font-bold text-center shadow-sm cursor-pointer hover:bg-red-100 transition truncate"><span class="md:hidden">AN ${icon}</span><span class="hidden md:inline">AN ${icon} Unavail</span></div>`;
+                }
+                
+                unavailHtml += `</div>`;
                 if (hasUnavail) contentHtml += unavailHtml;
             }
         }
@@ -1963,6 +2020,7 @@ window.toggleAdvance = async function(dateStr, email, session) {
         // ADD (Open Modal for Reason)
         document.getElementById('unav-key').value = `ADVANCE|${dateStr}|${session}`; 
         document.getElementById('unav-email').value = email;
+        document.getElementById('unav-marked-by').value = 'Self'; // <--- ADD THIS
         
         document.getElementById('unav-reason').value = "";
         document.getElementById('unav-details').value = "";
@@ -2038,7 +2096,7 @@ window.toggleWholeDay = async function(dateStr, email) {
         // MARK BOTH
         document.getElementById('unav-key').value = `ADVANCE|${dateStr}|WHOLE`; 
         document.getElementById('unav-email').value = email;
-        
+        document.getElementById('unav-marked-by').value = 'Self'; // <--- ADD THIS
         document.getElementById('unav-reason').value = "";
         document.getElementById('unav-details').value = "";
         const detailsContainer = document.getElementById('unav-details-container');
@@ -2156,6 +2214,7 @@ window.setAvailability = async function (key, email, isAvailable) {
     } else {
         document.getElementById('unav-key').value = key;
         document.getElementById('unav-email').value = email;
+        document.getElementById('unav-marked-by').value = 'Self'; // <--- ADD THIS
         document.getElementById('unav-reason').value = "";
         document.getElementById('unav-details').value = "";
         document.getElementById('unav-details-container').classList.add('hidden');
@@ -2169,17 +2228,25 @@ window.confirmUnavailable = async function () {
     const email = document.getElementById('unav-email').value;
     const reason = document.getElementById('unav-reason').value;
     const details = document.getElementById('unav-details').value.trim();
+    // NEW: Capture Source
+    const markedBy = document.getElementById('unav-marked-by').value || 'Self'; 
 
     // 1. Validation
-    // Check Admin Lock
-    if (invigilationSlots[key] && invigilationSlots[key].isAdminLocked) {
+    if (invigilationSlots[key] && invigilationSlots[key].isAdminLocked && markedBy !== 'Admin') {
         return alert("🚫 Posting Locked! Admin has locked this slot.");
     }
     
     if (!reason) return alert("Select a reason.");
-    if (['OD', 'DL', 'Medical'].includes(reason) && !details) return alert("Details required.");
+    if (['OD', 'DL', 'Medical', 'Other'].includes(reason) && !details) return alert("Details required.");
 
-    const entry = { email, reason, details: details || "" };
+    // NEW: Create Entry Object with Metadata
+    const entry = { 
+        email: email, 
+        reason: reason, 
+        details: details || "",
+        markedBy: markedBy,
+        timestamp: new Date().toISOString()
+    };
 
     if (key.startsWith('ADVANCE|')) {
         // --- CASE A: ADVANCE / GENERAL UNAVAILABILITY ---
@@ -2190,55 +2257,51 @@ window.confirmUnavailable = async function () {
         if (!advanceUnavailability[dateStr].AN) advanceUnavailability[dateStr].AN = [];
 
         if (session === 'WHOLE') {
-            // Clear both sessions first
-            advanceUnavailability[dateStr].FN = advanceUnavailability[dateStr].FN.filter(u => u.email !== email);
-            advanceUnavailability[dateStr].AN = advanceUnavailability[dateStr].AN.filter(u => u.email !== email);
+            advanceUnavailability[dateStr].FN = advanceUnavailability[dateStr].FN.filter(u => (typeof u === 'string' ? u : u.email) !== email);
+            advanceUnavailability[dateStr].AN = advanceUnavailability[dateStr].AN.filter(u => (typeof u === 'string' ? u : u.email) !== email);
             
             advanceUnavailability[dateStr].FN.push(entry);
             advanceUnavailability[dateStr].AN.push(entry);
             
-            logActivity("Advance Unavailability", `Marked ${getNameFromEmail(email)} unavailable for WHOLE DAY on ${dateStr}.`);
+            logActivity("Advance Unavailability", `${markedBy} marked ${getNameFromEmail(email)} unavailable for WHOLE DAY on ${dateStr}.`);
         } else {
-            // Single Session
             if (!advanceUnavailability[dateStr][session]) advanceUnavailability[dateStr][session] = [];
             
-            // Safety: Remove existing before pushing
-            advanceUnavailability[dateStr][session] = advanceUnavailability[dateStr][session].filter(u => u.email !== email);
+            advanceUnavailability[dateStr][session] = advanceUnavailability[dateStr][session].filter(u => (typeof u === 'string' ? u : u.email) !== email);
             advanceUnavailability[dateStr][session].push(entry);
 
-            logActivity("Advance Unavailability", `Marked ${getNameFromEmail(email)} unavailable for ${dateStr} (${session}).`);
+            logActivity("Advance Unavailability", `${markedBy} marked ${getNameFromEmail(email)} unavailable for ${dateStr} (${session}).`);
         }
 
         await saveAdvanceUnavailability();
         
-        window.closeModal('unavailable-modal');
-        window.closeModal('day-detail-modal'); 
-        renderStaffCalendar(email);
-        if (typeof renderStaffUpcomingSummary === 'function') renderStaffUpcomingSummary(email);
-
     } else {
-        // --- CASE B: SLOT SPECIFIC (The Bug was Here) ---
+        // --- CASE B: SLOT SPECIFIC ---
         if (!invigilationSlots[key].unavailable) invigilationSlots[key].unavailable = [];
         
-        // *** FIX: Remove existing entry for this email before adding ***
         invigilationSlots[key].unavailable = invigilationSlots[key].unavailable.filter(u => 
             (typeof u === 'string' ? u !== email : u.email !== email)
         );
 
-        // Now push the new entry (Guaranteed unique)
         invigilationSlots[key].unavailable.push(entry);
-
-        logActivity("Session Unavailability", `Marked ${getNameFromEmail(email)} unavailable for ${key}. Reason: ${reason}`);
+        logActivity("Session Unavailability", `${markedBy} marked ${getNameFromEmail(email)} unavailable for ${key}.`);
 
         await syncSlotsToCloud();
-        
-        window.closeModal('unavailable-modal');
-        window.closeModal('day-detail-modal'); 
+    }
 
+    // Cleanup & Refresh
+    window.closeModal('unavailable-modal');
+    window.closeModal('day-detail-modal'); 
+
+    // Refresh Manual Modal if open
+    const manualKey = document.getElementById('manual-session-key').value;
+    if (document.getElementById('manual-allocation-modal').classList.contains('hidden') === false && manualKey === key) {
+        window.openManualAllocationModal(key);
+    } else {
         renderStaffCalendar(email);
         if (typeof renderStaffUpcomingSummary === 'function') renderStaffUpcomingSummary(email);
     }
-}
+};
 
 window.waNotify = function (key) {
     const slot = invigilationSlots[key];
@@ -2708,30 +2771,79 @@ window.removeRoleFromStaff = async function (sIdx, rIdx) {
     renderStaffTable();
 }
 
+// [In invigilation.js]
 
 
 window.openInconvenienceModal = function (key) {
     const slot = invigilationSlots[key];
-    if (!slot || !slot.unavailable) return;
-    document.getElementById('inconvenience-modal-subtitle').textContent = key;
+    if (!slot) return;
+
+    // ... (Gathering logic same as before) ...
+    // Note: Ensure your gathering logic copies the whole object 'u', not just email/reason
+
+    // 1. Gather Slot Specific
+    const allUnavailable = [];
+    if (slot.unavailable) {
+        slot.unavailable.forEach(u => {
+            const entry = (typeof u === 'string') ? { email: u, reason: "Unspecified" } : u;
+            allUnavailable.push({ ...entry, type: 'Session' });
+        });
+    }
+
+    // 2. Gather Advance
+    const [dateStr, timeStr] = key.split(' | ');
+    let session = "FN";
+    const t = timeStr ? timeStr.toUpperCase() : "";
+    if (t.includes("PM") || t.startsWith("12:") || t.startsWith("12.")) session = "AN";
+
+    if (advanceUnavailability && advanceUnavailability[dateStr] && advanceUnavailability[dateStr][session]) {
+        advanceUnavailability[dateStr][session].forEach(u => {
+             const email = (typeof u === 'string') ? u : u.email;
+             // Prevent duplicates
+             if (!allUnavailable.some(existing => existing.email === email)) {
+                 const entry = (typeof u === 'string') ? { email: u, reason: "Leave/OD" } : u;
+                 allUnavailable.push({ ...entry, type: 'Advance' });
+             }
+        });
+    }
+    
+    // ... (Empty check) ...
+
     const list = document.getElementById('inconvenience-list');
     list.innerHTML = '';
 
-    slot.unavailable.forEach(u => {
-        const email = (typeof u === 'string') ? u : u.email;
-        const reason = (typeof u === 'object' && u.reason) ? u.reason : "N/A";
-        const details = (typeof u === 'object' && u.details) ? u.details : "No details.";
-        const s = staffData.find(st => st.email === email) || { name: email, phone: "", dept: "Unknown" };
+    allUnavailable.forEach(u => {
+        const s = staffData.find(st => st.email === u.email) || { name: u.email };
+        
+        // --- GOD MODE TAGS ---
+        let sourceTag = "";
+        if (u.markedBy === 'Admin') {
+            sourceTag = `<span class="bg-amber-100 text-amber-700 text-[9px] px-2 py-0.5 rounded border border-amber-200 font-bold ml-2">🛡️ Marked by Admin</span>`;
+        } else if (u.markedBy === 'Self') {
+             sourceTag = `<span class="bg-blue-50 text-blue-600 text-[9px] px-2 py-0.5 rounded border border-blue-100 ml-2">👤 Self Reported</span>`;
+        }
 
-        // Fix Phone Format
-        let phone = s.phone ? s.phone.replace(/\D/g, '') : "";
-        if (phone.length === 10) phone = "91" + phone;
-        const hasPhone = phone.length >= 10;
+        const reason = u.reason || "N/A";
+        const details = u.details || "No details provided.";
+        const badgeColor = u.type === 'Advance' ? 'bg-orange-100 text-orange-700' : 'bg-red-50 text-red-600';
 
-        list.innerHTML += `<div class="bg-red-50 border border-red-100 p-3 rounded-lg"><div class="flex justify-between items-start mb-1"><div><div class="font-bold text-gray-800 text-sm">${s.name}</div><div class="text-[10px] text-gray-500 uppercase font-bold">${s.dept}</div></div><span class="bg-white text-red-600 text-[10px] font-bold px-2 py-0.5 rounded border border-red-200 shadow-sm">${reason}</span></div><div class="text-xs text-gray-700 bg-white p-2 rounded border border-gray-100 italic mb-2">"${details}"</div><div class="text-right">${hasPhone ? `<a href="https://wa.me/${phone}" target="_blank" class="text-green-600 hover:text-green-800 text-xs font-bold flex items-center justify-end gap-1">WhatsApp</a>` : ''}</div></div>`;
+        list.innerHTML += `
+            <div class="bg-white border border-gray-200 p-3 rounded-lg shadow-sm mb-2">
+                <div class="flex justify-between items-start mb-1">
+                    <div>
+                        <div class="font-bold text-gray-800 text-sm flex items-center">
+                            ${s.name} ${sourceTag}
+                        </div>
+                        <div class="text-[10px] text-gray-500 uppercase font-bold">${s.dept || ""}</div>
+                    </div>
+                    <span class="${badgeColor} text-[10px] font-bold px-2 py-0.5 rounded border shadow-sm">${reason}</span>
+                </div>
+                <div class="text-xs text-gray-600 bg-gray-50 p-2 rounded border border-gray-100 italic mb-2">"${details}"</div>
+            </div>`;
     });
     window.openModal('inconvenience-modal');
-}
+};
+
 
 // --- MISSING HELPER FUNCTIONS ---
 
@@ -3282,6 +3394,7 @@ async function volunteer(key, email) {
     // Standard Volunteer Logic
     if (!confirm("Confirm duty?")) return;
     slot.assigned.push(email);
+    updateAssignmentMeta(slot, email, 'VOLUNTEER'); // <--- ADD THIS LINE
     const me = staffData.find(s => s.email === email);
     if (me) me.dutiesAssigned = (me.dutiesAssigned || 0) + 1;
 
@@ -3312,6 +3425,7 @@ async function acceptExchange(key, buyerEmail, sellerEmail) {
     slot.assigned = slot.assigned.filter(e => e !== sellerEmail);
     slot.exchangeRequests = slot.exchangeRequests.filter(e => e !== sellerEmail);
     slot.assigned.push(buyerEmail);
+    updateAssignmentMeta(slot, buyerEmail, 'EXCHANGE'); // <--- ADD THIS LINE
 
     // 3. Update Stats
     const seller = staffData.find(s => s.email === sellerEmail);
@@ -4082,7 +4196,7 @@ window.runWeeklyAutoAssign = async function (monthStr, weekNum) {
             if (candidates.length > 0) {
                 const choice = candidates[0];
                 slot.assigned.push(choice.staff.email);
-                
+                updateAssignmentMeta(slot, choice.staff.email, 'AUTO'); // <--- ADD THIS LINE
                 // Update internal load tracking
                 choice.staff.pending--;
                 if (!choice.staff.weeklyLoad[currentWeekKey]) choice.staff.weeklyLoad[currentWeekKey] = 0;
@@ -4294,7 +4408,7 @@ if (exchangeSearch) {
 }
 
 // ==========================================
-// 📢 MESSAGING & ALERTS SYSTEM
+// 📢 MESSAGING MENU (Selection Screen)
 // ==========================================
 window.openWeeklyNotificationModal = function (monthStr, weekNum) {
     const list = document.getElementById('notif-list-container');
@@ -4302,149 +4416,59 @@ window.openWeeklyNotificationModal = function (monthStr, weekNum) {
     const subtitle = document.getElementById('notif-modal-subtitle');
 
     title.textContent = `📢 Notify Week ${weekNum} (${monthStr})`;
-    subtitle.textContent = "Send detailed professional emails (Faculty + Consolidated Dept Summary).";
-    list.innerHTML = '';
+    subtitle.textContent = "Select category to proceed.";
+    list.innerHTML = ''; 
 
-    currentEmailQueue = [];
-
-    // ... (Keep existing duty gathering logic) ...
-    // 1. Gather Duties
-    const facultyDuties = {};
+    // Check for duties first
+    let totalDuties = 0;
     Object.keys(invigilationSlots).forEach(key => {
+        if (invigilationSlots[key].isHidden) return;
         const date = parseDate(key);
         const mStr = date.toLocaleString('default', { month: 'long', year: 'numeric' });
         const wNum = getWeekOfMonth(date);
-        if (mStr === monthStr && wNum === weekNum) {
-            const slot = invigilationSlots[key];
-            const [dStr, tStr] = key.split(' | ');
-            const isAN = (tStr.includes("PM") || tStr.startsWith("12"));
-            const sessionCode = isAN ? "AN" : "FN";
-            const dayName = date.toLocaleString('en-us', { weekday: 'short' });
-            slot.assigned.forEach(email => {
-                if (!facultyDuties[email]) facultyDuties[email] = [];
-                facultyDuties[email].push({ date: dStr, day: dayName, session: sessionCode, time: tStr });
-            });
-        }
+        if (mStr === monthStr && wNum === weekNum) totalDuties++;
     });
 
-    if (Object.keys(facultyDuties).length === 0) {
-        list.innerHTML = `<div class="text-center text-gray-400 py-8 italic">No duties assigned in this week yet.</div>`;
+    if (totalDuties === 0) {
+        list.innerHTML = `<div class="text-center text-gray-400 py-12 italic">No duties found for this week.</div>`;
         window.openModal('notification-modal');
         return;
     }
-    // ... (End gathering logic) ...
 
-    // 2. Add Bulk Buttons (WITH CANCEL BUTTON)
+    // Render Two Big Options
     list.innerHTML = `
-        <div class="mb-4 pb-4 border-b border-gray-100 flex justify-between items-center">
-            <div class="text-xs text-gray-500">
-                Queue: <b>${Object.keys(facultyDuties).length}</b> Faculty + Dept Copies.
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+            <div onclick="triggerBulkStaffEmail('${monthStr}', ${weekNum})" 
+                 class="group bg-white border border-gray-200 hover:border-indigo-500 hover:ring-1 hover:ring-indigo-500 rounded-xl p-5 cursor-pointer transition-all shadow-sm">
+                <div class="flex items-center gap-4 mb-3">
+                    <div class="h-12 w-12 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center text-2xl group-hover:scale-110 transition-transform">
+                        👮
+                    </div>
+                    <div>
+                        <h3 class="font-bold text-gray-800 text-lg group-hover:text-indigo-700">Invigilators</h3>
+                        <p class="text-xs text-gray-500">Individual Alerts (WhatsApp/Email)</p>
+                    </div>
+                </div>
+                <p class="text-sm text-gray-600 mb-4">Send personalized duty reminders to each faculty member.</p>
+                <div class="text-right text-xs font-bold text-indigo-600 uppercase tracking-wide group-hover:underline">Open List &rarr;</div>
             </div>
-            <div class="flex gap-2">
-                <button id="btn-cancel-bulk" onclick="cancelBulkSending()" class="hidden bg-red-100 text-red-700 border border-red-200 text-xs font-bold px-4 py-2 rounded shadow-sm hover:bg-red-200 transition flex items-center gap-2">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-                    Stop / Cancel
-                </button>
-                
-                <button id="btn-bulk-email-week" onclick="sendBulkEmails('btn-bulk-email-week')" 
-                    class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-4 py-2 rounded shadow-md transition flex items-center gap-2">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
-                    Send Bulk Emails
-                </button>
+
+            <div onclick="triggerBulkDeptEmail('${monthStr}', ${weekNum})" 
+                 class="group bg-white border border-gray-200 hover:border-teal-500 hover:ring-1 hover:ring-teal-500 rounded-xl p-5 cursor-pointer transition-all shadow-sm">
+                <div class="flex items-center gap-4 mb-3">
+                    <div class="h-12 w-12 rounded-full bg-teal-50 text-teal-600 flex items-center justify-center text-2xl group-hover:scale-110 transition-transform">
+                        🏢
+                    </div>
+                    <div>
+                        <h3 class="font-bold text-gray-800 text-lg group-hover:text-teal-700">Departments</h3>
+                        <p class="text-xs text-gray-500">Consolidated Summaries</p>
+                    </div>
+                </div>
+                <p class="text-sm text-gray-600 mb-4">Send one email per department to HoDs with full list.</p>
+                <div class="text-right text-xs font-bold text-teal-600 uppercase tracking-wide group-hover:underline">Open List &rarr;</div>
             </div>
         </div>
     `;
-
-    // ... (Rest of the function: Sorting, Aggregating Depts, Rendering List) ...
-    // (Copy the rest of the logic from previous turn or your file here)
-
-    // --- SHORTCUT FOR COPYING ---
-    // Just use the loop logic from the previous `openWeeklyNotificationModal`
-    // The only change was the `list.innerHTML = ...` block above.
-
-    const deptAggregator = {};
-    const sortedEmails = Object.keys(facultyDuties).sort((a, b) => getNameFromEmail(a).localeCompare(getNameFromEmail(b)));
-
-    sortedEmails.forEach((email, index) => {
-        const duties = facultyDuties[email];
-        duties.sort((a, b) => a.date.split('.').reverse().join('').localeCompare(b.date.split('.').reverse().join('')));
-        const dutyString = duties.map(d => `(${d.date}-${d.day}-${d.session})`).join(', ');
-        const staff = staffData.find(s => s.email === email);
-        const fullName = staff ? staff.name : email;
-        const firstName = getFirstName(fullName);
-        const staffEmail = staff ? staff.email : "";
-
-        let phone = staff ? (staff.phone || "") : "";
-        phone = phone.replace(/\D/g, '');
-        if (phone.length === 10) phone = "91" + phone;
-
-        // Emails
-        const emailSubject = `Invigilation Duty: Week ${weekNum} (${monthStr})`;
-        const emailBody = generateProfessionalEmail(fullName, duties, "Upcoming Invigilation Duties");
-        const btnId = `email-btn-${index}`;
-
-        if (staffEmail) {
-            currentEmailQueue.push({ email: staffEmail, name: fullName, subject: emailSubject, body: emailBody, btnId: btnId });
-        }
-
-        // Dept Aggregation
-        if (staff && staff.dept) {
-            if (!deptAggregator[staff.dept]) deptAggregator[staff.dept] = [];
-            deptAggregator[staff.dept].push({ name: fullName, duties: duties });
-        }
-
-        // WhatsApp (Elaborate & Detailed)
-        const waMsg = generateWeeklyWhatsApp(fullName, duties);
-        const waLink = phone ? `https://wa.me/${phone}?text=${encodeURIComponent(waMsg)}` : "#";
-        // SMS (Shortest Possible)
-        const smsMsg = generateWeeklySMS(firstName, duties);
-        const smsLink = phone ? `sms:${phone}?body=${encodeURIComponent(smsMsg)}` : "#";
-        // *** NEW: Update Preview Box (Show 1st person's message) ***
-        if (index === 0) {
-            const previewEl = document.getElementById('notif-message-preview');
-            if (previewEl) {
-                previewEl.textContent = "--- WhatsApp Format ---\n" + waMsg + "\n\n--- SMS Format ---\n" + smsMsg;
-            }
-        }
-
-        const shortDutyStr = dutyString.length > 100 ? dutyString.substring(0, 97) + "..." : dutyString;
-
-
-        const phoneDisabled = phone ? "" : "disabled";
-        const emailDisabled = staffEmail ? "" : "disabled";
-        const noEmailWarning = staffEmail ? "" : `<span class="text-red-500 text-xs ml-2">(No Email)</span>`;
-        const safeName = fullName.replace(/'/g, "\\'");
-        const safeSubject = emailSubject.replace(/'/g, "\\'");
-        const safeBody = emailBody.replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/\n/g, '');
-
-        list.innerHTML += `
-            <div class="flex justify-between items-center bg-white border border-gray-200 p-3 rounded-lg shadow-sm hover:shadow-md transition mt-2">
-                <div class="flex-1 min-w-0 pr-2">
-                    <div class="font-bold text-gray-800 truncate">${fullName} ${noEmailWarning}</div>
-                    <div class="text-xs text-gray-500 mt-1 font-mono truncate">${dutyString}</div>
-                    ${staff && staff.dept ? `<div class="text-[9px] text-gray-400">${staff.dept}</div>` : ''}
-                </div>
-                <div class="flex gap-2 shrink-0">
-                    <button id="${btnId}" onclick="sendSingleEmail(this, '${staffEmail}', '${safeName}', '${safeSubject}', '${safeBody}')" ${emailDisabled} class="bg-gray-700 hover:bg-gray-800 text-white text-xs font-bold px-3 py-2 rounded shadow transition flex items-center gap-1">Mail</button>
-                    <a href="${smsLink}" target="_blank" ${phoneDisabled} class="bg-green-600 hover:bg-green-700 text-white text-xs font-bold px-3 py-2 rounded shadow transition">SMS</a>
-                    <a href="${waLink}" target="_blank" ${phoneDisabled} onclick="markAsSent(this)" class="bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold px-3 py-2 rounded shadow transition">WA</a>
-                </div>
-            </div>
-        `;
-    });
-
-    // Dept Emails
-    const cleanDepts = departmentsConfig.map(d => (typeof d === 'string') ? { name: d, email: "" } : d);
-    Object.keys(deptAggregator).forEach(deptName => {
-        const deptObj = cleanDepts.find(d => d.name === deptName);
-        if (deptObj && deptObj.email) {
-            const facultyList = deptAggregator[deptName];
-            const deptSubject = `Consolidated Duty List: ${deptName} - Week ${weekNum}`;
-            const deptBody = generateDepartmentConsolidatedEmail(deptName, facultyList, weekNum, monthStr);
-            currentEmailQueue.push({ email: deptObj.email, name: `HOD ${deptName}`, subject: deptSubject, body: deptBody, btnId: null });
-            list.insertAdjacentHTML('beforeend', `<div class="bg-indigo-50 border border-indigo-100 p-2 rounded text-xs text-indigo-800 text-center mt-1"><span class="font-bold">queued:</span> Consolidated email for <b>${deptName}</b> (${deptObj.email})</div>`);
-        }
-    });
 
     window.openModal('notification-modal');
 }
@@ -4565,67 +4589,22 @@ window.openSlotReminderModal = function (key) {
     window.openModal('notification-modal');
 }
 
+// ==========================================
+// 💬 UNIFIED MESSAGE GENERATORS (WhatsApp, SMS, Email)
+// ==========================================
 
-// --- MESSAGE GENERATORS ---
-
-// --- MESSAGE GENERATORS (Split for SMS & WhatsApp) ---
-
-// 1. Weekly WhatsApp (Safe Emojis)
-function generateWeeklyWhatsApp(name, duties) {
-    const now = new Date().toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit', hour12: true }).toLowerCase();
-
-    let dutyList = "";
-    duties.forEach(d => {
-        const rTime = calculateReportTime(d.time);
-        // Using 🗓️ (Calendar) and ➡️ (Arrow)
-        dutyList += `\n🗓️ *${d.date}* (${d.day}) | ${d.session}\n   ➡️ Report by: *${rTime}*\n`;
-    });
-
-    return `⚠️ *${name}*: Invigilation Duty Update (${now})\n${dutyList}\n✅ *Instructions:* https://bit.ly/gvc-exam\n\n_Adjustments:_ http://www.gvc.ac.in/exam\n-Chief Supt.`;
-}
-
-// 2. Weekly SMS (Shortest)
-function generateWeeklySMS(firstName, duties) {
-    // Format: "John: Duties: 01.12(FN), 03.12(AN). Portal: gvc.ac.in/exam -CS"
-   const shortList = duties.map(d => {
-        const [dd, mm, yyyy] = d.date.split('.');
-        const shortDate = `${dd}.${mm}.${yyyy.slice(-2)}`;
-        return `${shortDate}(${d.session})`;
-    }).join(', ');
-
-    return `${firstName}: Duties: ${shortList}. Portal: gvc.ac.in/exam -CS`;
-}
-
-// 3. Daily WhatsApp (Elaborate & Formal - Safe Emojis)
-function generateDailyWhatsApp(name, dateStr, duties) {
-    let dutyList = "";
-    duties.forEach(d => {
-        const rTime = calculateReportTime(d.time);
-        // Using ▪️ (Square) and 🕒 (Clock) instead of complex emojis
-        dutyList += `\n▪️ *Session:* ${d.session} (${d.time})\n   🕒 *Report by:* ${rTime}\n`;
-    });
-
-    // Using 🔔 (Bell) and ➡️ (Arrow) which are standard
-    return `🔔 *INVIGILATION DUTY REMINDER* 🔔\n\nDear *${name}*,\n\nThis is to inform you that you have invigilation duty scheduled for tomorrow, *${dateStr}*.\n\n*Duty Details:*${dutyList}\n➡️ *Instructions:*\n1. Kindly abide by the rules and regulations of the University.\n2. Please report to the Chief Superintendent's office *before the stipulated time*.\n3. In case of any inconvenience/leave, you are strictly requested to *arrange a replacement* to ensure the examination is conducted uninterrupted.\n\nThank you for your cooperation.\n\n- Chief Superintendent\nExam Wing`;
-}
-
-// 4. Daily SMS (Shortest)
-function generateDailySMS(firstName, dateStr, duties) {
-    // Format: "John: Duty Tmrw 01.12 (FN). Report 9:00 AM. -CS"
-    const [dd, mm, yyyy] = dateStr.split('.');
-    const shortDate = `${dd}.${mm}.${yyyy.slice(-2)}`;
-    const sessions = duties.map(d => d.session).join('&');
-    const firstTime = calculateReportTime(duties[0].time);
-
-    return `${firstName}: Duty Tmrw ${shortDate} (${sessions}). Report ${firstTime}. -CS`;
-}
-
-function calculateReportTime(timeStr) {
+// --- 1. TIME HELPER (Global) ---
+window.calculateReportTime = function(timeStr) {
     try {
         let [time, mod] = timeStr.split(' ');
         let [h, m] = time.split(':');
         let date = new Date();
-        date.setHours(parseInt(h) + (mod === 'PM' && h !== '12' ? 12 : 0));
+        
+        let hour = parseInt(h);
+        if (mod === 'PM' && hour !== 12) hour += 12;
+        if (mod === 'AM' && hour === 12) hour = 0;
+        
+        date.setHours(hour);
         date.setMinutes(parseInt(m));
 
         // Subtract 30 mins
@@ -4636,12 +4615,180 @@ function calculateReportTime(timeStr) {
         let rm = date.getMinutes();
         let rMod = rh >= 12 ? 'PM' : 'AM';
         rh = rh % 12;
-        rh = rh ? rh : 12;
+        rh = rh ? rh : 12; // 0 becomes 12
+        
         return `${String(rh).padStart(2, '0')}:${String(rm).padStart(2, '0')} ${rMod}`;
-    } catch (e) { return timeStr; }
-}
+    } catch (e) { 
+        return timeStr; // Fallback if parsing fails
+    }
+};
 
-// --- UI Helper: Mark button as sent ---
+// --- 2. WEEKLY WHATSAPP (Professional & Official) ---
+window.generateWeeklyWhatsApp = function(name, duties) {
+    const now = new Date();
+    const hours = now.getHours();
+    
+    let greeting = "Greetings";
+    if (hours < 12) greeting = "Good Morning";
+    else if (hours < 16) greeting = "Good Afternoon";
+    else greeting = "Good Evening";
+
+    const college = (typeof currentCollegeName !== 'undefined' ? currentCollegeName : localStorage.getItem('examCollegeName')) || "GOVERNMENT VICTORIA COLLEGE";
+    
+    let msg = `🏛️ *${college.toUpperCase()}*\n`;
+    msg += `📝 *INVIGILATION DUTY INTIMATION*\n`;
+    msg += `─────────────────────\n\n`;
+    
+    msg += `${greeting} *${name}*,\n\n`;
+    msg += `This is an official intimation regarding your invigilation duties for the upcoming week. Please find the schedule below:\n\n`;
+
+    duties.forEach(d => {
+        const rTime = window.calculateReportTime(d.time);
+        msg += `🗓 *${d.date}* (${d.day})\n`;
+        msg += `⏰ ${d.session} Session  |  ${d.time}\n`;
+        msg += `↪️ Report by: *${rTime}*\n`;
+        msg += `─────────────────────\n`;
+    });
+
+    msg += `\n🛑 *GENERAL INSTRUCTIONS:*\n`;
+    msg += `1️⃣ Please report to the Chief Superintendent's office *30 minutes prior* to the commencement of the examination.\n`;
+    msg += `2️⃣ Mobile phones must be kept in *silent mode* inside the examination hall.\n`;
+    msg += `3️⃣ View detailed guidelines: https://bit.ly/gvc-exam\n\n`;
+    
+    msg += `♻️ *DUTY EXCHANGE / ADJUSTMENTS:*\n`;
+    msg += `If you are unable to attend a session, please post a request in the Exam Portal:\n`;
+    msg += `🔗 *Portal Link:* https://examflow-de08f.web.app/invigilation.html\n\n`;
+    msg += `⚠️ *Important:* Posting a request does not exempt you from duty. You remain responsible until a colleague accepts your request.\n\n`;
+    
+    msg += `Thank you for your cooperation.\n\n`;
+    msg += `Regards,\n`;
+    msg += `*Chief Superintendent*\n`;
+    msg += `Exam Cell, ${college}`;
+
+    return msg;
+};
+
+// --- 3. WEEKLY SMS (Concise) ---
+window.generateWeeklySMS = function(firstName, duties) {
+   const shortList = duties.map(d => {
+        const [dd, mm, yyyy] = d.date.split('.');
+        const shortDate = `${dd}.${mm}`;
+        return `${shortDate}(${d.session})`;
+    }).join(', ');
+
+    return `${firstName}: Exam Duties: ${shortList}. Portal: https://examflow-de08f.web.app/invigilation.html -CS`;
+};
+
+// --- 4. DAILY WHATSAPP (Reminder) ---
+window.generateDailyWhatsApp = function(name, dateStr, duties) {
+    const college = (typeof currentCollegeName !== 'undefined' ? currentCollegeName : localStorage.getItem('examCollegeName')) || "Exam Cell";
+
+    let dutyList = "";
+    duties.forEach(d => {
+        const rTime = window.calculateReportTime(d.time);
+        dutyList += `\n▪️ *Session:* ${d.session} (${d.time})\n   🕒 *Report by:* ${rTime}\n`;
+    });
+
+    return `🔔 *DUTY REMINDER FOR TOMORROW* 🔔\n\n` +
+           `Dear *${name}*,\n\n` +
+           `This is a reminder regarding your invigilation duty scheduled for tomorrow, *${dateStr}*.\n\n` +
+           `*Duty Details:*${dutyList}\n` +
+           `🛑 *INSTRUCTIONS:*\n` +
+           `1. Report to Chief Supdt office *30 mins before* exam.\n` +
+           `2. Keep mobile phones in *silent mode*.\n\n` +
+           `♻️ *Portal:* https://examflow-de08f.web.app/invigilation.html\n\n` +
+           `Thank you,\n` +
+           `*Chief Superintendent*\n${college}\n` + 
+           `_Automated Alert_`;
+};
+
+// --- 5. DAILY SMS (Concise) ---
+window.generateDailySMS = function(firstName, dateStr, duties) {
+    const sessions = duties.map(d => d.session).join('&');
+    const firstTime = window.calculateReportTime(duties[0].time);
+    return `${firstName}: Duty Tmrw ${dateStr} (${sessions}). Report ${firstTime}. Link: https://examflow-de08f.web.app/invigilation.html -CS`;
+};
+
+// --- 6. PROFESSIONAL EMAIL GENERATOR (Unified) ---
+window.generateProfessionalEmail = function(name, dutiesArray, title) {
+    const collegeName = (typeof currentCollegeName !== 'undefined' ? currentCollegeName : localStorage.getItem('examCollegeName')) || "Government Victoria College";
+
+    let rows = dutiesArray.map(d => {
+        const reportTime = window.calculateReportTime(d.time);
+        return `
+        <tr style="border-bottom: 1px solid #eee;">
+            <td style="padding: 12px; border: 1px solid #e5e7eb; color: #374151;">
+                <strong>${d.date}</strong> <br> 
+                <span style="font-size: 11px; color: #6b7280; text-transform: uppercase;">${d.day}</span>
+            </td>
+            <td style="padding: 12px; border: 1px solid #e5e7eb; color: #374151;">
+                <span style="background-color: #f3f4f6; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 11px;">${d.session}</span> 
+                ${d.time}
+            </td>
+            <td style="padding: 12px; border: 1px solid #e5e7eb; color: #c0392b; font-weight: bold;">
+                ${reportTime}
+            </td>
+        </tr>`;
+    }).join('');
+
+    return `
+    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; background-color: #ffffff;">
+        <div style="background-color: #4f46e5; color: white; padding: 20px; text-align: center;">
+            <h2 style="margin: 0; font-size: 18px; text-transform: uppercase; letter-spacing: 0.5px;">${collegeName}</h2>
+            <p style="margin: 5px 0 0; font-size: 13px; opacity: 0.9;">${title}</p>
+        </div>
+
+        <div style="padding: 25px;">
+            <p style="font-size: 15px; color: #111827; margin-top: 0;">Dear <b>${name}</b>,</p>
+            <p style="color: #4b5563; line-height: 1.6; font-size: 14px;">
+                This is an official intimation regarding your invigilation duties. Please find your schedule below:
+            </p>
+            
+            <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 13px;">
+                <thead>
+                    <tr style="background-color: #f9fafb; text-align: left;">
+                        <th style="padding: 10px; border: 1px solid #e5e7eb; font-weight: 600; color: #4b5563;">Date</th>
+                        <th style="padding: 10px; border: 1px solid #e5e7eb; font-weight: 600; color: #4b5563;">Session</th>
+                        <th style="padding: 10px; border: 1px solid #e5e7eb; font-weight: 600; color: #4b5563;">Reporting Time</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+
+            <div style="background-color: #fffbeb; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 4px; margin-top: 20px;">
+                <strong style="color: #92400e; font-size: 13px;">🛑 Instructions:</strong>
+                <ul style="margin: 8px 0 0 20px; padding: 0; color: #78350f; font-size: 13px; line-height: 1.6;">
+                    <li>Please report to the <strong>Chief Superintendent's office 30 minutes prior</strong> to the commencement of the examination.</li>
+                    <li>Mobile phones must be kept in <strong>silent mode</strong> inside the hall.</li>
+                    <li><a href="https://bit.ly/gvc-exam" style="color: #d97706; text-decoration: underline;">View General Instructions</a></li>
+                </ul>
+            </div>
+
+            <div style="margin-top: 15px; padding: 10px; background-color: #f3f4f6; border-radius: 4px; font-size: 13px; color: #374151;">
+                <p style="margin: 0 0 8px 0;">
+                    ♻️ For adjustments, please post in the <a href="https://examflow-de08f.web.app/invigilation.html" style="color: #4f46e5; font-weight: bold;">Exam Portal</a>.
+                </p>
+                <p style="margin: 0; color: #dc2626; font-weight: bold;">
+                    Important: If your Exchange Request is not picked up, you must arrange a replacement personally.
+                </p>
+            </div>
+        </div>
+
+        <div style="background-color: #f9fafb; padding: 15px; text-align: center; border-top: 1px solid #e5e7eb;">
+            <p style="margin: 0; font-size: 12px; color: #6b7280; line-height: 1.4;">
+                <strong>Exam Cell, ${collegeName}, Palakkad</strong><br>
+                This is an automated system alert. Please do not reply directly to this email.
+            </p>
+        </div>
+    </div>
+    `;
+};
+
+// --- 7. ALIAS FOR BACKWARD COMPATIBILITY ---
+// This ensures that any code calling 'generateHtmlEmailBody' still works but uses the new beautiful template.
+window.generateHtmlEmailBody = window.generateProfessionalEmail;
+
+// --- 8. UI HELPER: Mark Sent ---
 window.markAsSent = function (btn) {
     btn.classList.remove('bg-blue-600', 'bg-orange-600', 'hover:bg-blue-700', 'hover:bg-orange-700');
     btn.classList.add('bg-green-600', 'hover:bg-green-700', 'cursor-default');
@@ -4649,41 +4796,37 @@ window.markAsSent = function (btn) {
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
         Sent
     `;
-    // Optional: Disable click after sending to prevent double-send? 
-    // User might want to re-send if it failed, so we keep it clickable but green.
-}
+};
+
+// --- 9. SEND SESSION SMS (Native App) ---
 window.sendSessionSMS = function (key) {
     const slot = invigilationSlots[key];
-    if (!slot || slot.assigned.length === 0) return alert("No staff assigned to this session.");
+    if (!slot || slot.assigned.length === 0) return alert("No staff assigned.");
 
     // 1. Get Data
     const [dateStr, timeStr] = key.split(' | ');
-    const reportTime = calculateReportTime(timeStr);
+    const reportTime = window.calculateReportTime(timeStr);
 
-    // 2. Gather Phones (With Country Code)
+    // 2. Gather Phones
     const phones = [];
     slot.assigned.forEach(email => {
         const s = staffData.find(st => st.email === email);
         if (s && s.phone) {
             let p = s.phone.replace(/\D/g, '');
-            // Ensure 10 digit numbers get 91 prepended
             if (p.length === 10) p = `91${p}`;
             phones.push(p);
         }
     });
 
-    if (phones.length === 0) return alert("No valid phone numbers found for assigned staff.");
+    if (phones.length === 0) return alert("No valid phone numbers found.");
 
-    // 3. Create Short Message (Optimized for 1 SMS segment if possible)
-    // Format: "Duty: DD.MM.YY HH:MM. Report: HH:MM. -CS GVC"
-    const shortDate = dateStr.slice(0, 5); // DD.MM
-    const msg = `Duty: ${dateStr} ${timeStr}. Report: ${reportTime}. -CS GVC`;
+    // 3. Create Message
+    const msg = `Duty: ${dateStr} ${timeStr}. Report: ${reportTime}. Link: https://examflow-de08f.web.app/invigilation.html -CS GVC`;
 
     // 4. Launch Native SMS App
-    // Note: Most phones allow selecting SIM card when the app opens.
-    // Android standard: comma separated numbers
     window.location.href = `sms:${phones.join(',')}?body=${encodeURIComponent(msg)}`;
-}
+};
+
 
 // --- YEARLY ATTENDANCE CSV EXPORT (Updated Status) ---
 window.downloadAttendanceCSV = function () {
@@ -5052,60 +5195,82 @@ window.editStaff = function (index) {
 }
 
 
-
-
-// --- HELPER: Professional Email Template ---
-function generateProfessionalEmail(name, dutiesArray, title) {
-    const collegeName = collegeData.examCollegeName || "Government Victoria College";
+// --- HELPER: Generate Professional HTML Email ---
+window.generateProfessionalEmail = function(name, dutiesArray, title) {
+    const collegeName = (typeof currentCollegeName !== 'undefined' ? currentCollegeName : localStorage.getItem('examCollegeName')) || "Government Victoria College";
 
     let rows = dutiesArray.map(d => {
-        // Calculate Report Time
         const reportTime = calculateReportTime(d.time);
         return `
-        <tr>
-            <td style="padding: 8px; border: 1px solid #ddd;">${d.date}</td>
-            <td style="padding: 8px; border: 1px solid #ddd;">${d.session} (${d.time})</td>
-            <td style="padding: 8px; border: 1px solid #ddd; color: #c0392b; font-weight: bold;">${reportTime}</td>
+        <tr style="border-bottom: 1px solid #eee;">
+            <td style="padding: 12px; border: 1px solid #e5e7eb; color: #374151;">
+                <strong>${d.date}</strong> <br> 
+                <span style="font-size: 11px; color: #6b7280; text-transform: uppercase;">${d.day}</span>
+            </td>
+            <td style="padding: 12px; border: 1px solid #e5e7eb; color: #374151;">
+                <span style="background-color: #f3f4f6; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 11px;">${d.session}</span> 
+                ${d.time}
+            </td>
+            <td style="padding: 12px; border: 1px solid #e5e7eb; color: #c0392b; font-weight: bold;">
+                ${reportTime}
+            </td>
         </tr>`;
     }).join('');
 
     return `
-    <div style="font-family: Helvetica, Arial, sans-serif; color: #333; line-height: 1.6; max-width: 600px;">
-        <p>Dear <b>${name}</b>,</p>
-        <p>This is an official intimation regarding your ${title} at <b>${collegeName}</b>.</p>
-        
-        <table style="width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 14px;">
-            <thead>
-                <tr style="background-color: #f8f9fa; text-align: left;">
-                    <th style="padding: 8px; border: 1px solid #ddd;">Date</th>
-                    <th style="padding: 8px; border: 1px solid #ddd;">Session</th>
-                    <th style="padding: 8px; border: 1px solid #ddd;">Reporting Time</th>
-                </tr>
-            </thead>
-            <tbody>
-                ${rows}
-            </tbody>
-        </table>
-
-        <div style="background-color: #eef2ff; padding: 10px; border-radius: 5px; margin: 20px 0; font-size: 13px;">
-            <strong>Instructions:</strong><br>
-            Please report to the Chief Superintendent's office 30 minutes prior to the commencement of the examination.<br>
-            <a href="https://bit.ly/gvc-exam" style="color: #4f46e5;">View General Instructions</a>
+    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; background-color: #ffffff;">
+        <div style="background-color: #4f46e5; color: white; padding: 20px; text-align: center;">
+            <h2 style="margin: 0; font-size: 18px; text-transform: uppercase; letter-spacing: 0.5px;">${collegeName}</h2>
+            <p style="margin: 5px 0 0; font-size: 13px; opacity: 0.9;">${title}</p>
         </div>
 
-        <p style="font-size: 13px; color: #666;">
-            <em>For adjustments, please post in the <a href="http://www.gvc.ac.in/exam" style="color: #666;">Exam Portal</a>.</em><br>
-            <span style="color: #c0392b; font-weight: bold;">Important: If your Exchange Request is not picked up, you must arrange a replacement personally.</span>
-        </p>
-        
-        <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
-        <p style="font-size: 12px; color: #999;">
-            <b>Exam Cell, ${collegeName}</b><br>
-            <i>This is an automated system alert. Please do not reply directly to this email.</i>
-        </p>
+        <div style="padding: 25px;">
+            <p style="font-size: 15px; color: #111827; margin-top: 0;">Dear <b>${name}</b>,</p>
+            <p style="color: #4b5563; line-height: 1.6; font-size: 14px;">
+                This is an official intimation regarding your invigilation duties. Please find your schedule below:
+            </p>
+            
+            <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 13px;">
+                <thead>
+                    <tr style="background-color: #f9fafb; text-align: left;">
+                        <th style="padding: 10px; border: 1px solid #e5e7eb; font-weight: 600; color: #4b5563;">Date</th>
+                        <th style="padding: 10px; border: 1px solid #e5e7eb; font-weight: 600; color: #4b5563;">Session</th>
+                        <th style="padding: 10px; border: 1px solid #e5e7eb; font-weight: 600; color: #4b5563;">Reporting Time</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+
+            <div style="background-color: #fffbeb; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 4px; margin-top: 20px;">
+                <strong style="color: #92400e; font-size: 13px;">🛑 Instructions:</strong>
+                <ul style="margin: 8px 0 0 20px; padding: 0; color: #78350f; font-size: 13px; line-height: 1.6;">
+                    <li>Please report to the <strong>Chief Superintendent's office 30 minutes prior</strong> to the commencement of the examination.</li>
+                    <li>Mobile phones should be in <strong>silent mode</strong> inside the hall.</li>
+                    <li><a href="https://bit.ly/gvc-exam" style="color: #d97706; text-decoration: underline;">View General Instructions</a></li>
+                </ul>
+            </div>
+
+            <div style="margin-top: 15px; padding: 10px; background-color: #f3f4f6; border-radius: 4px; font-size: 13px; color: #374151;">
+                <p style="margin: 0 0 8px 0;">
+                    ♻️ For adjustments, please post in the <a href="https://examflow-de08f.web.app/invigilation.html" style="color: #4f46e5; font-weight: bold;">Exam Portal</a>.
+                </p>
+                <p style="margin: 0; color: #dc2626; font-weight: bold;">
+                    Important: If your Exchange Request is not picked up, you must arrange a replacement personally.
+                </p>
+            </div>
+        </div>
+
+        <div style="background-color: #f9fafb; padding: 15px; text-align: center; border-top: 1px solid #e5e7eb;">
+            <p style="margin: 0; font-size: 12px; color: #6b7280; line-height: 1.4;">
+                <strong>Exam Cell, ${collegeName}, Palakkad</strong><br>
+                This is an automated system alert. Please do not reply directly to this email.
+            </p>
+        </div>
     </div>
     `;
-}
+};
+
+
 // --- HELPER: Convert WhatsApp Text to HTML for Email ---
 function formatMessageForEmail(text) {
     if (!text) return "";
@@ -5115,55 +5280,42 @@ function formatMessageForEmail(text) {
         .replace(/_(.*?)_/g, '<i>$1</i>');       // Italic _text_
     return html;
 }
-// --- BULK EMAIL SENDER (With Cancel Option) ---
+
 window.sendBulkEmails = async function (btnId) {
     const btn = document.getElementById(btnId);
-    const cancelBtn = document.getElementById('btn-cancel-bulk'); // Get the cancel button
-
     if (!btn) return;
 
-    if (currentEmailQueue.length === 0) return alert("No valid emails found to send.");
-    if (!confirm(`Send detailed emails to ${currentEmailQueue.length} faculty members?`)) return;
+    if (window.currentEmailQueue.length === 0) return alert("No emails in queue.");
+    if (!confirm(`Send ${window.currentEmailQueue.length} emails to faculty members via the system?`)) return;
 
-    // 1. Reset State
-    isBulkSendingCancelled = false;
-    const originalText = btn.innerHTML;
-    btn.disabled = true;
+    // UI Setup
+    const progressBar = document.getElementById('bulk-progress-bar');
+    const progressFill = document.getElementById('bulk-progress-fill');
+    const statusText = document.getElementById('bulk-status-text');
+    const cancelBtn = document.getElementById('btn-cancel-bulk'); // If you add one
 
-    // 2. Show Cancel Button
-    if (cancelBtn) {
-        cancelBtn.classList.remove('hidden');
-        cancelBtn.disabled = false;
-        cancelBtn.textContent = "Stop / Cancel";
-        cancelBtn.classList.remove('opacity-50');
-    }
+    btn.classList.add('hidden'); // Hide start button
+    if (progressBar) progressBar.classList.remove('hidden');
+    if (statusText) statusText.classList.remove('hidden');
 
     let sentCount = 0;
-    let cancelled = false;
+    
+    for (let i = 0; i < window.currentEmailQueue.length; i++) {
+        const item = window.currentEmailQueue[i];
+        
+        // Update Status
+        if (statusText) statusText.textContent = `Sending ${i+1} of ${window.currentEmailQueue.length} to ${item.name}...`;
+        if (progressFill) progressFill.style.width = `${Math.round(((i+1) / window.currentEmailQueue.length) * 100)}%`;
 
-    // 3. Process Queue
-    for (let i = 0; i < currentEmailQueue.length; i++) {
-
-        // --- CHECK FOR CANCELLATION ---
-        if (isBulkSendingCancelled) {
-            cancelled = true;
-            break; // Stop the loop
+        // Update Individual Button Row
+        const rowBtn = document.getElementById(item.btnId);
+        if (rowBtn) {
+            rowBtn.textContent = "...";
+            rowBtn.disabled = true;
         }
 
-        const item = currentEmailQueue[i];
-
-        // Update Button Progress
-        btn.innerHTML = `<svg class="animate-spin h-4 w-4 text-white inline" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Sending ${i + 1}/${currentEmailQueue.length}...`;
-
-        // Find individual button
-        const indBtn = document.getElementById(item.btnId);
-        if (indBtn) {
-            indBtn.innerHTML = "Sending...";
-            indBtn.classList.add('bg-gray-400');
-        }
-
+        // Send
         try {
-            // Send via Google Script
             await fetch(googleScriptUrl, {
                 method: "POST",
                 mode: "no-cors",
@@ -5171,44 +5323,38 @@ window.sendBulkEmails = async function (btnId) {
                 body: JSON.stringify({
                     to: item.email,
                     subject: item.subject,
-                    body: item.body
+                    body: item.body // Send the HTML body
                 })
             });
 
-            // Success Update
-            if (indBtn) {
-                indBtn.innerHTML = "Sent";
-                indBtn.classList.remove('bg-gray-400', 'bg-gray-700');
-                indBtn.classList.add('bg-green-600', 'cursor-default');
+            // Success UI
+            if (rowBtn) {
+                rowBtn.innerHTML = "✅";
+                rowBtn.classList.remove('bg-indigo-600', 'hover:bg-indigo-700');
+                rowBtn.classList.add('bg-green-600', 'cursor-default');
             }
             sentCount++;
-
-            // Delay to prevent rate limiting
-            await new Promise(r => setTimeout(r, 800)); // Increased to 800ms for safety
+            
+            // Delay
+            await new Promise(r => setTimeout(r, 800)); 
 
         } catch (e) {
-            console.error(`Failed to send to ${item.email}`, e);
-            if (indBtn) indBtn.innerHTML = "Failed";
+            console.error(e);
+            if (rowBtn) {
+                rowBtn.textContent = "Failed";
+                rowBtn.classList.add('bg-red-600');
+            }
         }
     }
 
-    // 4. Cleanup
-    if (cancelBtn) cancelBtn.classList.add('hidden'); // Hide Cancel button
+    if (statusText) statusText.textContent = `Done! Sent ${sentCount} emails.`;
+    alert(`Batch Process Complete.\nSent: ${sentCount}`);
+    
+    // Reset (Optional)
+    // btn.classList.remove('hidden');
+    // if (progressBar) progressBar.classList.add('hidden');
+};
 
-    if (cancelled) {
-        btn.innerHTML = `⚠️ Stopped (${sentCount}/${currentEmailQueue.length})`;
-        btn.classList.remove('bg-indigo-600', 'hover:bg-indigo-700');
-        btn.classList.add('bg-orange-600', 'cursor-default');
-        alert(`Sending Cancelled.\nSuccessfully sent: ${sentCount}\nRemaining: ${currentEmailQueue.length - sentCount}`);
-    } else {
-        btn.innerHTML = `✅ Sent ${sentCount} Emails`;
-        btn.classList.remove('bg-indigo-600', 'hover:bg-indigo-700');
-        btn.classList.add('bg-green-600', 'cursor-default');
-
-        if (typeof logActivity === 'function') logActivity("Bulk Email", `Sent ${sentCount} automated emails to faculty.`);
-        alert(`Batch Complete! ${sentCount} emails sent.`);
-    }
-}
 
 // --- HELPER: Consolidated Department Email Template ---
 function generateDepartmentConsolidatedEmail(deptName, facultyData, weekNum, monthStr) {
@@ -5414,24 +5560,10 @@ window.downloadMasterBackup = function () {
     link.click();
     document.body.removeChild(link);
 }
+
 window.handleMasterRestore = function (input) {
     const file = input.files[0];
     if (!file) return;
-
-    // 1. First Warning (Click OK)
-    if (!confirm("⚠️ CRITICAL WARNING ⚠️\n\nThis will OVERWRITE all current system data including:\n- Staff List\n- Duty Assignments\n- Settings & Roles\n- Unavailability Records\n\nThis action cannot be undone. Do you want to proceed?")) {
-        input.value = "";
-        return;
-    }
-
-    // 2. Second Warning (Type CONFIRM)
-    const check = prompt("🔴 FINAL SAFETY CHECK\n\nTo overwrite the database, please type 'CONFIRM' in the box below:");
-
-    if (check !== "CONFIRM") {
-        alert("❌ Restore Aborted.\nThe confirmation code was incorrect.");
-        input.value = "";
-        return;
-    }
 
     const reader = new FileReader();
     reader.onload = async function (e) {
@@ -5443,44 +5575,112 @@ window.handleMasterRestore = function (input) {
                 throw new Error("Invalid backup file: Missing core data.");
             }
 
-            // 1. Update Local State
+            // 1. Ask User for Mode
+            const mode = prompt(
+                "♻️ RESTORE OPTIONS\n\n" +
+                "Type '1' for FULL RESTORE (Overwrites everything)\n" +
+                "Type '2' for VOLUNTEERS & INCONVENIENCE ONLY (Merges into current slots)\n\n" +
+                "Enter choice (1 or 2):"
+            );
+
+            if (mode !== '1' && mode !== '2') {
+                input.value = "";
+                return; // Cancelled silently or invalid
+            }
+
+            // 2. Safety Check
+            const confirmMsg = (mode === '1') 
+                ? "⚠️ CRITICAL WARNING ⚠️\n\nThis will OVERWRITE ALL system data (Staff, Settings, Duties).\nThis cannot be undone.\n\nType 'CONFIRM' to proceed:"
+                : "⚠️ PARTIAL RESTORE ⚠️\n\nThis will OVERWRITE duty assignments and unavailability in the current schedule using data from the backup.\n\nType 'CONFIRM' to proceed:";
+
+            if (prompt(confirmMsg) !== "CONFIRM") {
+                input.value = "";
+                return alert("Restore Cancelled. Incorrect code.");
+            }
+
+            updateSyncStatus("Restoring...", "neutral");
             const d = backup.data;
-            staffData = d.staffData || [];
-            invigilationSlots = d.invigilationSlots || {};
-            advanceUnavailability = d.advanceUnavailability || {};
-            rolesConfig = d.rolesConfig || {};
-            designationsConfig = d.designationsConfig || {};
-            departmentsConfig = d.departmentsConfig || [];
-            globalDutyTarget = d.globalDutyTarget || 2;
-            googleScriptUrl = d.googleScriptUrl || "";
-
-            // 2. Save to Cloud (Atomic Update)
             const ref = doc(db, "colleges", currentCollegeId);
-            await updateDoc(ref, {
-                examStaffData: JSON.stringify(staffData),
-                examInvigilationSlots: JSON.stringify(invigilationSlots),
-                invigAdvanceUnavailability: JSON.stringify(advanceUnavailability),
-                invigRoles: JSON.stringify(rolesConfig),
-                invigDesignations: JSON.stringify(designationsConfig),
-                invigDepartments: JSON.stringify(departmentsConfig),
-                invigGlobalTarget: globalDutyTarget,
-                invigGoogleScriptUrl: googleScriptUrl
-            });
+            let updatePayload = {};
 
-            // 3. Refresh UI
+            if (mode === '1') {
+                // --- FULL RESTORE ---
+                staffData = d.staffData || [];
+                invigilationSlots = d.invigilationSlots || {};
+                advanceUnavailability = d.advanceUnavailability || {};
+                rolesConfig = d.rolesConfig || {};
+                designationsConfig = d.designationsConfig || {};
+                departmentsConfig = d.departmentsConfig || [];
+                globalDutyTarget = d.globalDutyTarget || 2;
+                googleScriptUrl = d.googleScriptUrl || "";
+
+                // Prepare Full Payload
+                updatePayload = {
+                    examStaffData: JSON.stringify(staffData),
+                    examInvigilationSlots: JSON.stringify(invigilationSlots),
+                    invigAdvanceUnavailability: JSON.stringify(advanceUnavailability),
+                    invigRoles: JSON.stringify(rolesConfig),
+                    invigDesignations: JSON.stringify(designationsConfig),
+                    invigDepartments: JSON.stringify(departmentsConfig),
+                    invigGlobalTarget: globalDutyTarget,
+                    invigGoogleScriptUrl: googleScriptUrl
+                };
+            } 
+            else {
+                // --- PARTIAL RESTORE (Volunteers & Inconvenience) ---
+                
+                // 1. Restore Advance Unavailability (General Leave)
+                if (d.advanceUnavailability) {
+                    advanceUnavailability = d.advanceUnavailability;
+                }
+
+                // 2. Restore Slot Specific Data (Merge into existing)
+                const backupSlots = d.invigilationSlots || {};
+                let restoreCount = 0;
+
+                Object.keys(backupSlots).forEach(key => {
+                    const bSlot = backupSlots[key];
+                    
+                    // Only restore if the slot exists in the current system (e.g. correct date/time matches)
+                    if (invigilationSlots[key]) {
+                        invigilationSlots[key].assigned = bSlot.assigned || [];
+                        invigilationSlots[key].unavailable = bSlot.unavailable || [];
+                        invigilationSlots[key].exchangeRequests = bSlot.exchangeRequests || [];
+                        
+                        // Optional: Restore attendance if needed, otherwise skip
+                        // invigilationSlots[key].attendance = bSlot.attendance || [];
+                        
+                        restoreCount++;
+                    }
+                });
+
+                console.log(`Partial Restore: Updated duty data for ${restoreCount} slots.`);
+
+                // Prepare Partial Payload
+                updatePayload = {
+                    examInvigilationSlots: JSON.stringify(invigilationSlots),
+                    invigAdvanceUnavailability: JSON.stringify(advanceUnavailability)
+                };
+            }
+
+            // 3. Save to Cloud
+            await updateDoc(ref, updatePayload);
+
+            // 4. Refresh UI
             updateAdminUI();
             renderSlotsGridAdmin();
-            alert("✅ System successfully restored from backup.");
+            updateSyncStatus("Restored", "success");
+            alert(`✅ System successfully restored (${mode === '1' ? 'Full' : 'Partial'}).`);
 
         } catch (err) {
             console.error("Restore Error:", err);
             alert("Restore Failed: " + err.message);
+            updateSyncStatus("Error", "error");
         }
         input.value = ""; // Reset input
     };
     reader.readAsText(file);
 }
-
 
 // ==========================================
 // 📥 BULK ATTENDANCE UPLOAD LOGIC
@@ -5728,17 +5928,16 @@ window.filterManualStaff = function () {
         else noResults.classList.remove('hidden');
     }
 }
-// --- MANUAL ALLOCATION (Auto-Select Top N Candidates) ---
+
+
+
 window.openManualAllocationModal = function (key) {
     const slot = invigilationSlots[key];
-    const requiredCount = parseInt(slot.required) || 0; // Capture required count early
-
-    // 1. Admin Lock Check
-    // Manual allocation requires the ADMIN POSTING LOCK.
-    if (!slot.isAdminLocked) {
-        alert("⚠️ Action Denied.\n\nManual allocation requires the ADMIN POSTING LOCK.\nPlease click the '🛡️ Admin' lock button for this slot first.");
-        return;
-    }
+    const requiredCount = parseInt(slot.required) || 0; 
+    
+    // --- 1. DETERMINE MODE ---
+    // We allow opening even if NOT locked, but restrict actions
+    const isFullEditMode = slot.isAdminLocked;
 
     // 2. Reset Search
     const searchInput = document.getElementById('manual-staff-search');
@@ -5751,7 +5950,37 @@ window.openManualAllocationModal = function (key) {
     document.getElementById('manual-modal-title').textContent = key;
     document.getElementById('manual-modal-req').textContent = requiredCount;
 
-    // --- 4. SMART SORTING ---
+    // --- 4. HANDLE BUTTON STATE (LOCK LOGIC) ---
+    const saveBtn = document.querySelector('#manual-allocation-modal button[onclick="saveManualAllocation()"]');
+    const headerDiv = document.getElementById('manual-modal-title').parentNode;
+    const existingMsg = document.getElementById('manual-lock-msg');
+    if (existingMsg) existingMsg.remove();
+
+    if (!isFullEditMode) {
+        // RESTRICTED MODE
+        if (saveBtn) {
+            saveBtn.disabled = true;
+            saveBtn.classList.add('opacity-50', 'cursor-not-allowed', 'bg-gray-400');
+            saveBtn.classList.remove('bg-indigo-600', 'hover:bg-indigo-700');
+            saveBtn.innerHTML = "🔒 Lock Slot to Edit Assignments";
+        }
+        // Add Warning Banner
+        const msg = document.createElement('div');
+        msg.id = 'manual-lock-msg';
+        msg.className = "mt-2 bg-blue-50 border border-blue-200 text-blue-800 text-[10px] p-2 rounded flex items-center gap-2";
+        msg.innerHTML = "<span>ℹ️</span> <b>Read-Only Mode:</b> You can mark Unavailability (⛔), but must <b>Admin Lock (🛡️)</b> this slot to change assignments.";
+        headerDiv.appendChild(msg);
+    } else {
+        // FULL EDIT MODE
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.classList.remove('opacity-50', 'cursor-not-allowed', 'bg-gray-400');
+            saveBtn.classList.add('bg-indigo-600', 'hover:bg-indigo-700');
+            saveBtn.innerHTML = "Save Assignment Changes";
+        }
+    }
+
+    // --- 5. SMART SORTING & CONTEXT (Standard Logic) ---
     const targetDate = parseDate(key);
     const monthStr = targetDate.toLocaleString('default', { month: 'long', year: 'numeric' });
     const weekNum = getWeekOfMonth(targetDate);
@@ -5769,103 +5998,93 @@ window.openManualAllocationModal = function (key) {
         const sSlot = invigilationSlots[k];
         const sDate = parseDate(k);
         const sDateString = sDate.toDateString();
-
         const sMonth = sDate.toLocaleString('default', { month: 'long', year: 'numeric' });
         const sWeek = getWeekOfMonth(sDate);
-        const isSameWeek = (sMonth === monthStr && sWeek === weekNum);
-        const isSameDay = (sDateString === targetDateString);
-        const isAdjacent = (sDateString === prevDateStr || sDateString === nextDateStr);
-
+        
         (sSlot.assigned || []).forEach(email => {
             if (staffContext[email]) {
-                if (isSameWeek) staffContext[email].weekCount++;
-                if (isSameDay) staffContext[email].hasSameDay = true;
-                if (isAdjacent) staffContext[email].hasAdjacent = true;
+                if (sMonth === monthStr && sWeek === weekNum) staffContext[email].weekCount++;
+                if (sDateString === targetDateString) staffContext[email].hasSameDay = true;
+                if (sDateString === prevDateStr || sDateString === nextDateStr) staffContext[email].hasAdjacent = true;
             }
         });
     });
 
-    // Score Staff
     const rankedStaff = staffData
         .filter(s => s.status !== 'archived')
         .map(s => {
             const done = getDutiesDoneCount(s.email);
             const target = calculateStaffTarget(s);
             const pending = Math.max(0, target - done);
-
             const ctx = staffContext[s.email] || { weekCount: 0, hasSameDay: false, hasAdjacent: false };
-
-            // Base Score: Pending Duty Priority
             let score = pending * 100;
             let badges = [];
 
-            // Penalties (Push to bottom)
             if (ctx.weekCount >= 3) { score -= 5000; badges.push("Max 3/wk"); }
             if (ctx.hasSameDay) { score -= 2000; badges.push("Same Day"); }
             if (ctx.hasAdjacent) { score -= 1000; badges.push("Adjacent"); }
-
-            // --- DEPT SATURATION CHECK ---
+            
+            // Dept Saturation
             const assignedList = slot.assigned || [];
-            const totalAssigned = assignedList.length;
-            const myDeptCount = assignedList.filter(email => {
-                const member = staffData.find(st => st.email === email);
-                return member && member.dept === s.dept;
+            const myDeptCount = assignedList.filter(e => {
+                const m = staffData.find(st => st.email === e);
+                return m && m.dept === s.dept;
             }).length;
-
             const totalInDept = staffData.filter(st => st.dept === s.dept).length;
-            const isExempt = (totalInDept === 1);
-
-            if (!isExempt) {
-                const potentialRatio = (myDeptCount + 1) / (totalAssigned + 1);
-                if (potentialRatio > 0.5) {
-                    score -= 500;
-                    badges.push("Dept Saturation");
-                }
+            
+            if (totalInDept > 1 && ((myDeptCount + 1) / (assignedList.length + 1) > 0.5)) {
+                score -= 500;
+                badges.push("Dept Saturation");
             }
-            // -----------------------------
 
             return { ...s, pending, score, badges };
         })
-        .sort((a, b) => b.score - a.score); // Highest Score First
+        .sort((a, b) => b.score - a.score);
 
     if (typeof lastManualRanking !== 'undefined') lastManualRanking = rankedStaff;
 
-    // --- 5. RENDER & AUTO-SELECT ---
+    // --- 6. RENDER LIST ---
     const availList = document.getElementById('manual-available-list');
     availList.innerHTML = '';
 
-    // AUTO-SELECTION LOGIC: Always tick the top 'requiredCount' available staff,
-    // following the rank order (top to bottom).
-    let slotsToTick = requiredCount; 
+    const assignedSet = new Set(slot.assigned || []);
     let currentSelectionCount = 0;
+    
+    let preFilledCount = 0;
+    rankedStaff.forEach(s => { if(assignedSet.has(s.email)) preFilledCount++; });
+    let slotsToAutoFill = Math.max(0, requiredCount - preFilledCount);
 
     rankedStaff.forEach(s => {
-        // 1. Check Availability (If unavailable, skip and never select)
-        if (isUserUnavailable(slot, s.email, key)) return;
+        const isUnavailable = isUserUnavailable(slot, s.email, key);
+        const isAssigned = assignedSet.has(s.email);
+
+        if (isUnavailable && !isAssigned) return;
 
         let isChecked = false;
-
-        // Tick the top available staff until requiredCount is met.
-        if (slotsToTick > 0) {
-            isChecked = true;
-            slotsToTick--;
-        }
+        if (isAssigned) isChecked = true;
+        else if (slotsToAutoFill > 0) { isChecked = true; slotsToAutoFill--; }
 
         if (isChecked) currentSelectionCount++;
 
         const checkState = isChecked ? 'checked' : '';
+        // DISABLE CHECKBOXES IF NOT ADMIN LOCKED
+        const disabledState = !isFullEditMode ? 'disabled' : '';
         const rowClass = isChecked ? 'bg-indigo-50' : 'hover:bg-gray-50';
         const pendingColor = s.pending > 0 ? 'text-red-600' : 'text-green-600';
+        const warningHtml = s.badges.map(b => `<span class="ml-1 text-[9px] bg-orange-100 text-orange-700 px-1 py-0.5 rounded border border-orange-200">${b}</span>`).join('');
 
-        const warningHtml = s.badges.map(b =>
-            `<span class="ml-1 text-[9px] bg-orange-100 text-orange-700 px-1 py-0.5 rounded border border-orange-200">${b}</span>`
-        ).join('');
+        // ⛔ Button is ALWAYS enabled (even if not locked)
+        const unavailBtn = `
+            <button onclick="adminMarkUnavailable('${key}', '${s.email}')" 
+                    class="ml-2 text-gray-400 hover:text-red-500 hover:bg-red-50 p-1 rounded transition" 
+                    title="Mark Unavailable">
+                ⛔
+            </button>`;
 
-        // COMPACT ROW DESIGN
         availList.innerHTML += `
             <tr class="${rowClass} border-b last:border-0 transition text-xs">
                 <td class="px-1 py-2 md:px-3 text-center w-8 md:w-10">
-                    <input type="checkbox" class="manual-chk w-4 h-4 text-indigo-600 rounded" value="${s.email}" ${checkState} onchange="window.updateManualCounts()">
+                    <input type="checkbox" class="manual-chk w-4 h-4 text-indigo-600 rounded disabled:opacity-50" value="${s.email}" ${checkState} ${disabledState} onchange="window.updateManualCounts()">
                 </td>
                 <td class="px-2 py-2 md:px-3">
                     <div class="flex flex-col md:flex-row md:items-center">
@@ -5878,8 +6097,11 @@ window.openManualAllocationModal = function (key) {
                         </div>
                     </div>
                 </td>
-                <td class="px-2 py-2 md:px-3 text-center font-mono font-bold ${pendingColor} w-10 md:w-16 text-xs md:text-sm">
-                    ${s.pending}
+                <td class="px-2 py-2 md:px-3 text-center w-16 md:w-20">
+                     <div class="flex items-center justify-center gap-1">
+                        <span class="font-mono font-bold ${pendingColor} text-xs md:text-sm">${s.pending}</span>
+                        ${unavailBtn}
+                     </div>
                 </td>
             </tr>`;
     });
@@ -5888,13 +6110,13 @@ window.openManualAllocationModal = function (key) {
         availList.innerHTML = `<tr><td colspan="3" class="text-center p-4 text-gray-500 italic">No available staff found.</td></tr>`;
     }
 
-    // 6. Render Unavailable List (No change)
+    // 7. Render Unavailable List
     const unavList = document.getElementById('manual-unavailable-list');
     unavList.innerHTML = '';
-
     const allUnavailable = [];
-    if (slot.unavailable) slot.unavailable.forEach(u => allUnavailable.push(u));
+    if (slot.unavailable) slot.unavailable.forEach(u => allUnavailable.push({...u, type: 'Session'}));
 
+    // Merge Advance
     const [dateStr, timeStr] = key.split(' | ');
     let session = "FN";
     const t = timeStr ? timeStr.toUpperCase() : "";
@@ -5902,9 +6124,11 @@ window.openManualAllocationModal = function (key) {
 
     if (advanceUnavailability && advanceUnavailability[dateStr] && advanceUnavailability[dateStr][session]) {
         advanceUnavailability[dateStr][session].forEach(u => {
-            if (!allUnavailable.some(existing => (typeof existing === 'string' ? existing : existing.email) === u.email)) {
-                allUnavailable.push(u);
-            }
+             const email = (typeof u === 'string') ? u : u.email;
+             if (!allUnavailable.some(existing => (typeof existing.email === 'undefined' ? existing : existing.email) === email)) {
+                 const entry = (typeof u === 'string') ? { email: u, reason: "Advance Leave" } : u;
+                 allUnavailable.push({...entry, type: 'Advance'});
+             }
         });
     }
 
@@ -5913,54 +6137,64 @@ window.openManualAllocationModal = function (key) {
             const email = (typeof u === 'string') ? u : u.email;
             const reason = (typeof u === 'object' && u.reason) ? u.reason : "Marked Unavailable";
             const s = staffData.find(st => st.email === email) || { name: email };
+            const isAdvance = u.type === 'Advance';
+            const removeAction = `adminRemoveUnavailable('${key}', '${email}', ${isAdvance})`;
 
             unavList.innerHTML += `
                 <div class="bg-white p-2 rounded border border-red-100 text-[10px] md:text-xs shadow-sm mb-1 flex justify-between items-center">
-                    <div class="font-bold text-red-700 truncate mr-2">${s.name}</div>
-                    <div class="text-gray-500 bg-gray-50 px-1.5 py-0.5 rounded whitespace-nowrap">${reason}</div>
+                    <div class="flex items-center gap-2">
+                         <span class="font-bold text-red-700 truncate">${s.name}</span>
+                         <span class="text-[9px] text-gray-400">(${isAdvance ? 'Gen' : 'Slot'})</span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <span class="text-gray-500 bg-gray-50 px-1.5 py-0.5 rounded whitespace-nowrap">${reason}</span>
+                        <button onclick="${removeAction}" class="text-red-400 hover:text-red-600 hover:bg-red-50 rounded px-1 font-bold text-sm">×</button>
+                    </div>
                 </div>`;
         });
     } else {
         unavList.innerHTML = `<div class="text-center text-gray-400 text-xs py-4 italic">No requests.</div>`;
     }
 
-    // 7. Update Counters & Open
     document.getElementById('manual-sel-count').textContent = currentSelectionCount;
-    const reqCountEl = document.getElementById('manual-req-count');
-    if (reqCountEl) reqCountEl.textContent = requiredCount;
     window.openModal('manual-allocation-modal');
 }
+
 
 
 window.updateManualCounts = function () {
     const count = document.querySelectorAll('.manual-chk:checked').length;
     document.getElementById('manual-sel-count').textContent = count;
 }
+
 window.saveManualAllocation = async function () {
     const key = document.getElementById('manual-session-key').value;
+    
+    // --- SECURITY CHECK ---
+    if (!invigilationSlots[key].isAdminLocked) {
+        return alert("⚠️ Security Alert\n\nThis slot is currently OPEN. You must 'Lock (🛡️)' it before you can manually edit staff assignments.");
+    }
+
     const selectedEmails = Array.from(document.querySelectorAll('.manual-chk:checked')).map(c => c.value);
 
     if (invigilationSlots[key]) {
-        // --- 1. GENERATE LOGIC REPORT ---
+        // ... (Existing Logic for Log Generation and Metadata) ...
         const timestamp = new Date().toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }).toUpperCase();
         const adminName = currentUser ? currentUser.email : "Admin";
 
-        // We use the 'lastManualRanking' global variable we captured when opening the modal
-        // If it's empty (e.g. page reload), we can't generate a detailed log, so we skip.
         let logHtml = "";
-
         if (typeof lastManualRanking !== 'undefined' && lastManualRanking.length > 0) {
-            logHtml = `
+             // ... (Keep your existing log generation logic here) ...
+             // Re-paste the logic from previous turn if needed, or just wrap this check around existing function body
+             logHtml = `
                 <div class="mb-3 pb-2 border-b border-gray-200">
                     <div class="font-bold text-gray-800">Assignment Logic Report</div>
                     <div class="text-[10px] text-gray-500">${timestamp} by ${adminName}</div>
                 </div>
                 <div class="mb-3">
-                    <div class="text-xs font-bold text-green-700 uppercase mb-1">Assigned Staff (${selectedEmails.length})</div>
-            `;
-
-            // Details of Assigned
-            selectedEmails.forEach((email, i) => {
+                    <div class="text-xs font-bold text-green-700 uppercase mb-1">Assigned Staff (${selectedEmails.length})</div>`;
+             
+             selectedEmails.forEach((email, i) => {
                 const rankData = lastManualRanking.find(s => s.email === email);
                 if (rankData) {
                     const warnings = rankData.badges.length > 0 ? `<span class="text-red-600 font-bold ml-1">[${rankData.badges.join(', ')}]</span>` : "";
@@ -5969,37 +6203,40 @@ window.saveManualAllocation = async function () {
                     logHtml += `<div class="text-xs mb-1">${i + 1}. ${getNameFromEmail(email)} (Manually Added)</div>`;
                 }
             });
-
-            // Details of Top Skipped (Why were they ignored?)
-            const skipped = lastManualRanking.filter(s => !selectedEmails.includes(s.email)).slice(0, 3); // Top 3 skipped
-
-            if (skipped.length > 0) {
-                logHtml += `</div><div class="mb-2"><div class="text-xs font-bold text-orange-700 uppercase mb-1">Top Candidates Skipped</div>`;
-                skipped.forEach(s => {
-                    const warnings = s.badges.length > 0 ? `[${s.badges.join(', ')}]` : "[No Conflicts]";
-                    logHtml += `<div class="text-xs mb-1 text-gray-600"><b>${s.name}</b> (Score: ${s.score}) - ${warnings}</div>`;
-                });
-            }
-
-            logHtml += `</div><div class="text-[10px] text-gray-400 italic mt-2 border-t pt-1">Score = Pending Duty * 100 - Penalties.</div>`;
+            logHtml += `</div>`;
         } else {
             logHtml = `<div class="text-gray-500 italic">Log not available (Session reloaded).</div>`;
         }
 
-        // Save to Slot
-        invigilationSlots[key].allocationLog = logHtml;
-        invigilationSlots[key].assigned = selectedEmails;
+        const slot = invigilationSlots[key];
+        const oldAssigned = new Set(slot.assigned || []);
 
-        // --- 2. STANDARD LOGGING & SAVE ---
+        slot.allocationLog = logHtml;
+        slot.assigned = selectedEmails;
+
+        // GOD MODE UPDATE
+        selectedEmails.forEach(email => {
+            if (!oldAssigned.has(email) || !slot.assignmentMeta?.[email]) {
+                updateAssignmentMeta(slot, email, 'ADMIN');
+            }
+        });
+        
+        if (slot.assignmentMeta) {
+            Object.keys(slot.assignmentMeta).forEach(e => {
+                if (!selectedEmails.includes(e)) delete slot.assignmentMeta[e];
+            });
+        }
+
         if (typeof logActivity === 'function') logActivity("Manual Assignment", `Assigned ${selectedEmails.length} staff to session ${key}`);
 
         await syncSlotsToCloud();
         window.closeModal('manual-allocation-modal');
         renderSlotsGridAdmin();
-
-       
     }
 }
+
+
+
 window.switchAdminTab = function (tabName) {
     const tabs = ['staff', 'slots', 'attendance'];
 
@@ -6675,12 +6912,21 @@ function renderStaffUpcomingSummary(email) {
     Object.keys(invigilationSlots).forEach(key => {
         const slot = invigilationSlots[key];
         const date = parseDate(key);
-        const isUnav = slot.unavailable && slot.unavailable.some(u => (typeof u === 'string' ? u === email : u.email === email));
+        
+        // Find the specific entry object for this user
+        const unavEntry = slot.unavailable 
+            ? slot.unavailable.find(u => (typeof u === 'string' ? u === email : u.email === email)) 
+            : null;
 
-        if (date >= today && isUnav) {
+        if (date >= today && unavEntry) {
             const [dStr, tStr] = key.split(' | ');
             const sess = tStr.includes("PM") || tStr.startsWith("12") ? "AN" : "FN";
-            unavailableDates.push(`${dStr} (${sess})`);
+            
+            // Check for Admin Tag
+            const markedByAdmin = (typeof unavEntry === 'object' && unavEntry.markedBy === 'Admin');
+            const tag = markedByAdmin ? " (🛡️ By Admin)" : "";
+
+            unavailableDates.push(`${dStr} (${sess})${tag}`);
         }
     });
 
@@ -6689,14 +6935,24 @@ function renderStaffUpcomingSummary(email) {
         const d = parseDate(dateStr + " | 00:00 AM");
         if (d >= today) {
             const entry = advanceUnavailability[dateStr];
-            const sessions = [];
-            if (entry.FN && entry.FN.some(u => u.email === email)) sessions.push("FN");
-            if (entry.AN && entry.AN.some(u => u.email === email)) sessions.push("AN");
+            
+            // Helpers to find specific entry objects
+            const findEntry = (list) => list ? list.find(u => (typeof u === 'string' ? u === email : u.email === email)) : null;
+            
+            const fnEntry = findEntry(entry.FN);
+            const anEntry = findEntry(entry.AN);
 
-            if (sessions.length === 2) {
-                unavailableDates.push(`${dateStr} (Whole Day)`);
-            } else if (sessions.length > 0) {
-                unavailableDates.push(`${dateStr} (${sessions.join(',')})`);
+            // Determine Tags
+            const fnTag = (fnEntry && typeof fnEntry === 'object' && fnEntry.markedBy === 'Admin') ? " (🛡️ By Admin)" : "";
+            const anTag = (anEntry && typeof anEntry === 'object' && anEntry.markedBy === 'Admin') ? " (🛡️ By Admin)" : "";
+
+            if (fnEntry && anEntry) {
+                // If both exist, check if at least one is Admin for the tag (or specific logic)
+                const combinedTag = (fnTag || anTag) ? " (🛡️ By Admin)" : "";
+                unavailableDates.push(`${dateStr} (Whole Day)${combinedTag}`);
+            } else {
+                if (fnEntry) unavailableDates.push(`${dateStr} (FN)${fnTag}`);
+                if (anEntry) unavailableDates.push(`${dateStr} (AN)${anTag}`);
             }
         }
     });
@@ -7001,7 +7257,8 @@ window.openHodMonitorModal = function () {
 }
 
 
-// --- NEW: Open Dashboard Modal (Admin Side) ---
+
+// --- NEW: Open Dashboard Modal (Admin Side - With God Mode) ---
 window.openDashboardInvigModal = function (sessionKey) {
     const slot = invigilationSlots[sessionKey];
     if (!slot) return;
@@ -7020,7 +7277,6 @@ window.openDashboardInvigModal = function (sessionKey) {
                 <p class="text-sm">No invigilators assigned yet.</p>
             </div>`;
     } else {
-        // Sort alphabetically by name
         const sortedEmails = [...slot.assigned].sort((a, b) => {
             const nameA = (staffData.find(s => s.email === a) || {}).name || a;
             const nameB = (staffData.find(s => s.email === b) || {}).name || b;
@@ -7029,15 +7285,17 @@ window.openDashboardInvigModal = function (sessionKey) {
 
         sortedEmails.forEach(email => {
             const staff = staffData.find(s => s.email === email) || { name: email.split('@')[0], dept: "Unknown", phone: "" };
+            
+            // GOD MODE: Get Badge
+            const meta = slot.assignmentMeta ? slot.assignmentMeta[email] : null;
+            const sourceBadge = meta ? getSourceBadge(meta.source) : '';
 
-            // Phone & WhatsApp Logic (Force +91)
+            // Phone Logic
             let waLink = "#";
             let waClass = "opacity-50 cursor-not-allowed grayscale";
-
             if (staff.phone) {
                 let cleanNum = staff.phone.replace(/\D/g, '');
-                if (cleanNum.length === 10) cleanNum = '91' + cleanNum; // Add Prefix
-
+                if (cleanNum.length === 10) cleanNum = '91' + cleanNum;
                 if (cleanNum.length >= 10) {
                     waLink = `https://wa.me/${cleanNum}`;
                     waClass = "hover:bg-green-600 hover:text-white text-green-600 bg-green-50 border-green-200";
@@ -7053,16 +7311,18 @@ window.openDashboardInvigModal = function (sessionKey) {
                         ${staff.name.charAt(0)}
                     </div>
                     <div class="min-w-0">
-                        <h4 class="font-bold text-gray-800 text-sm truncate">${staff.name}</h4>
+                        <div class="flex items-center gap-2">
+                            <h4 class="font-bold text-gray-800 text-sm truncate">${staff.name}</h4>
+                            ${sourceBadge}
+                        </div>
                         <p class="text-xs text-gray-500 truncate">${staff.dept}</p>
                     </div>
                 </div>
                 
                 <div class="flex items-center gap-2 pl-2">
                     ${staff.phone ? `<a href="tel:${staff.phone}" class="p-2 rounded-full bg-gray-50 text-gray-500 hover:bg-blue-50 hover:text-blue-600 border border-gray-100 transition"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" /></svg></a>` : ''}
-                    
                     <a href="${waLink}" target="_blank" class="p-2 rounded-full border transition flex items-center justify-center ${waClass}">
-                        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.008-.57-.008-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></svg>
+                        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.008-.57-.008-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></svg>
                     </a>
                 </div>
             `;
@@ -7072,6 +7332,8 @@ window.openDashboardInvigModal = function (sessionKey) {
 
     document.getElementById('dashboard-invig-modal').classList.remove('hidden');
 }
+
+
 
 
 // Initialize Listeners
@@ -8010,6 +8272,784 @@ window.downloadVacationPDF = function() {
 
     doc.save(`Vacation_Report_${startStr}_${endStr}.pdf`);
     window.closeModal('vacation-report-modal');
+};
+
+//handles the "View List" click from the ghost card.
+
+window.openGhostUnavailabilityModal = function(title, encodedList) {
+    try {
+        const list = JSON.parse(decodeURIComponent(encodedList));
+        
+        let htmlContent = `<div class="p-4"><h3 class="font-bold text-lg mb-3 border-b pb-2">⛔ Unavailability: ${title}</h3>`;
+        
+        if (list.length === 0) {
+            htmlContent += `<p class="text-gray-500">No records found.</p>`;
+        } else {
+            htmlContent += `<div class="flex flex-col gap-2 max-h-[60vh] overflow-y-auto">`;
+            list.forEach(u => {
+                const email = (typeof u === 'string') ? u : u.email;
+                const reason = (typeof u === 'object' && u.reason) ? u.reason : "Marked Unavailable";
+                const name = getNameFromEmail(email) || email;
+                
+                htmlContent += `
+                    <div class="flex justify-between items-center bg-red-50 p-2 rounded border border-red-100">
+                        <span class="font-bold text-red-900 text-sm">${name}</span>
+                        <span class="text-xs text-red-600 bg-white px-2 py-1 rounded border border-red-100 shadow-sm">${reason}</span>
+                    </div>`;
+            });
+            htmlContent += `</div>`;
+        }
+        
+        htmlContent += `<div class="mt-4 text-right"><button onclick="closeModal('custom-ghost-modal')" class="bg-gray-800 text-white px-4 py-2 rounded shadow hover:bg-gray-700">Close</button></div></div>`;
+
+        // Use a generic modal container if available, or create one dynamically
+        let modal = document.getElementById('custom-ghost-modal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'custom-ghost-modal';
+            modal.className = "fixed inset-0 bg-black/50 z-50 flex items-center justify-center hidden backdrop-blur-sm";
+            modal.innerHTML = `<div class="bg-white rounded-xl shadow-2xl w-full max-w-md mx-4 overflow-hidden transform transition-all" id="custom-ghost-content"></div>`;
+            document.body.appendChild(modal);
+        }
+        
+        document.getElementById('custom-ghost-content').innerHTML = htmlContent;
+        modal.classList.remove('hidden');
+
+    } catch (e) {
+        alert("Error opening list: " + e.message);
+    }
+};
+
+// Helper to close the specific ghost modal
+window.closeModal = function(id) {
+    const m = document.getElementById(id);
+    if(m) m.classList.add('hidden');
+};
+
+
+
+
+// ==========================================
+// 📧 BULK EMAIL LOGIC HANDLERS
+// ==========================================
+
+// Global Queue
+window.currentEmailQueue = [];
+
+
+// --- 1. STAFF BULK MESSAGING UI (Fixed) ---
+window.triggerBulkStaffEmail = function(monthStr, weekNum) {
+    const list = document.getElementById('notif-list-container');
+    const subtitle = document.getElementById('notif-modal-subtitle');
+    
+    subtitle.textContent = "Review drafts. Use 'Send All' to auto-email via System.";
+    list.innerHTML = '<div class="text-center py-8"><span class="animate-spin text-2xl">⏳</span></div>';
+
+    // 1. Gather & Group Data
+    const dutiesByEmail = {};
+    window.currentEmailQueue = []; // Reset Queue
+
+    // --- FIX: Safe College Name Retrieval ---
+    const collegeName = localStorage.getItem('examCollegeName') || "University of Calicut";
+
+    Object.keys(invigilationSlots).forEach(key => {
+        if (invigilationSlots[key].isHidden) return;
+        const date = parseDate(key);
+        const mStr = date.toLocaleString('default', { month: 'long', year: 'numeric' });
+        const wNum = getWeekOfMonth(date);
+
+        if (mStr === monthStr && wNum === weekNum) {
+            const [dStr, tStr] = key.split(' | ');
+            const isAN = (tStr.includes("PM") || tStr.startsWith("12:") || tStr.startsWith("13:") || tStr.startsWith("14:"));
+            const sessionCode = isAN ? "AN" : "FN";
+            const dayName = date.toLocaleString('en-us', { weekday: 'short' });
+            
+            invigilationSlots[key].assigned.forEach(email => {
+                if (!dutiesByEmail[email]) dutiesByEmail[email] = [];
+                dutiesByEmail[email].push({ date: dStr, day: dayName, session: sessionCode, time: tStr });
+            });
+        }
+    });
+
+    if (Object.keys(dutiesByEmail).length === 0) {
+        list.innerHTML = `<div class="text-center text-gray-500 py-8">No invigilation duties found for this week.</div>`;
+        return;
+    }
+
+    // 2. Prepare Data & Queue
+    const sortedEmails = Object.keys(dutiesByEmail).sort((a, b) => getNameFromEmail(a).localeCompare(getNameFromEmail(b)));
+
+    sortedEmails.forEach((email, index) => {
+        const duties = dutiesByEmail[email].sort((a, b) => {
+            const d1 = a.date.split('.').reverse().join('');
+            const d2 = b.date.split('.').reverse().join('');
+            return d1.localeCompare(d2) || a.session.localeCompare(b.session);
+        });
+
+        const staff = staffData.find(s => s.email === email);
+        const name = staff ? staff.name : getNameFromEmail(email);
+
+        // Generate Beautiful Email Body (HTML)
+        const dutyLines = duties.map(d => `   • ${d.date} (${d.day}) - ${d.session} [${d.time}]`).join('<br>'); // Use <br> for HTML email
+        const subject = `Exam Duty Assignment - Week ${weekNum}`;
+        const btnId = `email-btn-${index}`;
+        
+        // Use the HTML Email Generator Helper (Defined below)
+        const bodyHTML = window.generateHtmlEmailBody(name, duties);
+
+        // Add to Queue
+        window.currentEmailQueue.push({
+            id: index,
+            email: email,
+            name: name,
+            subject: subject,
+            body: bodyHTML, // Send HTML to Apps Script
+            duties: duties,  // Keep raw data for WhatsApp generation
+            btnId: btnId,
+            status: 'pending'
+        });
+    });
+
+    // 3. Render List with Bulk Button
+    let html = `
+    <div class="flex flex-col gap-3 mb-4 border-b border-gray-100 pb-4">
+        <div class="flex items-center justify-between">
+            <button onclick="openWeeklyNotificationModal('${monthStr}', ${weekNum})" class="text-xs font-bold text-gray-500 hover:text-gray-800 flex items-center gap-1">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg> Back
+            </button>
+            <span class="text-xs font-bold text-gray-500">${window.currentEmailQueue.length} Staff Members</span>
+        </div>
+        
+        <button onclick="confirmBulkSend()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg shadow-md flex items-center justify-center gap-2 transition transform active:scale-95">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 00-2-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+            Send Emails to All (${window.currentEmailQueue.length})
+        </button>
+        
+        <div id="bulk-progress-container" class="hidden mt-2">
+            <div class="w-full bg-gray-200 rounded-full h-2.5">
+                <div id="bulk-progress-fill" class="bg-indigo-600 h-2.5 rounded-full" style="width: 0%"></div>
+            </div>
+            <p id="bulk-status-text" class="text-xs text-center text-gray-500 mt-1">Ready</p>
+        </div>
+    </div>
+
+    <div class="space-y-3 max-h-[55vh] overflow-y-auto pr-1 custom-scroll">`;
+
+    // 4. Render Individual Items
+    window.currentEmailQueue.forEach((item, index) => {
+        const staff = staffData.find(s => s.email === item.email);
+        const phone = staff ? (staff.phone || "") : "";
+        
+        // WA Logic
+        let waLink = "#";
+        let waClass = "opacity-30 cursor-not-allowed grayscale bg-gray-100 text-gray-400";
+        
+        if (phone) {
+            let cleanNum = phone.replace(/\D/g, '');
+            if (cleanNum.length === 10) cleanNum = '91' + cleanNum;
+            if (cleanNum.length >= 10) {
+                // Use the NEW generator for the link
+                const waMsg = generateWeeklyWhatsApp(item.name, item.duties);
+                waLink = `https://wa.me/${cleanNum}?text=${encodeURIComponent(waMsg)}`;
+                waClass = "bg-[#25D366] hover:bg-[#128C7E] text-white border-transparent";
+            }
+        }
+
+        const emailBtnState = item.email ? "bg-white text-indigo-600 border border-indigo-200 hover:bg-indigo-50" : "bg-gray-100 text-gray-400 cursor-not-allowed";
+
+        html += `
+        <div class="bg-white border border-gray-200 p-3 rounded-lg shadow-sm hover:shadow-md transition flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 group">
+            <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2">
+                    <div class="font-bold text-gray-800 text-sm truncate">${item.name}</div>
+                    ${!phone ? '<span class="text-[9px] text-red-400 bg-red-50 px-1 rounded">No Phone</span>' : ''}
+                </div>
+                <div class="text-xs text-gray-500 mt-0.5">${item.duties.length} Session(s)</div>
+                <div id="status-msg-${item.id}" class="text-[9px] text-gray-400 mt-1">Pending</div>
+            </div>
+            
+            <div class="flex gap-2 w-full sm:w-auto">
+                <a href="${waLink}" target="_blank" class="${waClass} px-3 py-1.5 rounded text-xs font-bold shadow-sm flex items-center justify-center gap-1 flex-1 sm:flex-none transition border">
+                    <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.008-.57-.008-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></path></svg>
+                    WhatsApp
+                </a>
+
+                <button id="${item.btnId}" onclick="sendIndividualEmail(${index})" ${item.email ? '' : 'disabled'} class="${emailBtnState} px-3 py-1.5 rounded text-xs font-bold shadow-sm flex items-center justify-center gap-1 flex-1 sm:flex-none transition">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 00-2-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                    Email
+                </button>
+            </div>
+        </div>`;
+    });
+
+    html += `</div>`;
+    list.innerHTML = html;
+};
+
+
+// Global Queue for Departments
+window.currentDeptEmailQueue = [];
+
+
+// --- 2. DEPARTMENT BULK MESSAGING UI (APPS SCRIPT) ---
+window.triggerBulkDeptEmail = function(monthStr, weekNum) {
+    const list = document.getElementById('notif-list-container');
+    const subtitle = document.getElementById('notif-modal-subtitle');
+
+    subtitle.textContent = "Send consolidated summaries via System (AppScript).";
+    list.innerHTML = '<div class="text-center py-8"><span class="animate-spin text-2xl">⏳</span></div>';
+
+    // 1. Gather Raw Duty Data by Dept
+    const rawDeptDuties = {}; 
+    window.currentDeptEmailQueue = []; // Reset Queue
+    
+    Object.keys(invigilationSlots).forEach(key => {
+        if (invigilationSlots[key].isHidden) return;
+        const date = parseDate(key);
+        const mStr = date.toLocaleString('default', { month: 'long', year: 'numeric' });
+        const wNum = getWeekOfMonth(date);
+
+        if (mStr === monthStr && wNum === weekNum) {
+            const [dStr, tStr] = key.split(' | ');
+            const isAN = (tStr.includes("PM") || tStr.startsWith("12:"));
+            const session = isAN ? "AN" : "FN";
+
+            invigilationSlots[key].assigned.forEach(email => {
+                const staff = staffData.find(s => s.email === email);
+                const dept = staff ? (staff.dept || "Unassigned") : "Unassigned";
+                const name = staff ? staff.name : getNameFromEmail(email);
+
+                if (!rawDeptDuties[dept]) rawDeptDuties[dept] = [];
+                // Store raw duty info
+                rawDeptDuties[dept].push({ name, date: dStr, session, time: tStr });
+            });
+        }
+    });
+
+    if (Object.keys(rawDeptDuties).length === 0) {
+        list.innerHTML = `<div class="text-center text-gray-500 py-8">No department data found.</div>`;
+        return;
+    }
+
+    // 2. Process Departments
+    const sortedDepts = Object.keys(rawDeptDuties).sort();
+    
+    sortedDepts.forEach((dept, index) => {
+        const entries = rawDeptDuties[dept];
+        
+        // 2.1 GROUP BY FACULTY NAME (Crucial Step for Generator)
+        // Transform [ {name:'A',...}, {name:'A',...} ]  -->  [ {name:'A', duties:[...]} ]
+        const facultyMap = {};
+        entries.forEach(e => {
+            if (!facultyMap[e.name]) {
+                facultyMap[e.name] = { name: e.name, duties: [] };
+            }
+            facultyMap[e.name].duties.push({ date: e.date, session: e.session, time: e.time });
+        });
+        const groupedFacultyList = Object.values(facultyMap); // This is what the generator expects
+
+        // Find HOD Email
+        let hodEmail = "";
+        if (typeof departmentsConfig !== 'undefined') {
+            const deptCfg = departmentsConfig.find(d => (typeof d === 'object' ? d.name : d) === dept);
+            if (deptCfg && deptCfg.email) hodEmail = deptCfg.email;
+        }
+
+        // Generate HTML Body
+        const htmlBody = generateDepartmentConsolidatedEmail(dept, groupedFacultyList, weekNum, monthStr);
+        const subject = `Consolidated Duty List: ${dept} - Week ${weekNum}`;
+
+        // Add to Queue
+        window.currentDeptEmailQueue.push({
+            id: index,
+            dept: dept,
+            email: hodEmail,
+            subject: subject,
+            body: htmlBody,
+            count: groupedFacultyList.length, // Count of distinct faculty
+            status: 'pending',
+            btnId: `btn-dept-${index}`,
+            statusId: `status-dept-${index}`
+        });
+    });
+
+    // 3. Render List with Bulk Button
+    let html = `
+    <div class="flex flex-col gap-3 mb-4 border-b border-gray-100 pb-4 sticky top-0 bg-white z-10 pt-2">
+        <div class="flex items-center justify-between">
+            <button onclick="openWeeklyNotificationModal('${monthStr}', ${weekNum})" class="text-xs font-bold text-gray-500 hover:text-gray-800 flex items-center gap-1">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg> Back
+            </button>
+            <span class="text-xs font-bold text-gray-500">${window.currentDeptEmailQueue.length} Departments</span>
+        </div>
+        
+        <button id="btn-bulk-dept-send" onclick="sendBulkDeptEmails()" class="w-full bg-teal-600 hover:bg-teal-700 text-white font-bold py-3 px-4 rounded-lg shadow-md flex items-center justify-center gap-2 transition transform active:scale-95">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 00-2-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+            Send All to Departments
+        </button>
+        <div id="dept-progress-bar" class="hidden mt-3 w-full bg-gray-200 rounded-full h-2.5">
+            <div id="dept-progress-fill" class="bg-teal-600 h-2.5 rounded-full" style="width: 0%"></div>
+        </div>
+        <p id="dept-status-text" class="text-xs text-center text-gray-500 mt-2 hidden">Initializing...</p>
+    </div>
+
+    <div class="space-y-3 max-h-[55vh] overflow-y-auto pr-1 custom-scroll">`;
+
+    // 4. Render Individual Cards
+    window.currentDeptEmailQueue.forEach((item) => {
+        const noEmail = !item.email;
+        const btnState = noEmail ? "disabled opacity-50 bg-gray-100 text-gray-400 cursor-not-allowed" : "bg-teal-50 text-teal-700 border-teal-200 hover:bg-teal-600 hover:text-white";
+        const emailLabel = noEmail ? "No Email" : "Send Mail";
+
+        html += `
+        <div class="bg-white border border-gray-200 p-3 rounded-lg shadow-sm hover:shadow-md transition flex justify-between items-center group">
+            <div class="min-w-0 pr-2">
+                <div class="font-bold text-gray-800 text-sm truncate">${item.dept}</div>
+                <div class="text-xs text-gray-500 mt-0.5 truncate">${item.count} Faculty Involved</div>
+                <div class="text-[10px] ${noEmail ? 'text-red-500 italic' : 'text-teal-600'} mt-1">
+                    ${noEmail ? 'Email address not found' : item.email}
+                </div>
+                <div id="${item.statusId}" class="text-[10px] text-gray-400 mt-1 font-mono hidden"></div>
+            </div>
+            
+            <button id="${item.btnId}" onclick="sendSingleDeptEmail(${item.id})" class="${btnState} px-3 py-1.5 rounded text-xs font-bold shadow-sm flex items-center gap-1 transition shrink-0 border">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 00-2-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                <span>${emailLabel}</span> 
+            </button>
+        </div>`;
+    });
+
+    html += `</div>`;
+    list.innerHTML = html;
+};
+
+
+
+
+
+// --- HELPER: Generate Weekly WhatsApp (Professional + Exchange Link) ---
+window.generateWeeklyWhatsApp = function(name, duties) {
+    const now = new Date();
+    const hours = now.getHours();
+    
+    // 1. Polite Time-Based Greeting
+    let greeting = "Greetings";
+    if (hours < 12) greeting = "Good Morning";
+    else if (hours < 16) greeting = "Good Afternoon";
+    else greeting = "Good Evening";
+
+    // 2. Get College Name
+    const college = (typeof currentCollegeName !== 'undefined' ? currentCollegeName : localStorage.getItem('examCollegeName')) || "GOVERNMENT VICTORIA COLLEGE";
+    
+    // 3. Build Message
+    let msg = `🏛️ *${college.toUpperCase()}*\n`;
+    msg += `📝 *INVIGILATION DUTY INTIMATION*\n`;
+    msg += `─────────────────────\n\n`;
+    
+    msg += `${greeting} *${name}*,\n\n`;
+    msg += `This is an official intimation regarding your invigilation duties for the upcoming week. Please find the schedule below:\n\n`;
+
+    // 4. Loop through duties
+    duties.forEach(d => {
+        // Calculate Reporting Time (assumed helper function exists)
+        const rTime = window.calculateReportTime ? window.calculateReportTime(d.time) : d.time;
+
+        msg += `🗓 *${d.date}* (${d.day})\n`;
+        msg += `⏰ ${d.session} Session  |  ${d.time}\n`;
+        msg += `↪️ Report by: *${rTime}*\n`;
+        msg += `─────────────────────\n`;
+    });
+
+    // 5. General Instructions
+    msg += `\n🛑 *GENERAL INSTRUCTIONS:*\n`;
+    msg += `1️⃣ Please report to the Chief Superintendent's office *30 minutes prior* to the commencement of the examination.\n`;
+    msg += `2️⃣ Mobile phones must be kept in *silent mode* inside the examination hall.\n`;
+    msg += `3️⃣ View detailed guidelines: https://bit.ly/gvc-exam\n\n`;
+    
+    // 6. Exchange Instructions & Link
+    msg += `♻️ *DUTY EXCHANGE / ADJUSTMENTS:*\n`;
+    msg += `If you are unable to attend a session, please post a request in the Exam Portal:\n`;
+    msg += `🔗 *Portal Link:* https://examflow-de08f.web.app/invigilation.html\n\n`;
+    msg += `⚠️ *Important:* Posting a request does not exempt you from duty. You remain responsible until a colleague accepts your request.\n\n`;
+    
+    // 7. Footer
+    msg += `Thank you for your cooperation.\n\n`;
+    msg += `Regards,\n`;
+    msg += `*Chief Superintendent*\n`;
+    msg += `Exam Cell, ${college}`;
+
+    return msg;
+};
+
+
+
+// --- DEPARTMENT SENDING LOGIC (API) ---
+
+// 1. Single Send
+window.sendSingleDeptEmail = async function(index) {
+    const item = window.currentDeptEmailQueue[index];
+    if (!item || !item.email) return;
+
+    if (!googleScriptUrl) return alert("⚠️ Google Apps Script URL not found in settings.");
+
+    if (!confirm(`Send consolidated duty list to ${item.dept} (${item.email})?`)) return;
+
+    const btn = document.getElementById(item.btnId);
+    const status = document.getElementById(item.statusId);
+
+    if (btn) { btn.disabled = true; btn.textContent = "..."; }
+    if (status) { status.classList.remove('hidden'); status.textContent = "Sending..."; }
+
+    try {
+        await fetch(googleScriptUrl, {
+            method: "POST",
+            mode: "no-cors",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                to: item.email,
+                subject: item.subject,
+                body: item.body // HTML Body
+            })
+        });
+
+        // Success Update
+        item.status = 'sent';
+        if (btn) { 
+            btn.innerHTML = "✅ Sent"; 
+            btn.classList.remove('bg-teal-50', 'text-teal-700', 'hover:bg-teal-600', 'hover:text-white');
+            btn.classList.add('bg-green-100', 'text-green-800', 'border-green-200');
+        }
+        if (status) { status.textContent = "Sent via System"; status.classList.add('text-green-600'); }
+        
+        // Log it
+        if (typeof logActivity === 'function') logActivity("Dept Email Sent", `Sent consolidated list to ${item.dept}`);
+
+    } catch (e) {
+        console.error(e);
+        if (btn) { btn.disabled = false; btn.textContent = "Retry"; }
+        if (status) { status.textContent = "Failed"; status.classList.add('text-red-500'); }
+        alert("Failed to send email. Check internet or API URL.");
+    }
+};
+
+// 2. Bulk Send
+window.sendBulkDeptEmails = async function() {
+    const pendingItems = window.currentDeptEmailQueue.filter(i => i.status === 'pending' && i.email);
+
+    if (pendingItems.length === 0) return alert("No valid pending emails to send.");
+    if (!confirm(`Start bulk sending to ${pendingItems.length} Departments?`)) return;
+
+    // UI Setup
+    const mainBtn = document.getElementById('btn-bulk-dept-send');
+    const progressBar = document.getElementById('dept-progress-bar');
+    const progressFill = document.getElementById('dept-progress-fill');
+    const statusText = document.getElementById('dept-status-text');
+    
+    // Allow cancellation
+    const isCancelled = { value: false }; 
+    // You can add a cancel button UI here if desired, similar to staff bulk
+
+    if(mainBtn) mainBtn.classList.add('hidden');
+    if(progressBar) progressBar.classList.remove('hidden');
+    if(statusText) { statusText.classList.remove('hidden'); statusText.textContent = "Initializing..."; }
+
+    let successCount = 0;
+
+    for (let i = 0; i < pendingItems.length; i++) {
+        const item = pendingItems[i];
+        
+        // Update Status
+        if(statusText) statusText.textContent = `Sending to ${item.dept} (${i+1}/${pendingItems.length})...`;
+        if(progressFill) progressFill.style.width = `${Math.round(((i+1)/pendingItems.length)*100)}%`;
+
+        // Update Row UI
+        const rowBtn = document.getElementById(item.btnId);
+        const rowStatus = document.getElementById(item.statusId);
+        
+        if(rowBtn) { rowBtn.textContent = "..."; rowBtn.disabled = true; }
+        if(rowStatus) { rowStatus.classList.remove('hidden'); rowStatus.textContent = "Sending..."; }
+
+        try {
+            await fetch(googleScriptUrl, {
+                method: "POST",
+                mode: "no-cors",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    to: item.email,
+                    subject: item.subject,
+                    body: item.body
+                })
+            });
+
+            successCount++;
+            item.status = 'sent';
+            
+            if(rowBtn) { 
+                rowBtn.innerHTML = "✅"; 
+                rowBtn.className = "bg-green-100 text-green-800 border-green-200 px-3 py-1.5 rounded text-xs font-bold shadow-sm flex items-center gap-1 transition shrink-0 border cursor-default";
+            }
+            if(rowStatus) { rowStatus.textContent = "Sent"; rowStatus.className = "text-[10px] text-green-600 mt-1 font-mono font-bold"; }
+
+        } catch (e) {
+            console.error(e);
+            if(rowBtn) { rowBtn.textContent = "Failed"; rowBtn.disabled = false; }
+            if(rowStatus) { rowStatus.textContent = "Error"; rowStatus.className = "text-[10px] text-red-500 mt-1 font-mono"; }
+        }
+
+        // Delay to handle rate limits
+        await new Promise(r => setTimeout(r, 1000));
+    }
+
+    if(statusText) statusText.textContent = "Completed.";
+    alert(`Batch Complete.\nSent to ${successCount} departments.`);
+    
+    // Log Bulk Action
+    if (typeof logActivity === 'function') logActivity("Bulk Dept Email", `Sent consolidated lists to ${successCount} departments.`);
+    
+    // Reset UI (Optional, keeping progress bar visible shows completion)
+};
+
+
+
+window.sendSingleEmailFromQueue = function(index) {
+    const item = window.currentEmailQueue[index];
+    if (!item) return;
+    
+    // Get the button element
+    const btn = document.getElementById(item.btnId);
+    
+    if (confirm(`Send email to ${item.name}?`)) {
+        // Call the main send function
+        // Note: 'item.body' contains HTML, so we pass it directly
+        // The main function expects (btn, email, name, subject, message)
+        // We can pass the HTML as 'message'. The main function might try to replace \n with <br>, 
+        // but if we pass HTML, it should be fine or we adjust the main function.
+        // Let's adjust the main function call to handle this.
+        
+        sendSingleEmail(btn, item.email, item.name, item.subject, item.body);
+    }
+};
+
+
+
+
+// --- HELPER: Send Email via Apps Script ---
+async function sendEmailViaAppsScript(to, subject, body) {
+    if (!googleScriptUrl) return false;
+    try {
+        await fetch(googleScriptUrl, {
+            method: "POST",
+            mode: "no-cors",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ to, subject, body })
+        });
+        return true;
+    } catch (e) {
+        console.error(e);
+        return false;
+    }
+}
+
+// --- LOGIC: Send Individual Item ---
+window.sendIndividualEmail = async function(index) {
+    const item = window.currentEmailQueue[index];
+    if (!item) return;
+
+    if (!confirm(`Send official email to ${item.name}?`)) return;
+
+    const btn = document.getElementById(item.btnId);
+    const statusMsg = document.getElementById(`status-msg-${item.id}`);
+
+    if (btn) { btn.disabled = true; btn.textContent = "..."; }
+    if (statusMsg) statusMsg.textContent = "Sending...";
+
+    const success = await sendEmailViaAppsScript(item.email, item.subject, item.body);
+
+    // With no-cors we assume success if no network error thrown
+    item.status = 'sent';
+    if (statusMsg) { statusMsg.textContent = "✅ Sent"; statusMsg.className = "text-[10px] text-green-600 mt-0.5 font-bold"; }
+    if (btn) { btn.innerHTML = "Done"; btn.classList.add('opacity-50'); }
+};
+
+// --- LOGIC: Bulk Queue Processor ---
+window.processBulkQueue = async function() {
+    const pendingItems = window.currentEmailQueue.filter(i => i.status === 'pending' && i.email);
+    
+    if (pendingItems.length === 0) return alert("No pending emails to send.");
+    if (!confirm(`Start bulk sending to ${pendingItems.length} recipients?\n\nKeep this window open until finished.`)) return;
+
+    // UI Setup
+    document.getElementById('btn-bulk-send').classList.add('hidden');
+    document.getElementById('bulk-progress-container').classList.remove('hidden');
+    
+    window.isBulkSendingCancelled = false;
+    let sentCount = 0;
+
+    for (let i = 0; i < pendingItems.length; i++) {
+        if (window.isBulkSendingCancelled) {
+            alert(`Process Stopped.\nSent: ${sentCount}`);
+            break;
+        }
+
+        const item = pendingItems[i];
+        
+        // Update Status UI
+        document.getElementById('bulk-status-text').textContent = `Sending ${i+1}/${pendingItems.length}: ${item.name}`;
+        document.getElementById('bulk-progress-fill').style.width = `${((i+1) / pendingItems.length) * 100}%`;
+
+        // Update Row UI
+        const rowStatus = document.getElementById(`status-msg-${item.id}`);
+        const rowBtn = document.getElementById(item.btnId);
+        if(rowStatus) rowStatus.textContent = "Sending...";
+        if(rowBtn) { rowBtn.textContent = "..."; rowBtn.disabled = true; }
+
+        await sendEmailViaAppsScript(item.email, item.subject, item.body);
+
+        // Update Row Success
+        item.status = 'sent';
+        sentCount++;
+        if(rowStatus) { rowStatus.textContent = "✅ Sent"; rowStatus.className = "text-[10px] text-green-600 mt-0.5 font-bold"; }
+        if(rowBtn) { rowBtn.innerHTML = "Done"; rowBtn.classList.add('opacity-50'); }
+
+        // Delay 1.2s
+        await new Promise(r => setTimeout(r, 1200)); 
+    }
+
+    document.getElementById('bulk-status-text').textContent = "Process Finished.";
+    if (!window.isBulkSendingCancelled) {
+        alert(`✅ Bulk Email Complete.\nSuccessfully sent: ${sentCount} emails.`);
+    }
+    
+    // Reset UI
+    document.getElementById('btn-bulk-send').classList.remove('hidden');
+    document.getElementById('bulk-progress-container').classList.add('hidden');
+};
+
+window.cancelBulkSending = function() {
+    window.isBulkSendingCancelled = true;
+    document.getElementById('bulk-status-text').textContent = "Stopping...";
+};
+
+// ==========================================
+// 📧 EMAIL HTML GENERATORS
+// ==========================================
+
+// 1. Generate HTML for Staff Email (Individual)
+window.generateHtmlEmailBody = function(name, duties) {
+    const college = localStorage.getItem('examCollegeName') || "EXAMINATION CELL";
+    
+    let rows = duties.map(d => 
+        `<tr>
+            <td style="padding:8px;border:1px solid #ddd;font-size:14px;">${d.date}<br><span style="font-size:11px;color:#666;">${d.day}</span></td>
+            <td style="padding:8px;border:1px solid #ddd;font-size:14px;"><b>${d.session}</b><br><span style="font-size:11px;color:#666;">${d.time}</span></td>
+        </tr>`
+    ).join('');
+
+    return `
+    <div style="font-family:Arial,sans-serif;color:#333;max-width:600px;border:1px solid #eee;border-radius:8px;overflow:hidden;">
+        <div style="background:#4f46e5;color:white;padding:20px;text-align:center;">
+            <h2 style="margin:0;font-size:18px;text-transform:uppercase;">${college}</h2>
+            <p style="margin:5px 0 0;font-size:13px;opacity:0.9;">Invigilation Duty Intimation</p>
+        </div>
+        <div style="padding:20px;">
+            <p style="font-size:15px;">Dear <b>${name}</b>,</p>
+            <p style="line-height:1.5;">You have been assigned the following exam invigilation duties for this week:</p>
+            
+            <table style="width:100%;border-collapse:collapse;margin:15px 0;background:#f9fafb;">
+                <thead>
+                    <tr style="background:#eef2ff;text-align:left;">
+                        <th style="padding:10px;border:1px solid #ddd;font-size:12px;color:#4f46e5;">DATE</th>
+                        <th style="padding:10px;border:1px solid #ddd;font-size:12px;color:#4f46e5;">SESSION</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+
+            <div style="background:#fff1f2;border-left:4px solid #f43f5e;padding:15px;margin-top:20px;font-size:13px;color:#881337;">
+                <strong>⚠️ Important Instructions:</strong>
+                <ul style="margin:5px 0 0 20px;padding:0;">
+                    <li>Please report to the Exam Cell <strong>30 minutes</strong> before the start time.</li>
+                    <li>Mobile phones are strictly prohibited inside the exam hall.</li>
+                </ul>
+            </div>
+            
+            <p style="font-size:13px;color:#666;margin-top:20px;border-top:1px solid #eee;padding-top:10px;">
+                <em>This is an automated system alert. Please do not reply directly to this email.</em>
+            </p>
+        </div>
+    </div>`;
+};
+
+// --- HELPER: Track Assignment Source (God Mode) ---
+function updateAssignmentMeta(slot, email, source) {
+    if (!slot.assignmentMeta) slot.assignmentMeta = {};
+    
+    // Only set if not already set, or if overwriting
+    // We want to preserve the original source if possible, unless it's a new add
+    slot.assignmentMeta[email] = {
+        source: source, // 'VOLUNTEER', 'AUTO', 'ADMIN', 'EXCHANGE'
+        timestamp: new Date().toISOString(),
+        by: currentUser ? currentUser.email : 'System'
+    };
+}
+
+// Helper to get badge based on source
+function getSourceBadge(source) {
+    switch (source) {
+        case 'VOLUNTEER': return '<span class="bg-blue-100 text-blue-700 text-[9px] px-1.5 py-0.5 rounded border border-blue-200" title="Self Volunteered">🙋‍♂️ Vol</span>';
+        case 'AUTO': return '<span class="bg-purple-100 text-purple-700 text-[9px] px-1.5 py-0.5 rounded border border-purple-200" title="AI/System Assigned">🤖 Auto</span>';
+        case 'ADMIN': return '<span class="bg-amber-100 text-amber-700 text-[9px] px-1.5 py-0.5 rounded border border-amber-200" title="Manually by Admin">🛡️ Admin</span>';
+        case 'EXCHANGE': return '<span class="bg-green-100 text-green-700 text-[9px] px-1.5 py-0.5 rounded border border-green-200" title="Duty Exchange">♻️ Exch</span>';
+        default: return ''; // Legacy or unknown
+    }
+}
+
+// --- ADMIN: Mark Someone Unavailable (From Manual Modal) ---
+window.adminMarkUnavailable = function(key, email) {
+    document.getElementById('unav-key').value = key;
+    document.getElementById('unav-email').value = email;
+    document.getElementById('unav-marked-by').value = 'Admin'; // <--- KEY CHANGE
+
+    document.getElementById('unav-reason').value = "";
+    document.getElementById('unav-details').value = "";
+    document.getElementById('unav-details-container').classList.add('hidden');
+    
+    window.closeModal('manual-allocation-modal');
+    window.openModal('unavailable-modal');
+};
+
+
+// --- ADMIN: Remove Unavailability (From Manual Modal) ---
+window.adminRemoveUnavailable = async function(key, email, isAdvance) {
+    if(!confirm(`Remove unavailability status for this staff member?`)) return;
+
+    if (isAdvance) {
+        // Handle Advance Leave (Complex because it's in a different object)
+        const [dateStr, timeStr] = key.split(' | ');
+        let session = "FN";
+        const t = timeStr ? timeStr.toUpperCase() : "";
+        if (t.includes("PM") || t.startsWith("12:") || t.startsWith("12.")) session = "AN";
+
+        if (advanceUnavailability[dateStr] && advanceUnavailability[dateStr][session]) {
+             advanceUnavailability[dateStr][session] = advanceUnavailability[dateStr][session].filter(u => 
+                (typeof u === 'string' ? u !== email : u.email !== email)
+             );
+             await saveAdvanceUnavailability();
+        }
+    } else {
+        // Handle Slot Specific
+        const slot = invigilationSlots[key];
+        if (slot && slot.unavailable) {
+            slot.unavailable = slot.unavailable.filter(u => 
+                (typeof u === 'string' ? u !== email : u.email !== email)
+            );
+            await syncSlotsToCloud();
+        }
+    }
+
+    // Refresh the view
+    // Since we are inside the manual modal, we should re-render it to show the change.
+    window.openManualAllocationModal(key);
 };
 
 // --- ATTENDANCE REPORT - PRINTABLE/PDF ---

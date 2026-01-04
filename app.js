@@ -161,60 +161,79 @@ window.disable_edit_data_tab = disable_edit_data_tab;
 
 
 // ==========================================
-// 🧹 AUTOMATED GHOST DATA CLEANUP (Place at TOP of app.js)
+// 🧹 AUTOMATED GHOST DATA CLEANUP (Safe 30-Day Buffer)
 // ==========================================
 async function autoCleanPastGhostData() {
     console.log("🚀 [System] Checking for expired exam data...");
+    
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+
+    // 🛡️ SAFETY BUFFER: Keep data for 30 days after the exam date
+    // This allows you to delete and re-upload past exams without losing volunteers.
+    const cutoffDate = new Date(today);
+    cutoffDate.setDate(today.getDate() - 30); 
 
     let slots = JSON.parse(localStorage.getItem('examInvigilationSlots') || '{}');
     let availability = JSON.parse(localStorage.getItem('invigAdvanceUnavailability') || '{}');
     let deletedCount = 0;
     let hasChanges = false;
 
-    // Scan Slots
+    // 1. Scan Slots
     Object.keys(slots).forEach(slotId => {
-        const dateStr = slotId.split('_')[0]; // Extract "2025-10-26"
-        const slotDate = new Date(dateStr);
+        const dateStr = slotId.split('_')[0]; 
+        // Handle "DD.MM.YYYY" or "YYYY-MM-DD"
+        let slotDate;
+        if (dateStr.includes('.')) {
+            const [d, m, y] = dateStr.split('.');
+            slotDate = new Date(`${y}-${m}-${d}`);
+        } else {
+            slotDate = new Date(dateStr);
+        }
         slotDate.setHours(0, 0, 0, 0);
 
-        // Delete if date is strictly in the past
-        if (slotDate < today) {
+        // ONLY delete if the exam is strictly older than 30 days
+        if (slotDate < cutoffDate) {
+            console.log(`🗑️ Auto-Deleting Old Record: ${slotId}`);
             delete slots[slotId];
             deletedCount++;
             hasChanges = true;
         }
     });
 
-    // Scan Availability
+    // 2. Scan Availability
     Object.keys(availability).forEach(dateStr => {
-        const availDate = new Date(dateStr);
+        let availDate;
+        if (dateStr.includes('.')) {
+            const [d, m, y] = dateStr.split('.');
+            availDate = new Date(`${y}-${m}-${d}`);
+        } else {
+            availDate = new Date(dateStr);
+        }
         availDate.setHours(0, 0, 0, 0);
 
-        if (availDate < today) {
+        if (availDate < cutoffDate) {
             delete availability[dateStr];
             hasChanges = true;
         }
     });
 
+    // 3. Save & Sync
     if (hasChanges) {
         localStorage.setItem('examInvigilationSlots', JSON.stringify(slots));
         localStorage.setItem('invigAdvanceUnavailability', JSON.stringify(availability));
         
-        // Sync to cloud if available
         if (typeof syncDataToCloud === 'function') {
             await syncDataToCloud('slots');
         }
-        
-        // Notify
-        setTimeout(() => {
-            alert(`🧹 System Maintenance\n\nRemoved ${deletedCount} expired records from previous dates.`);
-        }, 2000);
+        console.log(`🧹 Maintenance: Cleaned up ${deletedCount} records older than 30 days.`);
     } else {
-        console.log("✅ [System] No expired data found.");
+        console.log("✅ [System] Data is clean. No old records found.");
     }
 }
+
+
+
 
 // Smart Trigger (Safe to be at the top)
 document.addEventListener('DOMContentLoaded', () => {
@@ -9321,6 +9340,8 @@ window.real_populate_qp_code_session_dropdown = function () {
 
         roomSelectionModal.classList.add('hidden');
         updateAllotmentDisplay(); // Now reads the saved data and shows Serial #
+        if (window.renderInvigilationPanel) window.renderInvigilationPanel(); 
+
     }
 
 
@@ -14430,9 +14451,11 @@ if (btnSessionReschedule) {
                     actionHtml = `
                     <div class="flex flex-col sm:flex-row items-end sm:items-center justify-between w-full sm:w-auto gap-2 bg-white sm:bg-transparent p-2 sm:p-0 rounded border sm:border-0 border-green-100 mt-2 sm:mt-0">
                         ${getNameHtml(assignedName)}
-                        <div class="flex gap-1 w-full sm:w-auto">
-                            <button type="button" onclick="window.openInvigModal('${safeRoomName}')" class="flex-1 sm:flex-none text-[10px] font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 px-2 py-1 rounded hover:bg-indigo-100 transition border border-indigo-100">Change</button>
-                            <button type="button" onclick="window.handleSwapClick('${safeRoomName}')" class="flex-1 sm:flex-none text-[10px] font-bold text-orange-600 hover:text-orange-800 bg-orange-50 px-2 py-1 rounded hover:bg-orange-100 transition border border-orange-100" title="Swap with another hall">Swap</button>
+
+                       <div class="flex gap-1 w-full sm:w-auto">     
+                       <button type="button" onclick="window.openInvigModal('${safeRoomName}')" class="flex-1 sm:flex-none text-[10px] font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 px-2 py-1 rounded hover:bg-indigo-100 transition border border-indigo-100">Change</button>
+                            ${allRooms.length > 1 ? `
+                        <button type="button" onclick="window.handleSwapClick('${safeRoomName}')" class="flex-1 sm:flex-none text-[10px] font-bold text-orange-600 hover:text-orange-800 bg-orange-50 px-2 py-1 rounded hover:bg-orange-100 transition border border-orange-100" title="Swap with another hall">Swap</button>` : ''}
                         </div>
                     </div>
                 `;
@@ -14884,6 +14907,53 @@ if (btnSessionReschedule) {
             }
         });
 
+
+
+// --- 6. Append Reserve List (New Logic) ---
+    const invigSlots = JSON.parse(localStorage.getItem('examInvigilationSlots') || '{}');
+    const slot = invigSlots[sessionKey];
+    
+    if (slot && slot.assigned && slot.assigned.length > 0) {
+        // Get all assigned names for this session
+        const assignedNames = new Set(Object.values(currentSessionInvigs));
+        
+        // Find staff who are in the slot ("available") but NOT in the assigned list
+        const reserves = [];
+        slot.assigned.forEach(email => {
+            const staff = staffData.find(s => s.email === email);
+            // We match by NAME because that's what we store in the mapping
+            if (staff && !assignedNames.has(staff.name)) {
+                reserves.push(staff);
+            }
+        });
+        
+        if (reserves.length > 0) {
+            // Header for Reserves
+             rowsHtml += `
+                <tr style="background-color:#fff7ed;">
+                    <td colspan="9" style="border:1px solid #d97706; padding:6px; font-weight:bold; text-transform:uppercase; font-size:11pt; color:#9a3412; text-align:center;">
+                        RESERVES / RELIEVERS
+                    </td>
+                </tr>
+            `;
+            
+            // List each reserve invigilator
+            reserves.forEach((staff, idx) => {
+                 rowsHtml += `
+                 <tr>
+                    <td style="border:1px solid #000; padding:4px; text-align:center;">${idx + 1}</td>
+                    <td colspan="3" style="border:1px solid #000; padding:4px; font-weight:bold;">${staff.name}</td>
+                    <td colspan="3" style="border:1px solid #000; padding:4px;">${staff.dept || ""}</td>
+                    <td colspan="2" style="border:1px solid #000; padding:4px;">${staff.phone || ""}</td>
+                 </tr>
+                 `;
+            });
+        }
+    }
+
+
+        
+        
         // 6. Generate Print Window
         const w = window.open('', '_blank');
         w.document.write(`
@@ -16490,7 +16560,9 @@ window.toggleBulkLock = function() {
     }
 };
 
-// 2. Execute Delete Function (Updated to Preserve Invigilation Data)
+
+
+// 2. Execute Delete Function (Preserves Invigilation Data)
 window.executeBulkDelete = async function() {
     const startSession = document.getElementById('edit-bulk-start-session').value;
     const endSession = document.getElementById('edit-bulk-end-session').value;
@@ -16502,7 +16574,6 @@ window.executeBulkDelete = async function() {
         return;
     }
 
-    // Sort order check (using existing array order)
     const startIndex = allStudentSessions.indexOf(startSession);
     const endIndex = allStudentSessions.indexOf(endSession);
 
@@ -16512,7 +16583,7 @@ window.executeBulkDelete = async function() {
     }
 
     if (startIndex > endIndex) {
-        alert("Start Session cannot be after End Session (chronologically).");
+        alert("Start Session cannot be after End Session.");
         return;
     }
 
@@ -16520,15 +16591,12 @@ window.executeBulkDelete = async function() {
     const sessionsToDelete = allStudentSessions.slice(startIndex, endIndex + 1);
 
     // Confirmation
-    const confirmMsg = `🛑 CRITICAL WARNING 🛑\n\nYou are about to DELETE ${sessionsToDelete.length} SESSIONS.\nFrom: ${startSession}\nTo: ${endSession}\n\nThis will remove Student Data, Rooms, and Scribes.\n\nNOTE: Invigilation Volunteers & Availability will be PRESERVED.\n\nType 'DELETE' to confirm:`;
+    const confirmMsg = `🛑 CRITICAL WARNING 🛑\n\nYou are about to DELETE ${sessionsToDelete.length} SESSIONS.\nFrom: ${startSession}\nTo: ${endSession}\n\nThis will remove Student Data, Rooms, and Scribes.\n\n✅ NOTE: Invigilation Volunteers & Unavailability will be SAVED/PRESERVED.\n\nType 'DELETE' to confirm:`;
     const userInput = prompt(confirmMsg);
 
-    if (userInput !== 'DELETE') {
-        return;
-    }
+    if (userInput !== 'DELETE') return;
 
     // Execution
-    let deletedCount = 0;
     try {
         deleteBtn.innerHTML = "Deleting...";
         deleteBtn.disabled = true;
@@ -16536,8 +16604,6 @@ window.executeBulkDelete = async function() {
         const sessionSet = new Set(sessionsToDelete);
 
         // 1. Remove Students (Filter Global Array)
-        // Format in data is "DD.MM.YYYY" and "HH:MM AM"
-        // Session Key is "DD.MM.YYYY | HH:MM AM"
         allStudentData = allStudentData.filter(s => {
             const key = `${s.Date} | ${s.Time}`;
             return !sessionSet.has(key);
@@ -16545,8 +16611,7 @@ window.executeBulkDelete = async function() {
         localStorage.setItem('examBaseData', JSON.stringify(allStudentData));
 
         // 2. Remove Aux Data (Assignments, Rooms, etc.)
-        // 🟢 UPDATE: Removed 'examInvigilationSlots' and 'examInvigilatorMapping' from this list
-        // This ensures Volunteer/Availability data survives the delete.
+        // 🟢 EXCLUDING 'examInvigilationSlots' and 'examInvigilatorMapping' so they survive.
         const auxKeys = [
             'examRoomAllotment', 
             'examScribeAllotment', 
@@ -16567,19 +16632,13 @@ window.executeBulkDelete = async function() {
         });
 
         // 3. Sync to Cloud
-        // We sync 'ops' and 'allocation' to reflect the deletions.
-        // We do NOT sync 'slots' here to avoid overwriting the preserved data with empty data if logic was different.
-        // Actually, since we didn't touch localStorage for slots, we don't strictly need to sync it, 
-        // but 'allocation' sync covers rooms/scribes.
+        // Only sync Ops & Allocation. Do NOT sync 'slots' or 'staff' to avoid overwriting with empty data.
         if (typeof syncDataToCloud === 'function') {
             await syncDataToCloud('ops');
             await syncDataToCloud('allocation'); 
-            // await syncDataToCloud('slots'); // Optional: Leaving this out prevents accidental wiping if cloud has newer data
         }
         
         alert(`✅ Successfully deleted ${sessionsToDelete.length} sessions.\nInvigilation Volunteers have been preserved.`);
-        
-        // Refresh App
         window.location.reload();
 
     } catch (error) {
@@ -16589,6 +16648,7 @@ window.executeBulkDelete = async function() {
         deleteBtn.innerHTML = "Delete Range";
     }
 };
+
 
 
 
