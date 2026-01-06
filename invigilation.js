@@ -1102,6 +1102,7 @@ function renderStaffTable() {
         } else {
             actionButtons = `
                 <div class="flex gap-2 w-full md:w-auto justify-end pt-2 md:pt-0 border-t border-gray-100 md:border-0 mt-2 md:mt-0">
+                    <button onclick="window.sendWelcomeMessage('${staff.email}')" class="flex-1 md:flex-none text-green-600 hover:text-green-800 bg-green-50 px-2 py-1.5 rounded border border-green-100 transition text-xs font-bold text-center" title="Send Welcome WhatsApp">👋</button>
                     <button onclick="editStaff(${index})" class="flex-1 md:flex-none text-blue-600 hover:text-blue-900 bg-blue-50 px-3 py-1.5 rounded border border-blue-100 transition text-xs font-bold text-center">Edit</button>
                     <button onclick="openRoleAssignmentModal(${index})" class="flex-1 md:flex-none text-indigo-600 hover:text-indigo-900 bg-indigo-50 px-3 py-1.5 rounded border border-indigo-100 transition text-xs font-bold text-center">Role</button>
                     <button onclick="deleteStaff(${index})" class="flex-1 md:flex-none text-red-500 hover:text-red-700 font-bold px-3 py-1.5 rounded hover:bg-red-50 transition bg-white border border-red-100 text-center">&times;</button>
@@ -2572,6 +2573,67 @@ window.runAutoAllocation = async function () {
 //-------------------
 
 
+// ==========================================
+// 👋 WELCOME MESSAGE SYSTEM
+// ==========================================
+
+window.generateWelcomeText = function(name, dept) {
+    // 1. Dynamic College Name
+    const cName = (typeof collegeName !== 'undefined' && collegeName) ? collegeName : "Government Victoria College";
+    // 2. Find Active CS and SAS
+    const today = new Date();
+    
+    const getRolePhone = (role) => {
+        const staff = staffData.find(s => 
+            s.roleHistory && s.roleHistory.some(r => r.role === role && new Date(r.start) <= today && new Date(r.end) >= today)
+        );
+        if (staff && staff.phone) {
+             return staff.phone.replace(/\D/g, ''); // Return clean phone
+        }
+        return "9447955360"; // Default Fallback if no one assigned
+    };
+    const sasPhone = getRolePhone("Senior Asst. Superintendent");
+    const csPhone = getRolePhone("Chief Superintendent");
+    // Construct Name-Dept format
+    const displayName = `${name}-${dept}`;
+    
+    return `🔴🔴🔴
+Hi, ${displayName}, Welcome to ${cName}. You will be getting notifications regarding the examination duties posted for you on whatsapp from this number. You can view and manage duties by accessing the link 
+https://examflow-de08f.web.app/invigilation.html
+ Any changes may be reported in advance to SAS @ ${sasPhone} or to CS @ ${csPhone}. 
+🟢 *Kindly check the General instructions to invigilators here: https://bit.ly/gvc-exam*
+Please join the examination whatsapp group for latest updates using the following link
+ https://chat.whatsapp.com/LvfrheUDh4d4T63r7Bg1cv
+Also join IQAC GVC Whatsapp group Here
+https://chat.whatsapp.com/5VW4qyHBLbEEk34Bb5adZb
+Staff Club GVC group here
+https://chat.whatsapp.com/3qZbuKa4Sj2A65rcKOj4Kt
+United Victorians here
+https://chat.whatsapp.com/EK9bvCADLDDEQfuExJIV4Y
+All links will be active after replying to this message
+For any queries contact examinations@gvc.ac.in _Exam Committee - ${sasPhone}_ This is an automatically generated message`;
+};
+
+window.sendWelcomeMessage = function(email) {
+    // Safe robust lookup
+    const staff = staffData.find(s => s.email.toLowerCase() === email.toLowerCase());
+    if (!staff) return alert("Staff record not found.");
+    const msg = window.generateWelcomeText(staff.name, staff.dept);
+    
+    let phone = staff.phone || "";
+    phone = phone.replace(/\D/g, ''); // Clean number
+    if (phone.length === 10) phone = "91" + phone;
+    // Open WhatsApp
+    const url = phone 
+        ? `https://wa.me/${phone}?text=${encodeURIComponent(msg)}` 
+        : `https://wa.me/?text=${encodeURIComponent(msg)}`;
+        
+    window.open(url, '_blank');
+};
+
+
+
+
 window.saveNewStaff = async function () {
     // 1. Capture Inputs
     const indexStr = document.getElementById('stf-edit-index').value;
@@ -2697,7 +2759,15 @@ window.saveNewStaff = async function () {
         } else {
             renderStaffTable();
             updateAdminUI();
-            alert(isEditMode ? "Staff profile updated successfully." : "New staff added successfully.");
+            
+            if (isEditMode) {
+                alert("Staff profile updated successfully.");
+            } else {
+                // ✅ NEW: Prompt to send welcome message immediately
+                if (confirm("✅ New staff added successfully.\n\nDo you want to send the 'Welcome to GVC' WhatsApp message now?")) {
+                    window.sendWelcomeMessage(email);
+                }
+            }
         }
 
     } catch (e) {
@@ -4484,7 +4554,7 @@ window.openSlotReminderModal = function (key) {
     title.textContent = `🔔 Daily Reminder: ${targetDateStr}`;
     subtitle.textContent = "Send reminders for ALL duties on this day.";
     list.innerHTML = '';
-    currentEmailQueue = [];
+    window.currentEmailQueue = [];
 
     // Find ALL Sessions for this Date
     const dailyDuties = {};
@@ -4494,9 +4564,16 @@ window.openSlotReminderModal = function (key) {
             const [d, t] = slotKey.split(' | ');
             const isAN = (t.includes("PM") || t.startsWith("12"));
             const sessionCode = isAN ? "AN" : "FN";
+            
+            // ✅ FIX: Calculate Day Name (e.g. MONDAY)
+            // Parse DD.MM.YYYY
+            const [dayPart, monthPart, yearPart] = d.split('.');
+            const dateObj = new Date(`${yearPart}-${monthPart}-${dayPart}`); 
+            const dayName = dateObj.toLocaleString('en-us', { weekday: 'long' }); // e.g. Monday
             slot.assigned.forEach(email => {
                 if (!dailyDuties[email]) dailyDuties[email] = [];
-                dailyDuties[email].push({ date: d, time: t, session: sessionCode });
+                // ✅ FIX: Include 'day' in the object
+                dailyDuties[email].push({ date: d, day: dayName, time: t, session: sessionCode });
             });
         }
     });
@@ -4528,10 +4605,12 @@ window.openSlotReminderModal = function (key) {
         const duties = dailyDuties[email];
         duties.sort((a, b) => a.time.localeCompare(b.time));
 
-        const staff = staffData.find(s => s.email === email);
+        // FIX: Case-insensitive search + Fallback
+        const staff = staffData.find(s => s.email.toLowerCase() === email.toLowerCase());
         const fullName = staff ? staff.name : email;
         const firstName = getFirstName(fullName);
-        const staffEmail = staff ? staff.email : "";
+        // FIX: If staff not found, use the raw email from the duty list
+        const staffEmail = staff ? staff.email : email;
 
         let phone = staff ? (staff.phone || "") : "";
         phone = phone.replace(/\D/g, '');
@@ -4542,7 +4621,7 @@ window.openSlotReminderModal = function (key) {
         const btnId = `email-btn-${index}`;
 
         if (staffEmail) {
-            currentEmailQueue.push({ email: staffEmail, name: fullName, subject: emailSubject, body: emailBody, btnId: btnId });
+            window.currentEmailQueue.push({ email: staffEmail, name: fullName, subject: emailSubject, body: emailBody, btnId: btnId });
         }
 
         // *** UPDATED: Generate detailed daily message ***
@@ -4732,8 +4811,10 @@ window.generateProfessionalEmail = function(name, dutiesArray, title) {
     }).join('');
 
     return `
-    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; background-color: #ffffff;">
-        <div style="background-color: #4f46e5; color: white; padding: 20px; text-align: center;">
+    <div style="background-color: #4f46e5; color: white; padding: 20px; text-align: center;">
+            <!-- ✅ NEW: College Logo -->
+            <img src="https://examflow-de08f.web.app/CollegeLogo.png" alt="Logo" style="height: 50px; width: auto; margin-bottom: 2px; display: inline-block;">
+            
             <h2 style="margin: 0; font-size: 18px; text-transform: uppercase; letter-spacing: 0.5px;">${collegeName}</h2>
             <p style="margin: 5px 0 0; font-size: 13px; opacity: 0.9;">${title}</p>
         </div>
@@ -5220,6 +5301,8 @@ window.generateProfessionalEmail = function(name, dutiesArray, title) {
     return `
     <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; background-color: #ffffff;">
         <div style="background-color: #4f46e5; color: white; padding: 20px; text-align: center;">
+            <!-- ✅ NEW: College Logo -->
+            <img src="https://examflow-de08f.web.app/CollegeLogo.png" alt="Logo" style="height: 50px; width: auto; margin-bottom: 2px; display: inline-block;">
             <h2 style="margin: 0; font-size: 18px; text-transform: uppercase; letter-spacing: 0.5px;">${collegeName}</h2>
             <p style="margin: 5px 0 0; font-size: 13px; opacity: 0.9;">${title}</p>
         </div>
@@ -5389,6 +5472,15 @@ function generateDepartmentConsolidatedEmail(deptName, facultyData, weekNum, mon
 
     return `
     <div style="font-family: Helvetica, Arial, sans-serif; color: #333; line-height: 1.6; max-width: 800px;">
+
+
+        <!-- ✅ NEW: Header Block with Logo -->
+        <div style="background-color: #4f46e5; color: white; padding: 20px; text-align: center; border-radius: 6px 6px 0 0; margin-bottom: 20px;">
+            <img src="https://examflow-de08f.web.app/CollegeLogo.png" alt="Logo" style="height: 50px; width: auto; margin-bottom: 2px; display: inline-block;">
+            <h2 style="margin: 0; font-size: 18px; text-transform: uppercase;">${collegeName}</h2>
+            <p style="margin: 5px 0 0; font-size: 13px; opacity: 0.9;">Department Duty List</p>
+        </div>
+    
         <p>Dear Head of Department (<b>${deptName}</b>),</p>
         <p>Please find below the consolidated invigilation duty list for faculty members of your department for <b>Week ${weekNum} (${monthStr})</b>.</p>
         
@@ -8948,6 +9040,8 @@ window.generateHtmlEmailBody = function(name, duties) {
     return `
     <div style="font-family:Arial,sans-serif;color:#333;max-width:600px;border:1px solid #eee;border-radius:8px;overflow:hidden;">
         <div style="background:#4f46e5;color:white;padding:20px;text-align:center;">
+        <!-- ✅ NEW: College Logo -->
+            <img src="https://examflow-de08f.web.app/CollegeLogo.png" alt="Logo" style="height: 50px; width: auto; margin-bottom: 2px; display: inline-block;">
             <h2 style="margin:0;font-size:18px;text-transform:uppercase;">${college}</h2>
             <p style="margin:5px 0 0;font-size:13px;opacity:0.9;">Invigilation Duty Intimation</p>
         </div>
