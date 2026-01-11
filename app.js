@@ -9354,7 +9354,12 @@ window.real_populate_qp_code_session_dropdown = function () {
             }
         }
 
-        const newStudents = candidates.slice(0, capacity);
+        // SMART ALLOTMENT: If remaining students are <= 33, put them ALL in this room
+        let limit = capacity;
+        if (candidates.length <= 33) {
+            limit = candidates.length;
+            }
+        const newStudents = candidates.slice(0, limit);
 
         if (newStudents.length === 0) {
             alert(`No unallotted students found for stream: ${targetStream}`);
@@ -14360,17 +14365,18 @@ if (btnSessionReschedule) {
         renderScribeAllotmentList(currentSessionKey);
     };
 
-    // ==========================================
+
+  // ==========================================
     // 👮 INVIGILATOR ASSIGNMENT MODULE (WITH SWAP)
     // ==========================================
 
     let swapSourceRoom = null; // Track which room is selected for swapping
 
-    // 1. Render the Main Assignment Panel (Fixed: Keeps Names Visible in Swap Mode)
+    // 1. Render the Main Assignment Panel (Vertical Buttons on PC)
     window.renderInvigilationPanel = function () {
         const section = document.getElementById('invigilator-assignment-section');
         const list = document.getElementById('invigilator-list-container');
-        const sessionKey = allotmentSessionSelect.value;
+        const sessionKey = allotmentSessionSelect.value; 
 
         if (!sessionKey) {
             if (section) section.classList.add('hidden');
@@ -14379,7 +14385,7 @@ if (btnSessionReschedule) {
 
         // A. Consolidate Rooms
         const roomDataMap = {};
-        if (currentSessionAllotment && currentSessionAllotment.length > 0) {
+        if (typeof currentSessionAllotment !== 'undefined' && currentSessionAllotment && currentSessionAllotment.length > 0) {
             currentSessionAllotment.forEach(room => {
                 if (!roomDataMap[room.roomName]) roomDataMap[room.roomName] = { name: room.roomName, count: 0, streams: new Set(), isScribe: false };
                 roomDataMap[room.roomName].count += room.students.length;
@@ -14410,13 +14416,16 @@ if (btnSessionReschedule) {
 
         // --- SWAP MODE BANNER ---
         if (swapSourceRoom) {
-            list.innerHTML += `
-            <div class="bg-orange-50 border border-orange-200 text-orange-800 text-xs font-bold p-3 rounded-lg mb-3 flex justify-between items-center shadow-sm sticky top-0 z-10">
+             list.innerHTML += `
+            <div class="bg-orange-50 border border-orange-200 text-orange-800 text-xs font-bold p-3 rounded-lg mb-3 flex justify-between items-center shadow-sm sticky top-0 z-10 animate-fade-in-down">
                 <div class="flex items-center gap-2">
-                    <span class="animate-pulse">🔄</span> 
-                    <span>Select a target room to swap invigilators.</span>
+                    <span class="animate-pulse text-xl">🔄</span> 
+                    <div>
+                        <div class="uppercase text-[10px] opacity-70 tracking-wider">Swap Mode Active</div>
+                        <div>Select a target room for <strong>${swapSourceRoom}</strong></div>
+                    </div>
                 </div>
-                <button onclick="window.handleSwapClick('${swapSourceRoom.replace(/'/g, "\\'")}')" class="bg-white border border-orange-200 px-3 py-1 rounded hover:bg-orange-100 transition text-[10px]">Cancel</button>
+                <button onclick="window.handleSwapClick('${swapSourceRoom.replace(/'/g, "\\'")}')" class="bg-white border border-orange-200 text-orange-700 px-3 py-1.5 rounded-md hover:bg-orange-100 transition text-xs font-bold shadow-sm">Cancel</button>
             </div>
         `;
         }
@@ -14432,22 +14441,25 @@ if (btnSessionReschedule) {
             const safeRoomName = roomName.replace(/'/g, "\\'");
 
             const streamBadges = Array.from(room.streams).map(s => {
-                let color = "bg-blue-100 text-blue-800 border-blue-200";
-                if (s === "Scribe") color = "bg-orange-100 text-orange-800 border-orange-200";
-                else if (s !== "Regular") color = "bg-purple-100 text-purple-800 border-purple-200";
+                let color = "bg-blue-50 text-blue-700 border-blue-100";
+                if (s === "Scribe") color = "bg-orange-50 text-orange-700 border-orange-100";
+                else if (s !== "Regular") color = "bg-purple-50 text-purple-700 border-purple-100";
                 return `<span class="text-[9px] px-1.5 py-0.5 rounded border ${color} font-bold uppercase tracking-wide whitespace-nowrap">${s}</span>`;
             }).join(' ');
 
-            let cardBorder = assignedName ? "border-green-200 bg-green-50/30" : "border-gray-200 bg-white";
-            if (swapSourceRoom === roomName) cardBorder = "border-orange-400 ring-2 ring-orange-100 bg-orange-50";
+            let cardBorder = assignedName ? "border-l-4 border-l-green-500 border-y border-r border-gray-200 bg-white" : "border-l-4 border-l-gray-300 border-y border-r border-gray-200 bg-gray-50/50";
+            if (swapSourceRoom === roomName) cardBorder = "border-l-4 border-l-orange-500 border-y border-r border-orange-200 bg-orange-50 ring-2 ring-orange-100";
 
-            // --- NAME DISPLAY HELPER ---
+            // --- SMART NAME DISPLAY ---
             const getNameHtml = (name) => `
-            <div class="flex items-center gap-2 min-w-0 mb-2 sm:mb-0 sm:mr-2">
-                 <div class="bg-green-100 text-green-700 p-1 rounded-full shrink-0">
-                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
+            <div class="flex items-center gap-2.5 mb-3 sm:mb-0 bg-green-50/80 p-2 sm:p-0 rounded-lg sm:bg-transparent border sm:border-0 border-green-100 w-full sm:w-auto h-full">
+                 <div class="bg-green-100 text-green-700 p-1.5 rounded-full shrink-0">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
                  </div>
-                 <span class="text-xs font-bold text-green-800 truncate max-w-[150px] sm:max-w-[200px]" title="${name}">${name}</span>
+                 <div class="min-w-0 flex-1">
+                     <div class="text-[10px] text-green-600 uppercase font-bold tracking-wider leading-none mb-0.5 sm:hidden">Invigilator</div>
+                     <div class="text-sm font-bold text-gray-800 sm:text-green-800 break-words sm:truncate" title="${name}">${name}</div>
+                 </div>
             </div>`;
 
             let actionHtml = "";
@@ -14455,89 +14467,107 @@ if (btnSessionReschedule) {
             if (swapSourceRoom) {
                 // === SWAP MODE ===
                 if (swapSourceRoom === roomName) {
-                    // SOURCE ROOM (Show Name + Cancel)
                     actionHtml = `
-                    <div class="flex flex-col sm:flex-row items-end sm:items-center justify-between w-full sm:w-auto">
-                        ${getNameHtml(assignedName)}
-                        <button onclick="window.handleSwapClick('${safeRoomName}')" class="w-full sm:w-auto bg-gray-500 text-white border border-transparent px-4 py-1.5 rounded text-xs font-bold hover:bg-gray-600 transition shadow-sm">
-                            Cancel
+                    <div class="flex flex-col sm:flex-row items-stretch sm:items-center justify-between w-full h-full gap-2">
+                        <div class="flex-1">${getNameHtml(assignedName)}</div>
+                        <button onclick="window.handleSwapClick('${safeRoomName}')" class="w-full sm:w-auto bg-gray-500 text-white border border-transparent px-4 py-2 rounded text-xs font-bold hover:bg-gray-600 transition shadow-sm h-full">
+                            Cancel Swap
                         </button>
                     </div>`;
                 } else {
-                    // TARGET ROOM
                     const btnLabel = assignedName ? "Swap Here" : "Move Here";
                     const btnColor = assignedName ? "bg-indigo-600 hover:bg-indigo-700" : "bg-green-600 hover:bg-green-700";
-
+                    
                     const btnHtml = `
-                    <button onclick="window.handleSwapClick('${safeRoomName}')" class="w-full sm:w-auto ${btnColor} text-white border border-transparent px-4 py-1.5 rounded text-xs font-bold transition shadow-sm flex items-center justify-center gap-1">
-                        <svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" /></svg>
+                    <button onclick="window.handleSwapClick('${safeRoomName}')" class="w-full h-full ${btnColor} text-white border border-transparent px-4 py-2 rounded text-xs font-bold transition shadow-sm flex items-center justify-center gap-1.5">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" /></svg>
                         ${btnLabel}
                     </button>`;
 
-                    if (assignedName) {
-                        // Occupied Target: Show Name + Swap Button
-                        actionHtml = `
-                        <div class="flex flex-col sm:flex-row items-end sm:items-center justify-between w-full sm:w-auto">
-                            ${getNameHtml(assignedName)}
-                            ${btnHtml}
-                        </div>`;
-                    } else {
-                        // Empty Target: Just Move Button
-                        actionHtml = btnHtml;
-                    }
+                    actionHtml = assignedName ? 
+                        `<div class="flex flex-col sm:flex-row items-stretch w-full h-full gap-2">
+                            <div class="flex-1">${getNameHtml(assignedName)}</div>
+                            <div class="sm:w-32">${btnHtml}</div>
+                        </div>` : btnHtml;
                 }
             } else {
                 // === NORMAL MODE ===
                 if (assignedName) {
+                    // STACKED BUTTONS: Grid on Mobile (1 row), Flex-Col on PC (Vertical Stack)
                     actionHtml = `
-                    <div class="flex flex-col sm:flex-row items-end sm:items-center justify-between w-full sm:w-auto gap-2 bg-white sm:bg-transparent p-2 sm:p-0 rounded border sm:border-0 border-green-100 mt-2 sm:mt-0">
-                        ${getNameHtml(assignedName)}
+                    <div class="flex flex-col sm:flex-row items-stretch w-full h-full gap-3">
+                        
+                        <!-- Name Area (Middle) -->
+                        <div class="flex-1 flex items-center">
+                            ${getNameHtml(assignedName)}
+                        </div>
 
-                       <div class="flex gap-1 w-full sm:w-auto">     
-                       <button type="button" onclick="window.openInvigModal('${safeRoomName}')" class="flex-1 sm:flex-none text-[10px] font-bold text-indigo-600 hover:text-indigo-800 bg-indigo-50 px-2 py-1 rounded hover:bg-indigo-100 transition border border-indigo-100">Change</button>
-                            ${allRooms.length > 1 ? `
-                        <button type="button" onclick="window.handleSwapClick('${safeRoomName}')" class="flex-1 sm:flex-none text-[10px] font-bold text-orange-600 hover:text-orange-800 bg-orange-50 px-2 py-1 rounded hover:bg-orange-100 transition border border-orange-100" title="Swap with another hall">Swap</button>` : ''}
+                        <!-- Button Stack (Right - Fixed Width on PC) -->
+                        <div class="sm:border-l border-gray-100 sm:pl-3 w-full sm:w-28 flex flex-col justify-center">
+                           <div class="grid grid-cols-3 sm:flex sm:flex-col gap-1.5 w-full">     
+                               <button type="button" onclick="window.openInvigModal('${safeRoomName}')" class="flex-1 sm:flex-none flex items-center justify-center gap-1 text-[10px] font-bold text-indigo-700 bg-indigo-50 px-2 py-1.5 rounded hover:bg-indigo-100 transition border border-indigo-200" title="Change Staff">
+                                    Change
+                               </button>
+                               
+                               <button type="button" onclick="window.openReplaceInvigModal('${safeRoomName}')" class="flex-1 sm:flex-none flex items-center justify-center gap-1 text-[10px] font-bold text-teal-700 bg-teal-50 px-2 py-1.5 rounded hover:bg-teal-100 transition border border-teal-200" title="Replace Staff">
+                                    Replace
+                               </button>
+                               
+                               ${allRooms.length > 1 ? `
+                               <button type="button" onclick="window.handleSwapClick('${safeRoomName}')" class="flex-1 sm:flex-none flex items-center justify-center gap-1 text-[10px] font-bold text-orange-700 bg-orange-50 px-2 py-1.5 rounded hover:bg-orange-100 transition border border-orange-200" title="Swap">
+                                    Swap
+                               </button>` : ''}
+                            </div>
                         </div>
                     </div>
                 `;
                 } else {
                     actionHtml = `
-                    <button type="button" onclick="window.openInvigModal('${safeRoomName}')" class="w-full sm:w-auto mt-2 sm:mt-0 bg-indigo-600 text-white border border-transparent px-4 py-1.5 rounded text-xs font-bold hover:bg-indigo-700 transition shadow-sm flex items-center justify-center gap-1">
-                        <span>+</span> Assign
+                    <button type="button" onclick="window.openInvigModal('${safeRoomName}')" class="w-full h-full sm:h-auto mt-2 sm:mt-0 bg-white border-2 border-dashed border-indigo-300 text-indigo-600 px-4 py-3 rounded-lg text-xs font-bold hover:bg-indigo-50 hover:border-indigo-400 transition shadow-sm flex items-center justify-center gap-2 group">
+                        <span class="bg-indigo-100 text-indigo-600 rounded-full w-5 h-5 flex items-center justify-center group-hover:bg-indigo-200 transition">+</span>
+                        Assign Invigilator
                     </button>
                 `;
                 }
             }
 
+            // PC LAYOUT: 3 Columns [Room Info | Separator | Actions]
             list.innerHTML += `
-            <div class="p-3 border rounded-lg shadow-sm ${cardBorder} hover:shadow-md transition mb-2">
-                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-1 sm:gap-3">
-                    <div class="flex items-start gap-3 min-w-0">
-                        <div class="flex flex-col items-center justify-center w-10 h-10 bg-gray-100 text-gray-600 rounded-lg font-bold text-xs border border-gray-200 shrink-0">
-                            <span class="text-[8px] text-gray-400 uppercase leading-none mb-0.5">Hall</span>
-                            <span>#${serial}</span>
+            <div class="bg-white rounded-xl shadow-sm ${cardBorder} transition-all duration-200 hover:shadow-md mb-3 overflow-hidden">
+                <div class="flex flex-col sm:flex-row sm:items-stretch min-h-[85px]">
+                    
+                    <!-- LEFT PANEL: Room Info (Fixed 40% on PC) -->
+                    <div class="p-3 sm:p-4 flex items-start gap-3 sm:w-[40%] min-w-0 border-b sm:border-b-0 sm:border-r border-gray-100">
+                        <div class="flex flex-col items-center justify-center w-12 h-12 bg-white text-gray-700 rounded-xl font-bold text-sm border-2 border-gray-100 shadow-sm shrink-0">
+                            <span class="text-[9px] text-gray-400 uppercase leading-none mb-0.5 font-bold">Hall</span>
+                            <span>${serial}</span>
                         </div>
-                        <div class="min-w-0 flex-1">
-                            <div class="font-bold text-gray-800 text-sm flex flex-wrap items-baseline gap-1">
-                                <span class="truncate">${roomName}</span>
-                                <span class="text-xs text-gray-400 font-normal truncate">${location ? `(${location})` : ''}</span>
+                        <div class="min-w-0 flex-1 pt-0.5">
+                            <div class="font-bold text-gray-800 text-base leading-tight break-words">
+                                ${roomName}
                             </div>
-                            <div class="flex flex-wrap items-center gap-2 mt-1.5">
-                                <span class="text-[10px] text-gray-500 font-semibold bg-white px-1.5 py-0.5 rounded border border-gray-200 shadow-sm whitespace-nowrap">
-                                    👥 ${room.count}
+                             ${location ? `<div class="text-xs text-gray-500 font-medium mt-0.5 truncate flex items-center gap-1"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>${location}</div>` : ''}
+                            
+                            <div class="flex flex-wrap items-center gap-2 mt-2">
+                                <span class="text-[10px] text-gray-600 font-bold bg-gray-100 px-2 py-0.5 rounded-full border border-gray-200 whitespace-nowrap flex items-center gap-1">
+                                    <span>👥</span> ${room.count}
                                 </span>
                                 ${streamBadges}
                             </div>
                         </div>
                     </div>
-                    <div class="sm:text-right min-w-[200px]">
+
+                    <!-- RIGHT PANEL: Actions (Flex-1) -->
+                    <div class="p-3 sm:px-4 sm:py-2 flex-1 bg-gray-50/20 sm:bg-white flex flex-col justify-center">
                         ${actionHtml}
                     </div>
                 </div>
             </div>
         `;
         });
-    }
+    };
+    
+    
 
     // 2. Handle Swap Interaction
     window.handleSwapClick = function (roomName) {
@@ -14769,6 +14799,22 @@ if (btnSessionReschedule) {
         }
     }
 
+    // --- Helper: Fetch Active Official for Date ---
+    function getOfficialForDate(roleName, dateObj) {
+        const staffData = JSON.parse(localStorage.getItem('examStaffData') || '[]');
+        // Normalize Target Date
+        const target = new Date(dateObj);
+        target.setHours(12, 0, 0, 0); 
+
+        const found = staffData.find(s => s.roleHistory && s.roleHistory.some(r => {
+            const start = new Date(r.start); start.setHours(0,0,0,0);
+            const end = new Date(r.end); end.setHours(23,59,59,999);
+            // Flexible Role Check
+            return (r.role === roleName) && (target >= start && target <= end);
+        }));
+        return found ? found.name : ""; 
+    }
+    
 
     // 5. Print List (Final: Stream-Wise Empty Rows + Invig Names + Dept + Mobile)
     window.printInvigilatorList = function () {
@@ -15002,30 +15048,72 @@ if (displayLoc) {
 
         
         
-        // 6. Generate Print Window
-        const w = window.open('', '_blank');
-        w.document.write(`
+           // 6. Generate Print Window
+    
+    // FETCH OFFICIALS
+    let dateObj = new Date();
+    try {
+        const [d, m, y] = date.split('.');
+        dateObj = new Date(y, m - 1, d);
+    } catch(e) {}
+    
+    // Helper to get official (ensure this helper exists or use internal logic)
+    const getOfficial = (role) => {
+         // Fallback logic if helper is missing
+         const staff = staffData.find(s => s.roleHistory && s.roleHistory.some(r => {
+            const start = new Date(r.start); start.setHours(0,0,0,0);
+            const end = new Date(r.end); end.setHours(23,59,59,999);
+            // Flexible Role Check
+            return (r.role === role) && (dateObj >= start && dateObj <= end);
+        }));
+        return staff ? staff.name : "";
+    };
+
+    const seniorName = getOfficial("Senior Asst. Superintendent");
+    const chiefName = getOfficial("Chief Superintendent");
+
+    const w = window.open('', '_blank');
+    w.document.write(`
         <html>
         <head>
             <title>Invigilation List - ${date}</title>
             <style>
                 body { font-family: 'Arial', sans-serif; padding: 20px; }
-                .header { text-align: center; margin-bottom: 15px; }
-                .header h1 { margin: 0; font-size: 16pt; text-transform: uppercase; }
+                .header { text-align: center; margin-bottom: 20px; }
+                .header h1 { margin: 0; font-size: 16pt; text-transform: uppercase; font-weight: bold; }
                 .header h2 { margin: 5px 0 0; font-size: 14pt; font-weight: bold; }
                 .header h3 { margin: 5px 0 0; font-size: 12pt; }
                 
-                table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 10pt; }
-                th { background: #eee; border: 1px solid #000; padding: 6px; text-align: center; font-weight: bold; }
-                td { vertical-align: middle; }
+                table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 10pt; }
+                th { background: #eee; border: 1px solid #000; padding: 8px; text-align: center; font-weight: bold; }
+                td { vertical-align: middle; border: 1px solid #000; padding: 5px;}
                 
-                .footer { margin-top: 40px; display: flex; justify-content: space-between; font-size: 11pt; font-weight: bold; }
-                .footer div { text-align: center; width: 30%; border-top: 1px solid #000; padding-top: 5px; }
+                .footer { 
+                    margin-top: 80px; 
+                    display: flex; 
+                    justify-content: space-between; 
+                    padding: 0 40px;
+                }
+                .sign-box { 
+                    text-align: center; 
+                    min-width: 300px;
+                }
+                .official-name {
+                    font-weight: bold;
+                    font-size: 11pt;
+                    margin-bottom: 5px;
+                    white-space: nowrap; 
+                    text-transform: uppercase;
+                }
+                .official-role {
+                    font-size: 10pt;
+                    white-space: nowrap;
+                }
             </style>
         </head>
         <body>
             <div class="header">
-                <h1>${currentCollegeName}</h1>
+                <h1>${localStorage.getItem('examCollegeName') || "Government Victoria College"}</h1>
                 <h2>${examName}</h2>
                 <h3>${date} &nbsp;|&nbsp; ${time}</h3>
             </div>
@@ -15048,16 +15136,23 @@ if (displayLoc) {
             </table>
 
             <div class="footer">
-                <div>Senior Assistant Superintendent</div>
-                <div>Chief Superintendent</div>
+                <div class="sign-box">
+                   ${seniorName ? `<div class="official-name">${seniorName}</div>` : '<div style="height:20px;"></div>'}
+                   <div class="official-role" style="${seniorName ? '' : 'border-top:1px solid #000; padding-top:5px;'}">Senior Assistant Superintendent</div>
+                </div>
+                
+                <div class="sign-box">
+                   ${chiefName ? `<div class="official-name">${chiefName}</div>` : '<div style="height:20px;"></div>'}
+                   <div class="official-role" style="${chiefName ? '' : 'border-top:1px solid #000; padding-top:5px;'}">Chief Superintendent</div>
+                </div>
             </div>
 
             <script>window.onload = () => window.print();<\/script>
         </body>
         </html>
     `);
-        w.document.close();
-    }
+    w.document.close();
+}; // END FUNCTION
 
 // ==========================================
     // 🔧 DATA NORMALIZATION TOOL (Fixes Time Formats)
@@ -16698,17 +16793,13 @@ window.executeBulkDelete = async function() {
 };
 
 
-
-    
-
-
-
 window.downloadInvigilationListPDF = function () {
     const sessionKey = (typeof allotmentSessionSelect !== 'undefined' && allotmentSessionSelect.value) 
         ? allotmentSessionSelect.value 
         : document.getElementById('allotment-session-select')?.value;
     if (!sessionKey) return alert("Please select a session first.");
     const [date, time] = sessionKey.split(' | ');
+
     // 1. Data Sources
     const invigMap = JSON.parse(localStorage.getItem('examInvigilatorMapping') || '{}');
     const currentSessionInvigs = invigMap[sessionKey] || {};
@@ -16719,60 +16810,54 @@ window.downloadInvigilationListPDF = function () {
     // Scribe Data
     const allScribeAllotments = JSON.parse(localStorage.getItem('examScribeAllotmentV2') || '{}');
     const sessionScribeMap = allScribeAllotments[sessionKey] || {};
-    // 2. ROBUST Room List Builder (Triple Fallback)
+
+    // 2. Room List Builder
     const roomList = [];
-    let sourceUsed = "none";
-    
-    // Method A: Global Variable (Screen State)
     if (typeof currentSessionAllotment !== 'undefined' && Array.isArray(currentSessionAllotment) && currentSessionAllotment.length > 0) {
         currentSessionAllotment.forEach(r => roomList.push({ name: r.roomName, stream: r.stream || "Regular", isScribe: false }));
-        sourceUsed = "global";
-    } 
-    // Method B: Storage Allotment Data
-    else {
+    } else {
          const allAllotments = JSON.parse(localStorage.getItem('examAllotmentData') || '{}');
          const sessionAllotment = allAllotments[sessionKey];
          if (sessionAllotment && Array.isArray(sessionAllotment)) {
              sessionAllotment.forEach(r => roomList.push({ name: r.roomName, stream: r.stream || "Regular", isScribe: false }));
-             sourceUsed = "storage";
-         }
-         // Method C: Inference from Invigilator Mapping (Last Resort)
-         else {
+         } else {
              const mappedRooms = Object.keys(currentSessionInvigs);
              if (mappedRooms.length > 0) {
                  mappedRooms.forEach(rName => roomList.push({ name: rName, stream: "Regular", isScribe: false }));
-                 sourceUsed = "inference";
              }
          }
     }
-    // Always add Scribe Rooms (deduplicated)
+    // Always add Scribe Rooms
     Object.values(sessionScribeMap).forEach(rName => {
         if(!roomList.find(r=>r.name === rName)) {
             roomList.push({ name: rName, stream: "Regular", isScribe: true });
         }
     });
+
     if(roomList.length === 0) {
-        // Only Reserves will print if this happens
         console.warn("PDF: No regular rooms found. Check if session has allotment.");
     }
+
     // 3. Preparation & Sorting
     const streamCounts = {};
     const sessionStudents = allStudentData.filter(s => s.Date === date && s.Time === time);
-    // Scribe RegNo List
     let scribeRegNos = new Set();
     const globalScribeList = JSON.parse(localStorage.getItem('examScribeList') || '[]');
     if(Array.isArray(globalScribeList)) scribeRegNos = new Set(globalScribeList.map(s => s.regNo));
+    
     sessionStudents.forEach(s => {
         const sStream = s.Stream || "Regular";
         if (!streamCounts[sStream]) streamCounts[sStream] = { candidates: 0, scribes: 0 };
         scribeRegNos.has(s['Register Number']) ? streamCounts[sStream].scribes++ : streamCounts[sStream].candidates++;
     });
+
     const streams = {};
     roomList.forEach(r => {
         const s = r.stream || "Regular";
         if (!streams[s]) streams[s] = [];
         streams[s].push(r);
     });
+
     // 4. Generate Rows
     const bodyRows = [];
     let srNo = 1;
@@ -16781,19 +16866,24 @@ window.downloadInvigilationListPDF = function () {
         const w = str.split(' ');
         return (w.length > n) ? w.slice(0, n).join(' ') + '...' : str;
     };
+
     const sortedStreamNames = Object.keys(streams).sort();
     if(sortedStreamNames.includes("Regular")) {
         sortedStreamNames.splice(sortedStreamNames.indexOf("Regular"), 1);
         sortedStreamNames.unshift("Regular");
     }
+
     sortedStreamNames.forEach(streamName => {
         const list = streams[streamName];
         list.sort((a,b) => a.name.localeCompare(b.name));
+        
+        // STREAM HEADER ROW (Fill Removed)
         bodyRows.push([{ 
             content: (streamName === "Regular" ? "REGULAR STREAM" : streamName.toUpperCase()), 
             colSpan: 9, 
-            styles: { fillColor: [243, 244, 246], fontStyle: 'bold', halign: 'left', textColor: 0 } 
+            styles: { fontStyle: 'bold', halign: 'left', textColor: 0 } // Removed fillColor
         }]);
+
         list.forEach(room => {
             const invigName = currentSessionInvigs[room.name] || "-";
             const staff = staffData.find(s => s.name === invigName || s.email === invigName) || {}; 
@@ -16808,6 +16898,7 @@ window.downloadInvigilationListPDF = function () {
             let loc = roomConfig[room.name]?.location || room.name;
             loc = truncate(loc, 5);
             if(room.isScribe) loc += " (Scribe)";
+            
             bodyRows.push([
                 srNo++,
                 loc,
@@ -16815,17 +16906,16 @@ window.downloadInvigilationListPDF = function () {
                 "", "", "", "", "", "", ""
             ]);
         });
-        // Exact Empty Rows Logic
+        
+        // Empty Rows logic
         const stats = streamCounts[streamName] || { candidates: 0, scribes: 0 };
         const totalReq = Math.ceil(stats.candidates / 30) + stats.scribes;
         const emptyRowsNeeded = Math.max(2, totalReq - list.length);
         for(let i=0; i<emptyRowsNeeded; i++) {
-            bodyRows.push([
-                { content: "-", styles: { halign: 'center', textColor: [200,200,200] } },
-                "", "", "", "", "", "", "", ""
-            ]);
+            bodyRows.push([{ content: "-", styles: { halign: 'center', textColor: [200,200,200] } }, "","","","","","","",""]);
         }
     });
+
     // 5. Reserves
     const invigSlots = JSON.parse(localStorage.getItem('examInvigilationSlots') || '{}');
     const slot = invigSlots[sessionKey];
@@ -16838,9 +16928,8 @@ window.downloadInvigilationListPDF = function () {
         });
         if (reserves.length > 0) {
             bodyRows.push([{ 
-                content: "RESERVES / RELIEVERS", 
-                colSpan: 9, 
-                styles: { fillColor: [255, 247, 237], textColor: [154, 52, 18], fontStyle: 'bold', halign: 'center' } 
+                content: "RESERVES / RELIEVERS", colSpan: 9, 
+                styles: { textColor: [154, 52, 18], fontStyle: 'bold', halign: 'center' } // Removed Fill
             }]);
             reserves.forEach((staff, idx) => {
                 bodyRows.push([
@@ -16852,21 +16941,26 @@ window.downloadInvigilationListPDF = function () {
             });
         }
     }
+
     // 6. Final PDF
     if (!window.jspdf) return alert("PDF Library not loaded.");
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF();
+    
     doc.setFontSize(14);
-    doc.text("GOVERNMENT VICTORIA COLLEGE", 105, 15, { align: "center" });
+    doc.text(localStorage.getItem('examCollegeName') || "GOVERNMENT VICTORIA COLLEGE", 105, 15, { align: "center" });
     doc.setFontSize(11);
     doc.text("Invigilation Duty List", 105, 22, { align: "center" });
     doc.setFontSize(10);
     doc.text(`Date: ${date}  |  Session: ${time}`, 105, 28, { align: "center" });
+
     doc.autoTable({
         head: [['Sl', 'Hall / Location', 'Invigilator', 'RNBB', 'Asgd', 'Used', 'Retd', 'Remarks', 'Sign']],
         body: bodyRows,
         startY: 32,
         theme: 'grid',
+        // Forced White Header
+        headStyles: { fillColor: [255, 255, 255], textColor: 0, lineWidth: 0.1, lineColor: 0, fontStyle: 'bold' },
         styles: { fontSize: 9, lineColor: 0, lineWidth: 0.1, cellPadding: 2, textColor: 0, valign: 'middle' },
         columnStyles: {
             0: { cellWidth: 10, halign: 'center' },
@@ -16880,17 +16974,141 @@ window.downloadInvigilationListPDF = function () {
             8: { cellWidth: 'auto' }
         }
     });
+
+    // --- Footer with Signatories ---
     let finalY = doc.lastAutoTable.finalY || 40;
     if (finalY > 250) { doc.addPage(); finalY = 20; }
+    
+    // 1. Fetch Names Logic
+    const getOfficialName = (role) => {
+        const q = role.toLowerCase().replace('.', '').replace('assistant', 'asst');
+        const staff = staffData.find(s => {
+             if (s.roleHistory && s.roleHistory.some(r => {
+                 const rName = r.role.toLowerCase().replace('.', '').replace('assistant', 'asst');
+                 const [d, m, y] = date.split('.');
+                 const target = new Date(y, m-1, d); target.setHours(12,0,0,0);
+                 const start = new Date(r.start); start.setHours(0,0,0,0);
+                 const end = new Date(r.end); end.setHours(23,59,59,999);
+                 return rName.includes(q) && target >= start && target <= end;
+             })) return true;
+             return ((s.role && s.role.toLowerCase().includes(q)) || (s.Designation && s.Designation.toLowerCase().includes(q)));
+        });
+        return staff ? staff.name : "";
+    };
+
+    const seniorName = getOfficialName("Senior Assistant");
+    const chiefName = getOfficialName("Chief Superintendent");
+
+    const yPos = finalY + 30;
+    
     doc.setFontSize(11);
     doc.setFont("helvetica", "bold");
-    doc.text("Senior Assistant Superintendent", 40, finalY + 25, { align: "center" });
-    doc.text("Chief Superintendent", 170, finalY + 25, { align: "center" });
+    
+    // Left Sign
+    if(seniorName) doc.text(seniorName.toUpperCase(), 40, yPos, { align: "center" }); 
+    else doc.line(20, yPos, 60, yPos);
+    
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(10);
+    doc.text("Senior Assistant Superintendent", 40, yPos + 5, { align: "center" });
+
+    // Right Sign
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(11);
+    
+    if(chiefName) doc.text(chiefName.toUpperCase(), 170, yPos, { align: "center" });
+    else doc.line(150, yPos, 190, yPos);
+    
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(10);
+    doc.text("Chief Superintendent", 170, yPos + 5, { align: "center" });
+
     doc.save(`Invigilation_List_${date}.pdf`);
 };
+    
 
 
 
+
+
+
+
+    // --- Global Replace Modal ---
+    window.openReplaceInvigModal = function (roomName) {
+        const modal = document.getElementById('invigilator-select-modal');
+        const list = document.getElementById('invig-options-list');
+        const input = document.getElementById('invig-search-input');
+        const subtitle = document.getElementById('invig-modal-subtitle');
+        
+        if (subtitle) {
+            subtitle.textContent = `Global Replace for: ${roomName}`;
+            subtitle.classList.add('text-teal-600'); 
+        }
+
+        input.value = "";
+        modal.classList.remove('hidden');
+        setTimeout(() => input.focus(), 100);
+
+        // Load GLOBAL Staff Data
+        const staffData = JSON.parse(localStorage.getItem('examStaffData') || '[]');
+        const assignedSet = new Set(Object.values(currentInvigMapping)); // Current Room Assignments
+
+        const renderList = (filter = "") => {
+            let html = "";
+            const q = filter.toLowerCase();
+            let hasResults = false;
+
+            // Simple Sort: Alphabetical
+            staffData.sort((a, b) => a.name.localeCompare(b.name));
+
+            staffData.forEach(staff => {
+                if (currentInvigMapping[roomName] === staff.name) return; // Skip self
+
+                if (staff.name.toLowerCase().includes(q)) {
+                    hasResults = true;
+                    // Check if they are busy in THIS session (just a hint, allow override)
+                    const isTaken = assignedSet.has(staff.name);
+                    
+                    let statusBadge = "";
+                    let rowClass = "bg-white";
+                    
+                    if (isTaken) {
+                        statusBadge = '<span class="text-[9px] text-red-500 font-bold bg-red-50 px-1 rounded border border-red-100">Busy</span>';
+                        rowClass = "bg-gray-50 opacity-75";
+                    } else {
+                        statusBadge = '<span class="text-[9px] text-teal-600 font-bold bg-teal-50 px-1 rounded border border-teal-100">Global</span>';
+                    }
+
+                    const clickAction = `onclick="window.replaceInvigilator('${roomName.replace(/'/g, "\\'")}', '${staff.name.replace(/'/g, "\\'")}')"`;
+
+                    html += `
+                    <div ${clickAction} class="p-2 rounded border-b border-gray-100 flex justify-between items-center transition ${rowClass} cursor-pointer hover:bg-teal-50">
+                        <div>
+                            <div class="text-sm font-bold text-gray-800">${staff.name}</div>
+                            <div class="text-[10px] text-gray-500">${staff.dept || ""}</div>
+                        </div>
+                        ${statusBadge}
+                    </div>`;
+                }
+            });
+            list.innerHTML = hasResults ? html : '<p class="text-center text-gray-400 text-xs py-2">No staff found.</p>';
+        };
+        renderList();
+        input.oninput = (e) => renderList(e.target.value);
+    };
+
+    // --- NEW: Execute Replace ---
+    window.replaceInvigilator = function(room, name) {
+        if(!confirm(`Confirm replace with ${name}?`)) return;
+        window.saveInvigAssignment(room, name); // Reuse existing save logic
+        
+        // Reset Modal Title
+        const subtitle = document.getElementById('invig-modal-subtitle');
+        if(subtitle) {
+             subtitle.classList.remove('text-orange-600');
+             subtitle.textContent = "";
+        }
+    };
     
 
 
