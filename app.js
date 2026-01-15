@@ -1296,6 +1296,8 @@ function updateLocalSlotsFromStudents() {
 
     // --- (V58) Global var for QP Code data ---
     let qpCodeMap = {};
+    // --- NEW GLOBAL VARIABLE ---
+    let qpSessionUnsubscribe = null;
 
     // --- Room Allotment Data ---
     let currentSessionAllotment = [];
@@ -6443,8 +6445,17 @@ if (toggleButton && sidebar) {
 
     // --- Event listener for "Generate Absentee Statement" (Clean B&W Style) ---
     if (generateAbsenteeReportButton) {
+
         generateAbsenteeReportButton.addEventListener('click', async () => {
+            // FIX: Use Unique IDs for this button only
+            const reportOutputArea = document.getElementById('absentee-report-output');
+            const reportControls = document.getElementById('absentee-report-controls');
+            const reportStatus = document.getElementById('absentee-report-status');
+            const roomCsvDownloadContainer = document.getElementById('absentee-room-csv-container');
+
             const sessionKey = sessionSelect.value;
+
+        
             if (!sessionKey) { alert("Please select a session first."); return; }
 
             generateAbsenteeReportButton.disabled = true;
@@ -6457,8 +6468,17 @@ if (toggleButton && sidebar) {
                 currentCollegeName = localStorage.getItem(COLLEGE_NAME_KEY) || "University of Calicut";
                 const [date, time] = sessionKey.split(' | ');
 
-                // 1. Get Data for Session
-                const sessionStudents = allStudentData.filter(s => s.Date === date && s.Time === time);
+                // 1. Get Data for Session with Time Normalization
+                const sessionStudents = allStudentData.filter(s => 
+                    s.Date === date && normalizeTime(s.Time) === normalizeTime(time)
+                );
+                // Guard Clause: Alert if no students found (Fixes unresponsive button)
+                if (!sessionStudents || sessionStudents.length === 0) {
+                    alert(`No students found for session: ${date} | ${time}.\n\nPossible Cause:\n- Normalized Time Mismatch (e.g. '9:30' vs '09:30')\n- No data loaded for this specific slot.`);
+                    generateAbsenteeReportButton.disabled = false;
+                    generateAbsenteeReportButton.textContent = "Generate Absentee Statement";
+                    return; 
+                }
                 const allAbsentees = JSON.parse(localStorage.getItem(ABSENTEE_LIST_KEY) || '{}');
                 const absenteeRegNos = new Set(allAbsentees[sessionKey] || []);
                 loadQPCodes();
@@ -6518,8 +6538,18 @@ if (toggleButton && sidebar) {
             `;
                 let totalPages = 0;
 
-                const sortedKeys = Object.keys(qpStreamGroups).sort();
-                const selectedFilterQP = absenteeQpFilter ? absenteeQpFilter.value : "all";
+                // SORT: "Regular" First, then Alphabetical
+                const sortedKeys = Object.keys(qpStreamGroups).sort((a, b) => {
+                    const streamA = qpStreamGroups[a].stream;
+                    const streamB = qpStreamGroups[b].stream;
+
+                    // Logic: If A is Regular, it wins (-1). If B is Regular, it wins (1).
+                    if (streamA === 'Regular' && streamB !== 'Regular') return -1;
+                    if (streamA !== 'Regular' && streamB === 'Regular') return 1;
+                    
+                    // Otherwise sort normally (alphabetically)
+                    return a.localeCompare(b);
+                });                const selectedFilterQP = absenteeQpFilter ? absenteeQpFilter.value : "all";
                 for (const key of sortedKeys) {
                     totalPages++;
                     const data = qpStreamGroups[key];
@@ -6577,7 +6607,7 @@ if (toggleButton && sidebar) {
 
                     allPagesHtml += `
                     <div class="print-page">
-                        <div class="print-header-group" style="position: relative; border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 15px;">
+                        <div class="print-header-group" style="position: relative; border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 15px; padding-top: 40px;">
                             
                             <div style="position: absolute; top: 0; right: 0; font-weight: bold; font-size: 12pt; border: 2px solid #000; padding: 4px 10px;">
                                 ${data.stream}
@@ -6625,7 +6655,43 @@ if (toggleButton && sidebar) {
                 generateAbsenteeReportButton.textContent = "Generate Absentee Statement";
             }
         });
+
+    // --- NEW: Print Button Listener (Opens New Tab) ---
+    const btnPrintReport = document.getElementById('btn-print-report');
+    if (btnPrintReport) {
+        btnPrintReport.addEventListener('click', () => {
+            const reportContent = document.getElementById('absentee-report-output').innerHTML;
+            if (!reportContent) { alert("Please generate a report first."); return; }
+
+            const printWindow = window.open('', '_blank');
+            printWindow.document.write(`
+                <html>
+                <head>
+                    <title>Absentee Report</title>
+                    <style>
+                        body { font-family: sans-serif; padding: 20px; }
+                        table { width: 100%; border-collapse: collapse; font-size: 10pt; }
+                        th, td { border: 1px solid black; padding: 5px; text-align: left; }
+                        th { background-color: #eee; font-weight: bold; }
+                        h1, h2, h3 { text-align: center; margin: 5px 0; }
+                        .absentee-footer { margin-top: 50px; display: flex; justify-content: space-between; }
+                        .print-page { page-break-after: always; margin-bottom: 20px; }
+                        @media print { .no-print { display: none; } }
+                    </style>
+                </head>
+                <body>
+                    ${reportContent}
+                    <script>
+                        window.onload = function() { window.print(); };
+                    <\/script>
+                </body>
+                </html>
+            `);
+            printWindow.document.close();
+        });
     }
+        
+}
 
     // *** UPDATED: Event listener for "Generate Scribe Report" (Stream Label Added) ***
     generateScribeReportButton.addEventListener('click', async () => {
@@ -7866,6 +7932,11 @@ window.real_populate_session_dropdown = function () {
         if (countBadge) {
             countBadge.textContent = currentAbsenteeList.length;
         }
+        if (generateAbsenteeReportButton) {
+            // ALWAYS ENABLE BUTTON
+            generateAbsenteeReportButton.disabled = false;
+            generateAbsenteeReportButton.classList.remove('opacity-50', 'cursor-not-allowed');
+        }
 
         currentAbsenteeListDiv.innerHTML = "";
 
@@ -7967,6 +8038,46 @@ window.real_populate_session_dropdown = function () {
         qpCodeMap = JSON.parse(localStorage.getItem(QP_CODE_LIST_KEY) || '{}');
     }
 
+    // --- NEW: Real-time Cloud Listener ---
+    function subscribeToQPSession(sessionKey) {
+        // 1. Unsubscribe from previous session if any
+        if (qpSessionUnsubscribe) {
+            qpSessionUnsubscribe();
+            qpSessionUnsubscribe = null;
+        }
+
+        if (!sessionKey || !window.firebase) return;
+
+        const { db, doc, onSnapshot } = window.firebase;
+        if (!currentCollegeId) return;
+
+        // 2. Generate ID and Ref
+        const sessionId = generateSessionId(sessionKey);
+        const docRef = doc(db, 'colleges', currentCollegeId, 'sessions', sessionId);
+
+        console.log(`📡 Listening for QP Updates on ${sessionId}...`);
+
+        // 3. Start Listening
+        qpSessionUnsubscribe = onSnapshot(docRef, (docSnap) => {
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                const cloudQPs = data.qpCodes || {};
+
+                // 4. Update Local Storage with Cloud Data
+                if (typeof qpCodeMap === 'undefined') qpCodeMap = {};
+                
+                qpCodeMap[sessionKey] = cloudQPs;
+                localStorage.setItem('examQPCodes', JSON.stringify(qpCodeMap));
+                
+                // 5. Refresh UI (Only if user is still looking at this session)
+                if (sessionSelectQP.value === sessionKey) {
+                     render_qp_code_list(sessionKey);
+                }
+            }
+        });
+    }
+
+    
 window.real_populate_qp_code_session_dropdown = function () {
         try {
             if (allStudentData.length === 0) {
@@ -8033,17 +8144,28 @@ window.real_populate_qp_code_session_dropdown = function () {
     }
     
 
-    // V61: Event listener for the QP Code session dropdown
+    // Event listener for the QP Code session dropdown
     sessionSelectQP.addEventListener('change', () => {
         const sessionKey = sessionSelectQP.value;
         if (sessionKey) {
             qpEntrySection.classList.remove('hidden');
             render_qp_code_list(sessionKey);
+            
+            // --- ADD THIS LINE ---
+            subscribeToQPSession(sessionKey); 
+            // --------------------
+
         } else {
             qpEntrySection.classList.add('hidden');
             qpCodeContainer.innerHTML = '';
             qpCodeStatus.textContent = '';
-            saveQpCodesButton.disabled = true; // V62: Disable save button
+            saveQpCodesButton.disabled = true;
+
+            // --- OPTIONAL: Stop listening if cleared ---
+            if (qpSessionUnsubscribe) {
+                qpSessionUnsubscribe();
+                qpSessionUnsubscribe = null;
+            }
         }
     });
 
@@ -14720,6 +14842,33 @@ if (btnSessionReschedule) {
         const sessionKey = allotmentSessionSelect.value;
         if (!sessionKey) return;
 
+        // --- START FIX: Remove Old Invigilator from Pool ---
+        const oldName = currentInvigMapping[room];
+        if (oldName && oldName !== name) { // If we are replacing someone
+            // 1. Find the Email of the Old Staff (Pool uses Emails)
+            const staffData = JSON.parse(localStorage.getItem('examStaffData') || '[]');
+            const oldStaff = staffData.find(s => s.name === oldName);
+            
+            if (oldStaff && oldStaff.email) {
+                // 2. Remove them from the Session Slot "Assigned" List (The Pool)
+                const allSlots = JSON.parse(localStorage.getItem('examInvigilationSlots') || '{}');
+                const slot = allSlots[sessionKey];
+                
+                if (slot && slot.assigned) {
+                    const idx = slot.assigned.indexOf(oldStaff.email);
+                    if (idx > -1) {
+                        slot.assigned.splice(idx, 1); // Remove from pool
+                        localStorage.setItem('examInvigilationSlots', JSON.stringify(allSlots));
+                        
+                        // Force Sync 'slots' explicitly (since we modified it)
+                        if (typeof syncDataToCloud === 'function') syncDataToCloud('slots');
+                    }
+                }
+            }
+        }
+        // --- END FIX ---
+
+        
         currentInvigMapping[room] = name;
 
         // Save Global
