@@ -1,7 +1,7 @@
 # Developer Training Manual & Codebase Map
 
 ## 1. Project Overview
-**ExamFlow** is a comprehensive Exam Invigilation Management System. It handles staff allocation, room allotment, student seating, absentee reporting, and remuneration.
+**AntigravityFlow** is a comprehensive Exam Invigilation Management System. It handles staff allocation, room allotment, student seating, absentee reporting, and remuneration.
 
 ### **Architecture**
 - **Frontend**: Vanilla HTML/JS with TailwindCSS for styling.

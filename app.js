@@ -4171,7 +4171,7 @@ if (toggleButton && sidebar) {
             const cellIndex = firstDayIndex + day - 1;
             const rowIndex = Math.floor(cellIndex / 7);
             const colIndex = cellIndex % 7; // 0=Sun, 6=Sat
-            const isTopRow = rowIndex === 0;
+            const isTopRow = rowIndex < 3;
 
             // 1. Tooltip Positioning Logic (Smart Anchoring)
             // Mobile: Anchor Left for first 2 cols, Right for last 2 cols, Center for middle
@@ -4234,12 +4234,14 @@ if (toggleButton && sidebar) {
                     }
                 }
 
-                // Tooltip Content Generation
+            // Tooltip Content Generation (Smart: Compact Mobile / Full Desktop)
                 if (hasFN) {
                     const regReq = Math.ceil(data.am.regCount / 30);
                     const othReq = Math.ceil(data.am.othCount / 30);
                     const scribeReq = Math.ceil(data.am.scribeCount / 5);
                     const totalReq = regReq + othReq + scribeReq;
+                    
+                    // Details string (Keep logic same)
                     let details = `Reg: ${regReq}`;
                     if (othReq > 0) details += ` | Oth: ${othReq}`;
                     if (scribeReq > 0) details += ` | Scr: ${scribeReq}`;
@@ -4247,23 +4249,32 @@ if (toggleButton && sidebar) {
                     tooltipHtml += `
                     <div class='mb-2 pb-2 border-b border-gray-200'>
                         <div class="flex justify-between items-center">
-                            <strong class='text-red-600 uppercase text-[10px]'>Morning (FN)</strong>
-                            <span class='text-gray-900 font-bold text-[10px]'>${data.am.students}</span>
+                            <!-- RESPONSIVE TITLE: "FN" on Mobile, "Morning (FN)" on Desktop -->
+                            <strong class='text-red-600 uppercase text-xs'>
+                                <span class="md:hidden">FN</span>
+                                <span class="hidden md:inline">Morning (FN)</span>
+                            </strong>
+                            <span class='text-gray-900 font-bold text-xs'>${data.am.students}</span>
                         </div>
-                        <div class="mt-1 bg-gray-50 p-1 rounded border border-gray-100">
-                            <div class="flex justify-between text-[10px] font-bold text-gray-700">
+                        <div class="mt-1 bg-gray-50 p-1.5 rounded border border-gray-100">
+                            <div class="flex justify-between text-xs font-bold text-gray-700">
                                 <span>Invigs:</span>
-                                <span class="text-blue-700 text-[11px]">${totalReq}</span>
+                                <span class="text-blue-700">${totalReq}</span>
                             </div>
-                            <div class="text-[9px] text-gray-400 text-right font-normal leading-tight">${details}</div>
+                            <!-- DETAILS HIDDEN ON MOBILE -->
+                            <div class="hidden md:block text-[10px] text-gray-500 text-right leading-snug mt-1 pt-1 border-t border-gray-200">
+                                ${details}
+                            </div>
                         </div>
                     </div>`;
                 }
+                
                 if (hasAN) {
                     const regReq = Math.ceil(data.pm.regCount / 30);
                     const othReq = Math.ceil(data.pm.othCount / 30);
                     const scribeReq = Math.ceil(data.pm.scribeCount / 5);
                     const totalReq = regReq + othReq + scribeReq;
+                    
                     let details = `Reg: ${regReq}`;
                     if (othReq > 0) details += ` | Oth: ${othReq}`;
                     if (scribeReq > 0) details += ` | Scr: ${scribeReq}`;
@@ -4271,18 +4282,28 @@ if (toggleButton && sidebar) {
                     tooltipHtml += `
                     <div>
                         <div class="flex justify-between items-center">
-                            <strong class='text-red-600 uppercase text-[10px]'>Afternoon (AN)</strong>
-                            <span class='text-gray-900 font-bold text-[10px]'>${data.pm.students}</span>
+                            <!-- RESPONSIVE TITLE: "AN" on Mobile, "Afternoon (AN)" on Desktop -->
+                            <strong class='text-red-600 uppercase text-xs'>
+                                <span class="md:hidden">AN</span>
+                                <span class="hidden md:inline">Afternoon (AN)</span>
+                            </strong>
+                            <span class='text-gray-900 font-bold text-xs'>${data.pm.students}</span>
                         </div>
-                        <div class="mt-1 bg-gray-50 p-1 rounded border border-gray-100">
-                            <div class="flex justify-between text-[10px] font-bold text-gray-700">
+                        <div class="mt-1 bg-gray-50 p-1.5 rounded border border-gray-100">
+                            <div class="flex justify-between text-xs font-bold text-gray-700">
                                 <span>Invigs:</span>
-                                <span class="text-blue-700 text-[11px]">${totalReq}</span>
+                                <span class="text-blue-700">${totalReq}</span>
                             </div>
-                            <div class="text-[9px] text-gray-400 text-right font-normal leading-tight">${details}</div>
+                            <!-- DETAILS HIDDEN ON MOBILE -->
+                            <div class="hidden md:block text-[10px] text-gray-500 text-right leading-snug mt-1 pt-1 border-t border-gray-200">
+                                ${details}
+                            </div>
                         </div>
                     </div>`;
                 }
+
+
+                
             } else if (isToday) {
                 circleClass = "w-8 h-8 text-sm md:w-20 md:h-20 md:text-3xl rounded-full flex flex-col items-center justify-center relative font-bold bg-blue-600 text-white shadow-md overflow-hidden";
                 dateNumberHtml = `<span class="z-10">${day}</span>`;
@@ -4293,7 +4314,7 @@ if (toggleButton && sidebar) {
             const arrowVerticalClass = isTopRow ? "bottom-full border-b-white" : "top-full border-t-white";
 
             const tooltip = tooltipHtml ? `
-            <div class="absolute ${posClass} ${tooltipPosClass} w-48 md:w-56 bg-white text-gray-800 text-xs rounded-lg p-3 shadow-xl z-[100] hidden group-hover:block pointer-events-none border border-red-200 ring-1 ring-red-100">
+            <div class="absolute ${posClass} ${tooltipPosClass} w-32 md:w-56 bg-white text-gray-800 text-xs rounded-lg p-3 shadow-xl z-[1000] hidden group-hover:block pointer-events-none border border-red-200 ring-1 ring-red-100">
                 ${tooltipHtml}
                 <div class="absolute ${arrowVerticalClass} ${arrowPosClass} border-4 border-transparent"></div>
             </div>
@@ -11082,7 +11103,9 @@ function renderScribeAllotmentList(sessionKey) {
             const newExamName = document.getElementById('bulk-new-exam-name').value.trim(); // <--- NEW
 
             // Get Targets
-            const targetCourse = document.getElementById('edit-course-select').value;
+            // FIX: Use currentEditCourse global because the dropdown value is 'Course|Stream'
+            const targetCourse = currentEditCourse;
+            const targetStream = currentEditStream; 
             const [oldDate, oldTime] = document.getElementById('edit-session-select').value.split(' | ');
 
             // 2. Validation: Ensure at least one field is being updated
@@ -11118,7 +11141,8 @@ function renderScribeAllotmentList(sessionKey) {
             const recordsToUpdate = allStudentData.filter(s =>
                 s.Date === oldDate &&
                 s.Time === oldTime &&
-                s.Course === targetCourse
+                s.Course === targetCourse &&
+                (s.Stream || "Regular") === targetStream // FIX: Added Stream Check
             );
 
             if (recordsToUpdate.length === 0) {
@@ -11146,9 +11170,13 @@ Are you sure you want to update these records?
             if (confirm(confirmMsg)) {
                 let updateCount = 0;
 
-                // 6. Apply Updates
+            // 6. Apply Updates
                 allStudentData.forEach(student => {
-                    if (student.Date === oldDate && student.Time === oldTime && student.Course === targetCourse) {
+                    // FIX: Added Stream check to ensure we target the correct group
+                    if (student.Date === oldDate && 
+                        student.Time === oldTime && 
+                        student.Course === targetCourse && 
+                        (student.Stream || "Regular") === targetStream) {
                         
                         // Update fields only if provided
                         if (newExamName) student['Exam Name'] = newExamName; // <--- THE FIX
@@ -13439,11 +13467,12 @@ window.handlePythonExtraction = function (jsonString) {
 
                 const sessionKey = `${s.Date} | ${s.Time}`;
                 if (!sessions.has(sessionKey)) {
-                    sessions.add(sessionKey);
-                    // Lookup Exam Name
-                    const name = getExamName(s.Date, s.Time, sStream);
-                    if (name) examNames.add(name);
-                }
+                sessions.add(sessionKey);
+                // Lookup Exam Name
+                // FIX: Use the tag from student data first
+                const name = s['Exam Name'] || getExamName(s.Date, s.Time, sStream);
+                if (name) examNames.add(name);
+            }
             });
         }
 
@@ -14856,13 +14885,28 @@ if (btnSessionReschedule) {
                 
                 if (slot && slot.assigned) {
                     const idx = slot.assigned.indexOf(oldStaff.email);
-                    if (idx > -1) {
-                        slot.assigned.splice(idx, 1); // Remove from pool
-                        localStorage.setItem('examInvigilationSlots', JSON.stringify(allSlots));
-                        
-                        // Force Sync 'slots' explicitly (since we modified it)
-                        if (typeof syncDataToCloud === 'function') syncDataToCloud('slots');
-                    }
+
+                    // [NEW CODE] - Paste this instead
+if (idx > -1) {
+    // 1. Remove from active pool (so they don't show as Reserve)
+    slot.assigned.splice(idx, 1); 
+
+    // 2. Add to 'replaced' history (So they are NOT deleted from system)
+    if (!slot.replaced) slot.replaced = [];
+    slot.replaced.push({
+        original: oldStaff.email,
+        replacement: name,
+        room: room,
+        timestamp: new Date().toISOString()
+    });
+
+    localStorage.setItem('examInvigilationSlots', JSON.stringify(allSlots));
+    
+    // Force Sync 'slots'
+    if (typeof syncDataToCloud === 'function') syncDataToCloud('slots');
+}
+
+                    
                 }
             }
         }
