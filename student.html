@@ -135,7 +135,15 @@
                 let seatNumber = "-";
                 let isScribeRoom = false;
 
-                // 3. Check Regular Allotment
+                // 3. Check Scribe Allotment FIRST (lower priority)
+                if (session.scribeAllotment && session.scribeAllotment[regNo]) {
+                    studentRoom = session.scribeAllotment[regNo];
+                    isScribeRoom = true;
+                    seatNumber = "Scribe";
+                }
+
+                // 4. Check Regular Allotment — OVERRIDES scribe if student found here
+                // This ensures that if scribe status was removed, the regular seat wins.
                 if (session.roomAllotment) {
                     for (const room of session.roomAllotment) {
                         const index = room.students.findIndex(s =>
@@ -144,20 +152,14 @@
                         if (index !== -1) {
                             studentRoom = room.roomName;
                             seatNumber = index + 1;
-                            // NEW: if student record not found above, get it from here
+                            isScribeRoom = false; // Explicitly clear scribe flag
+                            // If student record not found above, get it from here
                             if (!studentRecord && typeof room.students[index] === 'object') {
                                 studentRecord = room.students[index];
                             }
                             break;
                         }
                     }
-                }
-
-                // 4. Check Scribe Allotment
-                if (session.scribeAllotment && session.scribeAllotment[regNo]) {
-                    studentRoom = session.scribeAllotment[regNo];
-                    isScribeRoom = true;
-                    seatNumber = "Scribe";
                 }
 
                 // 5. Save result only if student was found AND has a room
