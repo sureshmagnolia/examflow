@@ -2,6 +2,29 @@
 // These 11 functions MUST be outside the DOMContentLoaded listener
 // to be available when Python loads.
 
+const BASE_DATA_KEY = 'examBaseData';
+
+// Fail-safe constants (Avoids conflict with drive_sync.js)
+if (typeof IDB_NAME === 'undefined') {
+    window.IDB_NAME = 'AntigravityDB';
+    window.IDB_STORE = 'examStore';
+    window.IDB_KEY = 'examBaseData';
+}
+
+
+window.updateLoaderProgress = function(percent, message) {
+    const progressBar = document.getElementById('loader-progress-bar');
+    const percentText = document.getElementById('loader-percentage');
+    const msgElement = document.getElementById('loader-message');
+    
+    // Stop the chaotic text interval if it's still running
+    if (window.loaderMessageInterval) clearInterval(window.loaderMessageInterval);
+    
+    if (progressBar) progressBar.style.width = `${percent}%`;
+    if (percentText) percentText.textContent = `${percent}%`;
+    if (msgElement && message) msgElement.textContent = message;
+};
+
 function clear_csv_upload_status() {
     const csvLoadStatusElement = document.getElementById('csv-load-status');
     const correctedCsvUploadElement = document.getElementById('corrected-csv-upload');
@@ -34,6 +57,7 @@ function disable_absentee_tab(disabled) {
     }
 }
 window.disable_absentee_tab = disable_absentee_tab;
+
 
 
 
@@ -228,6 +252,7 @@ async function autoCleanPastGhostData() {
         }
         console.log(`🧹 Maintenance: Cleaned up ${deletedCount} records older than 30 days.`);
     } else {
+
         console.log("✅ [System] Data is clean. No old records found.");
     }
 }
@@ -256,6 +281,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
 function dismissLoader() {
+    updateLoaderProgress(100, "Ready!");
     const loader = document.getElementById('initial-app-loader');
     const msgInterval = window.loaderMessageInterval; // Get the interval ID if defined
 
@@ -269,7 +295,8 @@ function dismissLoader() {
 }
 
 // Single function called when data is local, from cloud, or auth fails
-function finalizeAppLoad() {
+async function finalizeAppLoad() {
+    await migrateFromLocalStorage(); // Add this line!
     if (typeof updateDashboard === 'function') updateDashboard();
     if (typeof renderExamNameSettings === 'function') renderExamNameSettings();
     if (typeof loadGlobalScribeList === 'function') loadGlobalScribeList();
@@ -278,7 +305,7 @@ function finalizeAppLoad() {
 }
 
 let currentUser = null;
-let currentCollegeId = null; // The shared document ID
+window.currentCollegeId = null; // The shared document ID
 let currentCollegeData = null; // Holds the full data including permissions
 let isSyncing = false;
 let cloudSyncUnsubscribe = null; // [NEW] To track the active listener
@@ -291,9 +318,24 @@ let opsUnsub = null;
 let allocUnsub = null;
 let staffUnsub = null;
 let slotsUnsub = null;
+let sessionsUnsub = null; // [NEW] For real-time session updates
 let hasUnsavedScribes = false; // NEW FLAG
+// --- MIXING ENGINE STATE (Session-Level Pre-Split) ---
+let mixingParts = {};        // Per-stream: { 'Regular': {partA,partB,pA,pB}, 'Distance': {...} }
+let mixingActiveStrategy = 'none'; // The strategy locked in for this session
+let mixingPartA = [], mixingPartB = [], mixingPointerA = 0, mixingPointerB = 0; // legacy aliases
+// -----------------------------------------------------
+
 
 document.addEventListener('DOMContentLoaded', () => {
+       // --- Global localStorage Key ---
+    const STREAM_CONFIG_KEY = 'examStreamsConfig'; // <-- Add this definition
+    const ROOM_CONFIG_KEY = 'examRoomConfig';
+    const COLLEGE_NAME_KEY = 'examCollegeName';
+    const ABSENTEE_LIST_KEY = 'examAbsenteeList';
+    const QP_CODE_LIST_KEY = 'examQPCodes';
+    const BASE_DATA_KEY = 'examBaseData';
+    migrateFromLocalStorage(); // ← ADD THIS LINE HERE
     populateAllExamDropdowns(); // <--- ADD THIS LINE
     // --- LOADER ANIMATION LOGIC (New) ---
     const loaderMessages = [
@@ -319,6 +361,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Ensure this function exists to stop it later
     window.finalizeAppLoad = function () {
+        // Cancel the safety timer since we loaded successfully  ← NEW LINE
+        if (window._loaderSafetyTimer) clearTimeout(window._loaderSafetyTimer); 
         // 1. Run UI Updates
         if (typeof updateDashboard === 'function') updateDashboard();
         if (typeof renderExamNameSettings === 'function') renderExamNameSettings();
@@ -334,16 +378,178 @@ document.addEventListener('DOMContentLoaded', () => {
             setTimeout(() => { loader.remove(); }, 500);
         }
     };
+    // --- SAFETY TIMEOUT: Force-dismiss loader after 12 seconds on all browsers ---
+    window._loaderSafetyTimer = setTimeout(function() {
+        const loader = document.getElementById('initial-app-loader');
+        if (loader) {
+            console.warn('⚠️ Loader safety timeout fired — dismissing loader forcefully.');
+            if (window.loaderMessageInterval) clearInterval(window.loaderMessageInterval);
+            loader.style.opacity = '0';
+            setTimeout(() => { loader.remove(); }, 500);
+        }
+    }, 12000); // 12 seconds max wait
 
     // ------------------------------------
 
-    // --- Global localStorage Key ---
-    const STREAM_CONFIG_KEY = 'examStreamsConfig'; // <-- Add this definition
-    const ROOM_CONFIG_KEY = 'examRoomConfig';
-    const COLLEGE_NAME_KEY = 'examCollegeName';
-    const ABSENTEE_LIST_KEY = 'examAbsenteeList';
-    const QP_CODE_LIST_KEY = 'examQPCodes';
-    const BASE_DATA_KEY = 'examBaseData';
+
+
+
+// ==========================================
+// 💾 INDEXEDDB HELPER (replaces localStorage for examBaseData)
+// ==========================================
+/* Bumping to version 2 to force the missing store creation */
+function openExamDB() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(IDB_NAME, 2); // BUMPED TO 2
+        req.onupgradeneeded = e => {
+            const db = e.target.result;
+            // Safe check: create the store if it doesn't exist
+            if (!db.objectStoreNames.contains(IDB_STORE)) {
+                db.createObjectStore(IDB_STORE);
+            }
+        };
+        req.onsuccess = e => resolve(e.target.result);
+        req.onerror = e => reject(e.target.error);
+    });
+}
+
+
+function saveExamDataIDB(dataArray, skipCloudSync = false) {
+    return new Promise((resolve, reject) => {
+        openExamDB().then(db => {
+            const tx = db.transaction(IDB_STORE, 'readwrite');
+            const store = tx.objectStore(IDB_STORE);
+            store.put(dataArray, IDB_KEY);
+                      tx.oncomplete = () => {
+                db.close();
+                // --- Auto-sync to Cloud (if online user) ---
+                if (!skipCloudSync && typeof syncDataToCloud === 'function') {
+                    syncDataToCloud('baseData');
+                }
+                // --- NEW: Trigger Basic User Pruning silently in background ---
+                if (!skipCloudSync) {
+                    setTimeout(pruneOldDataForBasicUsers, 1500);
+                }
+                resolve();
+            };
+
+            tx.onerror = e => {
+                db.close();
+                reject(e.target.error);
+            };
+        }).catch(err => {
+            console.error('IDB Write Error:', err);
+            reject(err);
+        });
+    });
+}
+
+
+
+function loadExamDataIDB() {
+    return openExamDB().then(db => {
+        return new Promise((resolve, reject) => {
+            try {
+                const tx = db.transaction(IDB_STORE, 'readonly');
+                const req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+                req.onsuccess = e => { db.close(); resolve(e.target.result || []); };
+                req.onerror = e => { db.close(); reject(e.target.error); };
+            } catch (err) {
+                db.close();
+                console.warn("IDB Store not found, returning empty array.");
+                resolve([]); // Fallback to empty array instead of crashing
+            }
+        });
+    });
+}
+// --- NEW: BASIC USER AUTO-PRUNER ---
+async function pruneOldDataForBasicUsers() {
+    // 1. Only run for Basic (Offline) Users
+    if (window.currentCollegeId) return;
+    
+    try {
+        const dbData = await loadExamDataIDB() || [];
+        if (dbData.length === 0) return;
+
+        // 2. Count Unique Dates
+        const uniqueDates = [...new Set(dbData.map(s => s.Date).filter(Boolean))];
+        const MAX_DAYS_TO_KEEP = 60; // Keep roughly 1 full semester of history
+        
+        if (uniqueDates.length <= MAX_DAYS_TO_KEEP) return;
+
+        // 3. Sort chronologically (DD.MM.YYYY)
+        uniqueDates.sort((a, b) => {
+            const [d1, m1, y1] = a.split('.');
+            const [d2, m2, y2] = b.split('.');
+            return new Date(y1, m1 - 1, d1) - new Date(y2, m2 - 1, d2);
+        });
+
+        // 4. Target the oldest dates for deletion
+        const datesToDelete = new Set(uniqueDates.slice(0, uniqueDates.length - MAX_DAYS_TO_KEEP));
+        console.log(`🧹 Basic User Auto-Pruning: Deleting ${datesToDelete.size} oldest exam days to save quota.`);
+
+        // 5. Prune IndexedDB (Students)
+        const keptStudents = dbData.filter(s => !datesToDelete.has(s.Date));
+        await saveExamDataIDB(keptStudents, true); // true = skip cloud sync loop
+
+        // 6. Prune LocalStorage Allotments (Frees the 5MB Quota)
+        const lsKeys = ['examRoomAllotment', 'examScribeAllotment', 'examInvigilatorMapping', 'examAbsenteeList', 'examQPCodes'];
+        lsKeys.forEach(key => {
+            const lsStr = localStorage.getItem(key);
+            if (!lsStr) return;
+            try {
+                const parsed = JSON.parse(lsStr);
+                let isModified = false;
+                
+                Object.keys(parsed).forEach(sessionKey => {
+                    const datePart = sessionKey.split('|')[0].trim();
+                    if (datesToDelete.has(datePart)) {
+                        delete parsed[sessionKey];
+                        isModified = true;
+                    }
+                });
+
+                if (isModified) localStorage.setItem(key, JSON.stringify(parsed));
+            } catch(e) { }
+        });
+
+    } catch (e) {
+        console.error("Auto-prune error:", e);
+    }
+}
+
+// ==========================================
+
+
+
+async function migrateFromLocalStorage() {
+    const oldData = localStorage.getItem(BASE_DATA_KEY);
+    if (oldData) {
+        console.log("🚚 Migrating existing student data to IndexedDB...");
+        try {
+            const dataArray = JSON.parse(oldData);
+            // Save to IDB
+            await new Promise(resolve => {
+                const req = indexedDB.open(IDB_NAME, 1);
+                req.onsuccess = e => {
+                    const db = e.target.result;
+                    const tx = db.transaction(IDB_STORE, 'readwrite');
+                    tx.objectStore(IDB_STORE).put(dataArray, IDB_KEY);
+                    tx.oncomplete = () => { db.close(); resolve(); };
+                };
+            });
+            // 🚨 CRITICAL: Remove from localStorage to free up the 5MB quota
+            localStorage.removeItem(BASE_DATA_KEY);
+            console.log("✅ Migration complete. localStorage freed.");
+        } catch (e) {
+            console.error("Migration failed:", e);
+        }
+    }
+}
+
+
+
+    
     const ROOM_ALLOTMENT_KEY = 'examRoomAllotment';
     const INVIG_MAPPING_KEY = 'examInvigilatorMapping';
     let currentInvigMapping = {}; // { "SessionKey": { "RoomName": "StaffName" } }
@@ -461,9 +667,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    window.addEventListener('offline', () => {
+     window.addEventListener('offline', () => {
         updateSyncStatus("No Connection", "error");
+        
+        // NEW: Alert Logged-In Users regarding Cache Limitations
+        if (window.currentCollegeId) {
+            alert("⚠️ Connectivity Lost. ExamFlow is in Offline Mode.\n\nOnly the recent/upcoming sessions saved in your local cache are available. Historical data cannot be accessed until the internet is restored.");
+        }
     });
+
+
 
     // --- 1. AUTHENTICATION ---
 
@@ -496,9 +709,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Auth Listener - REMOVED THE SETTIMEOUT WRAPPER
-    if (window.firebase && window.firebase.auth) {
+    function startAuthListener() {
+        if (!window.firebase || !window.firebase.auth) {
+            setTimeout(startAuthListener, 150);
+            return;
+        }
+
         const { auth, onAuthStateChanged } = window.firebase;
-        onAuthStateChanged(auth, (user) => {
+        onAuthStateChanged(auth, async (user) => {
+        updateLoaderProgress(10, "Verifying Authentication...");
+            
             if (user) {
                 currentUser = user;
                 loginBtn.classList.add('hidden');
@@ -532,11 +752,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (btnInvigilation) btnInvigilation.classList.add('hidden');
 
                 // Load Local Data & Finalize
-                loadInitialData();
+                await loadInitialData();
                 finalizeAppLoad();
             }
         });
     }
+       startAuthListener();
     // ------------------------------------------
 
     async function createNewCollege(user) {
@@ -580,6 +801,8 @@ document.addEventListener('DOMContentLoaded', () => {
             currentCollegeId = docRef.id;
             await UiModal.alert("Success", `✅ Database Created for "${newName}"!\nYou are the Admin.`);
             syncDataFromCloud(currentCollegeId);
+            document.getElementById('cloud-migration-wrapper')?.classList.remove('hidden');
+
         } catch (e) {
             console.error("Creation failed:", e);
             await UiModal.alert("Error", "Failed to create database. " + e.message);
@@ -637,12 +860,11 @@ function populateAllExamDropdowns() {
 
 
 // --- HELPER: Calculate Slot Requirements from Student Data ---
-function updateLocalSlotsFromStudents() {
-    const localBaseData = localStorage.getItem('examBaseData');
-    if (!localBaseData) return false;
+async function updateLocalSlotsFromStudents() {
+    const students = await loadExamDataIDB();
+    if (!students || students.length === 0) return false;
 
     try {
-        const students = JSON.parse(localBaseData);
         const scribeListRaw = JSON.parse(localStorage.getItem('examScribeList') || '[]');
         const scribeRegNos = new Set(scribeListRaw.map(s => s.regNo));
         const sessionStats = {};
@@ -824,9 +1046,19 @@ function updateLocalSlotsFromStudents() {
             if (typeof finalizeAppLoad === 'function') finalizeAppLoad();
             return;
         }
-
+        updateLoaderProgress(50, "Connecting to Cloud Server...");
         updateSyncStatus("Connecting...", "neutral");
         const { db, doc, onSnapshot, collection, getDocs, query, orderBy } = window.firebase;
+
+        // --- PASTE START ---
+        const connectionTimeout = setTimeout(() => {
+            console.warn("⚠️ Cloud connection is blocked or completely dead. Falling back to Local Data!");
+            updateSyncStatus("Cloud Blocked (Using Local)", "error");
+            if (cloudSyncUnsubscribe) cloudSyncUnsubscribe();
+            loadInitialData();
+            if (typeof finalizeAppLoad === 'function') finalizeAppLoad();
+        }, 10000);
+        // --- PASTE END ---
 
         // Cleanup old listeners
         if (cloudSyncUnsubscribe) cloudSyncUnsubscribe();
@@ -835,7 +1067,7 @@ function updateLocalSlotsFromStudents() {
         if (allocUnsub) allocUnsub();
         if (staffUnsub) staffUnsub();
         if (slotsUnsub) slotsUnsub();
-
+        if (sessionsUnsub) sessionsUnsub();
         const syncLocal = (dataObj) => {
             if (!dataObj) return;
             Object.keys(dataObj).forEach(key => {
@@ -846,6 +1078,7 @@ function updateLocalSlotsFromStudents() {
         // 1. METADATA (Root Doc)
         cloudSyncUnsubscribe = onSnapshot(doc(db, "colleges", collegeId), (snap) => {
             if (snap.exists()) {
+                clearTimeout(connectionTimeout); // <-- PASTE THIS LINE HERE
                 currentCollegeData = snap.data();
                 const isAdminUser = currentCollegeData.admins && currentUser && currentCollegeData.admins.includes(currentUser.email);
                 const isTeamMember = currentCollegeData.allowedUsers && currentUser && currentCollegeData.allowedUsers.includes(currentUser.email);
@@ -855,8 +1088,18 @@ function updateLocalSlotsFromStudents() {
 
                 updateHeaderCollegeName();
                 if (typeof updateStudentPortalLink === 'function') updateStudentPortalLink();
-            }
+            } else { // <-- PASTE FROM HERE DOWN
+                console.error("❌ Corrupt College ID detected! Forcing cache wipe.");
+                localStorage.clear();
+                sessionStorage.clear();
+                alert("Session corrupted or expired. Please log in again.");
+                if (window.firebase && window.firebase.auth) window.firebase.auth.signOut();
+                location.reload();
+            } // <-- TO HERE
         });
+
+        // 2. SETTINGS
+
 
         // 2. SETTINGS
         settingsUnsub = onSnapshot(doc(db, "colleges", collegeId, "system_data", "settings"), (snap) => {
@@ -895,52 +1138,210 @@ function updateLocalSlotsFromStudents() {
         // 7. FETCH HEAVY DATA (HYBRID V2/V1 STRATEGY)
         const fetchHeavyData = async () => {
             console.log("☁️ Fetching Data (Hybrid Mode)...");
+            
+            // 🚨 FLAG CHECK: Push local data to Cloud BEFORE Cloud overwrites it!
+            if (localStorage.getItem('pendingDriveRestoreSync') === 'true') {
+                console.log("🔄 Detected pending Drive Restore. Syncing local IDB to Firebase UP first...");
+                localStorage.removeItem('pendingDriveRestoreSync');
+                
+                const restoredData = await loadExamDataIDB() || [];
+                const sessionsToSync = new Set();
+                restoredData.forEach(s => sessionsToSync.add(`${s.Date} | ${s.Time}`));
+                
+                allStudentData = restoredData; // Temporarily update global memory for the sync function
+                
+                let count = 0;
+                const sessionArray = Array.from(sessionsToSync);
+                const BATCH_SIZE = 5; // Only 5 sessions per batch
+
+                for (let i = 0; i < sessionArray.length; i += BATCH_SIZE) {
+                    const batch = sessionArray.slice(i, i + BATCH_SIZE);
+                    count += batch.length;
+                    updateSyncStatus(`Uploading Restored Data ${count}/${sessionsToSync.size}...`, "neutral");
+                    
+                    // Process this small batch in parallel (safe size)
+                    await Promise.all(batch.map(key => syncSessionToCloud(key)));
+                    
+                    // 500ms breathing space between batches to prevent queue exhaustion
+                    if (i + BATCH_SIZE < sessionArray.length) {
+                        await new Promise(r => setTimeout(r, 500));
+                    }
+                }
+
+            }
+
             try {
+
                 // A. TRY V2 (Modular Sessions) FIRST
+                                // A. TRY V2 (Modular Sessions) - REAL-TIME LISTENER
                 const sessionsRef = collection(db, "colleges", collegeId, "sessions");
-                const sessionSnap = await getDocs(sessionsRef);
+                
+                      // [NEW] Use onSnapshot for live global synchronization
+                if (sessionsUnsub) sessionsUnsub(); // Cleanup existing
+                
+                // Get timestamp for Today's Midnight
+                const todayMidnight = new Date();
+                todayMidnight.setHours(0, 0, 0, 0);
+                const midnightObj = todayMidnight.getTime();
 
-                if (!sessionSnap.empty) {
-                    console.log(`✅ V2 DETECTED: Loading ${sessionSnap.size} session documents...`);
+                sessionsUnsub = onSnapshot(sessionsRef, async (sessionSnap) => {
+                    if (!sessionSnap.empty) {
+                        console.log(`📡 LIVE SYNC: Processing ${sessionSnap.size} session updates...`);
 
-                    // Reconstruct Monolithic Data from Modules
-                    let allStudents = [];
-                    let allAllotments = {};
-                    let allQPCodes = {};
-                    let allAbsentees = {};
-                    let allScribeAllotments = {};
+                        let allStudents = [];
+                        let allAllotments = {};
+                        let allQPCodes = {};
+                        let allAbsentees = {};
+                        let allScribeAllotments = {};
+                        let allInvigMapping = {}; 
 
-                    sessionSnap.forEach(doc => {
-                        const s = doc.data();
-                        // Recreate the standard "Date | Time" key used by the app logic
-                        // (We trust the 'date' and 'time' fields inside the doc)
-                        const sessionKey = `${s.date} | ${s.time}`;
+                        const { getDoc } = window.firebase;
+                        let missingStudentsPromises = [];
+                        const localDB = await loadExamDataIDB() || [];
 
-                        if (s.students) allStudents.push(...s.students);
-                        if (s.roomAllotment) allAllotments[sessionKey] = s.roomAllotment;
-                        if (s.qpCodes) allQPCodes[sessionKey] = s.qpCodes;
-                        if (s.absentees) allAbsentees[sessionKey] = s.absentees;
-                        if (s.scribeAllotment) allScribeAllotments[sessionKey] = s.scribeAllotment;
-                    });
+                        sessionSnap.forEach(docSnap => {
+                            const s = docSnap.data();
+                            const sessionKey = `${s.date} | ${s.time}`;
 
-                    // Sort Students for consistency
-                    allStudents.sort((a, b) => {
-                        const d1 = a.Date.split('.').reverse().join('');
-                        const d2 = b.Date.split('.').reverse().join('');
-                        if (d1 !== d2) return d1.localeCompare(d2);
-                        return a.Time.localeCompare(b.Time);
-                    });
+                            // Check if this exam is happening Today or in the Future
+                            const examTimestamp = (s.meta && s.meta.timestamp) ? s.meta.timestamp : new Date(s.date.split('.').reverse().join('-')).getTime();
+                            const isTodayOrFuture = examTimestamp >= midnightObj;
 
-                    // Save to Local Storage (Hydrate App Memory)
-                    localStorage.setItem('examBaseData', JSON.stringify(allStudents));
-                    localStorage.setItem('examRoomAllotment', JSON.stringify(allAllotments));
-                    localStorage.setItem('examQPCodes', JSON.stringify(allQPCodes));
-                    localStorage.setItem('examAbsenteeList', JSON.stringify(allAbsentees));
-                    localStorage.setItem('examScribeAllotment', JSON.stringify(allScribeAllotments));
+                            if (s.students) {
+                                allStudents.push(...s.students); // Support for old legacy DB states
+                            } else if (s.meta && s.meta.studentCount > 0 && isTodayOrFuture) {
+                                // AUTO-FETCH heavy data ONLY IF Today or Future
+                                const localCount = localDB.filter(stu => stu.Date === s.date && stu.Time === s.time).length;
+                                if (localCount !== s.meta.studentCount) {
+                                    console.log(`🔄 CSV Update Detected! Downloading fresh master student list for ${sessionKey}...`);
+                                    updateSyncStatus(`Syncing Student Data...`, "neutral"); // <-- NEW RIBBON ALERT
+                                    const fetchPromise = getDoc(doc(db, 'colleges', currentCollegeId, 'session_students', docSnap.id))
 
-                    updateSyncStatus("Synced (V2)", "success");
+                                        .then(studentDoc => {
+                                            if (studentDoc.exists() && studentDoc.data().students) {
+                                                allStudents.push(...studentDoc.data().students);
+                                            }
+                                        });
+                                    missingStudentsPromises.push(fetchPromise);
+                                }
+                            }
+                            // Load ALL metadata continuously, regardless of date
+                            if (s.roomAllotment) allAllotments[sessionKey] = s.roomAllotment;
+                            if (s.qpCodes) allQPCodes[sessionKey] = s.qpCodes;
+                            if (s.absentees) allAbsentees[sessionKey] = s.absentees;
+                            if (s.scribeAllotment) allScribeAllotments[sessionKey] = s.scribeAllotment;
+                            if (s.invigilatorMapping) allInvigMapping[sessionKey] = s.invigilatorMapping;
+                        });
+                      // Store a lightweight registry of ALL known sessions for dropdowns
+                        const allKnownKeys = Array.from(sessionSnap.docs.map(d => {
+                            const sd = d.data(); return `${sd.date} | ${sd.time}`;
+                        }));
+                        localStorage.setItem('examAllKnownSessions', JSON.stringify(allKnownKeys));
+                        // Immediately push session list to all dropdowns from metadata
+                        if (window.real_populate_session_dropdown) window.real_populate_session_dropdown();
+                        if (window.real_populate_qp_code_session_dropdown) window.real_populate_qp_code_session_dropdown();
+                        if (window.real_populate_room_allotment_session_dropdown) window.real_populate_room_allotment_session_dropdown();
 
-                } else {
+
+
+                        // Wait for any allowed pre-fetches to finish safely
+                        if (missingStudentsPromises.length > 0) {
+                            await Promise.all(missingStudentsPromises);
+                        }
+
+                              // 📡 1. START MERGE
+                        let mergedStudents = [...localDB];
+                        
+                        // --- 🧬 INTERNAL HELPER: Normalizes Session Keys (e.g. 10:00 AM matches FN) ---
+                        const getSmartSessionKey = (d, t) => {
+                            const dNorm = (d || "").replace(/[./-]/g, '');
+                            const tUpper = (t || "").toUpperCase();
+                            const isAN = tUpper.includes("PM") || tUpper.includes("AN") || 
+                                         tUpper.startsWith("12:") || tUpper.startsWith("13:") || 
+                                         tUpper.startsWith("14:") || tUpper.startsWith("15:") ||
+                                         tUpper.startsWith("16:");
+                            return `${dNorm}_${isAN ? 'AFTERNOON' : 'MORNING'}`;
+                        };
+
+                        if (allStudents.length > 0) {
+                            // Identify sessions freshly downloaded
+                            const freshSessions = new Set(allStudents.map(s => getSmartSessionKey(s.Date, s.Time)));
+                            
+                            // Purge existing local copies for those sessions
+                            mergedStudents = localDB.filter(existing => !freshSessions.has(getSmartSessionKey(existing.Date, existing.Time)));
+                            
+                            // Add the fresh downloads
+                            mergedStudents.push(...allStudents);
+                        }
+
+                        // 📋 2. SORTING
+                        mergedStudents.sort((a, b) => {
+                            const d1 = a.Date.split('.').reverse().join('');
+                            const d2 = b.Date.split('.').reverse().join('');
+                            if (d1 !== d2) return d1.localeCompare(d2);
+                            return a.Time.localeCompare(b.Time);
+                        });
+
+                        // 🛡️ 3. GLOBAL DEDUPLICATION (Safety Net for 1917+ records)
+                        const uniqueMap = new Map();
+                        mergedStudents.forEach(s => {
+                            const regNo = (s['Register Number'] || s['Reg No'] || s['RegNo'] || "").toString().trim();
+                            const uKey = `${regNo}_${getSmartSessionKey(s.Date, s.Time)}`;
+                            
+                            if (regNo && !uniqueMap.has(uKey)) {
+                                uniqueMap.set(uKey, s);
+                            }
+                        });
+                        mergedStudents = Array.from(uniqueMap.values());
+
+                        // 💾 4. UPDATE GLOBAL STORE
+                        allStudentData = mergedStudents;
+                        await saveExamDataIDB(mergedStudents);
+
+                        // 🔄 5. REFRESH STATUS
+                        if (missingStudentsPromises.length > 0) {
+                            updateSyncStatus("Student List Updated Live!", "success");
+                        }
+                        
+                        localStorage.setItem('examRoomAllotment', JSON.stringify(allAllotments));
+                        localStorage.setItem('examQPCodes', JSON.stringify(allQPCodes));
+                        localStorage.setItem('examAbsenteeList', JSON.stringify(allAbsentees));
+                        localStorage.setItem('examScribeAllotment', JSON.stringify(allScribeAllotments));
+                        localStorage.setItem('examInvigilatorMapping', JSON.stringify(allInvigMapping));
+
+                        updateSyncStatus("Synced (Live)", "success");
+
+                        
+                        // --- 🔓 UNLOCK TABS ON FIRST DATA LOAD ---
+                        if (allStudentData && allStudentData.length > 0) {
+                            if (typeof disable_edit_data_tab === 'function') disable_edit_data_tab(false);
+                            if (typeof disable_absentee_tab === 'function') disable_absentee_tab(false);
+                            if (typeof disable_qpcode_tab === 'function') disable_qpcode_tab(false);
+                            if (typeof disable_room_allotment_tab === 'function') disable_room_allotment_tab(false);
+                            if (typeof disable_all_report_buttons === 'function') disable_all_report_buttons(false);
+                        }
+
+                        // Refresh UI Components
+                        if (typeof updateDashboard === 'function') updateDashboard();
+                        if (typeof populateAllExamDropdowns === 'function') populateAllExamDropdowns();
+                        if (typeof populate_session_dropdown === 'function') populate_session_dropdown();
+
+                        
+                        // 🔄 REAL-TIME UI REFRESH (Rooms & Invigilators)
+                        if (typeof updateAllotmentDisplay === 'function') {
+                            updateAllotmentDisplay(); 
+                        }
+                        if (typeof renderInvigilationPanel === 'function') {
+                            renderInvigilationPanel();
+                        }
+                    }
+
+
+                });
+
+                // Check for V1 Fallback if sessions collection doesn't exist
+                const sessionSnapCheck = await getDocs(sessionsRef);
+                if (sessionSnapCheck.empty) {
                     // B. FALLBACK TO V1 (Legacy Chunks)
                     console.log("⚠️ V2 EMPTY. Falling back to V1 Chunks...");
 
@@ -954,9 +1355,10 @@ function updateLocalSlotsFromStudents() {
 
                     if (fullPayload) {
                         const bulkData = JSON.parse(fullPayload);
-                        ['examBaseData', 'examRoomAllotment'].forEach(key => {
-                            if (bulkData[key]) localStorage.setItem(key, bulkData[key]);
-                        });
+                        if (bulkData['examRoomAllotment']) localStorage.setItem('examRoomAllotment', bulkData['examRoomAllotment']);
+                        if (bulkData['examBaseData']) await saveExamDataIDB(JSON.parse(bulkData['examBaseData']
+                    ));
+
                         updateSyncStatus("Synced (V1)", "success");
                     } else {
                         updateSyncStatus("Synced (Empty)", "success");
@@ -967,40 +1369,160 @@ function updateLocalSlotsFromStudents() {
                 updateSyncStatus("Error", "error");
             }
 
-            // Final UI Load (Refresh Dashboards, Tables, etc.)
-            loadInitialData();
-            if (typeof finalizeAppLoad === 'function') finalizeAppLoad();
-        };
+// Final UI Load — guaranteed to run
+loadInitialData();
+if (typeof finalizeAppLoad === 'function') finalizeAppLoad();
+
+};
+
 
         fetchHeavyData();
     }
 
 
+// ⚡ ON-DEMAND PAST EXAM FETCH ENGINE
+window.fetchHeavyDataOnDemand = async function(sessionKey) {
+    if (!sessionKey || !window.currentCollegeId) return;
+    
+    const [date, time] = sessionKey.split(' | ');
+    // Skip if we already downloaded it previously
+    const hasLocals = allStudentData.some(s => s.Date === date.trim() && s.Time === time.trim());
+    if (hasLocals) return; 
+
+    // Generate accurate ID using the same function as syncSessionToCloud
+    const sessionIdStr = generateSessionId(sessionKey);
+
+    updateSyncStatus("Downloading Past Exam Archive...", "neutral");
+    try {
+        const { getDoc, doc, db } = window.firebase;
+        
+        console.log(`📡 Fetching historical data for ID: [${sessionIdStr}]`);
+
+        const studentDoc = await getDoc(doc(db, 'colleges', currentCollegeId, 'session_students', sessionIdStr));
+        
+        if (studentDoc.exists() && studentDoc.data().students) {
+            
+            // --- 🛡️ NEW: DEDUPLICATION SHIELD to block parallel-click bugs ---
+            const freshStudents = studentDoc.data().students;
+            
+            const getSmartSessionKey = (d, t) => {
+                const dNorm = (d || "").replace(/[./-]/g, '');
+                const tUpper = (t || "").toUpperCase();
+                const isAN = tUpper.includes("PM") || tUpper.includes("AN") || 
+                             tUpper.startsWith("12:") || tUpper.startsWith("13:") || 
+                             tUpper.startsWith("14:") || tUpper.startsWith("15:") ||
+                             tUpper.startsWith("16:");
+                return `${dNorm}_${isAN ? 'AFTERNOON' : 'MORNING'}`;
+            };
+
+            const uniqueMap = new Map();
+            [...allStudentData, ...freshStudents].forEach(s => {
+                const regNo = (s['Register Number'] || s['Reg No'] || s['RegNo'] || "").toString().trim();
+                const uKey = `${regNo}_${getSmartSessionKey(s.Date, s.Time)}`;
+                
+                if (regNo && !uniqueMap.has(uKey)) {
+                    uniqueMap.set(uKey, s);
+                }
+            });
+            
+            allStudentData = Array.from(uniqueMap.values());
+            // -----------------------------------------------------------------
+
+            jsonDataStore.innerHTML = JSON.stringify(allStudentData); // Sync the store
+            await saveExamDataIDB(allStudentData);
+            
+            // Do NOT rebuild dropdowns here — selections would be lost.
+            // Each tab's change handler is responsible for rendering after this returns.
+            updateSyncStatus("Past Exam Ready!", "success");
+
+        } else {
+             updateSyncStatus("Error: No Master Data Found", "error");
+        }
+    } catch (e) {
+        console.error("Fetch past exam heavy data error:", e);
+    }
+};
+
+    
+
 // --- PHASE 4: MODULAR WRITE HELPERS ---
 
-    function generateSessionId(sessionKey) {
+     function generateSessionId(sessionKey) {
         try {
-            // sessionKey format: "DD.MM.YYYY | HH:MM AM"
-            const [dateStr, timeStr] = sessionKey.split('|');
-            if(!dateStr || !timeStr) return "UNKNOWN_SESSION";
-
-            const [d, m, y] = dateStr.trim().split('.');
+            const parts = sessionKey.split('|');
+            if (parts.length < 2) return "UNKNOWN_SESSION";
+            
+            // Normalize Date: remove . / - and extract D, M, Y
+            const dateStr = parts[0].trim();
+            const dateParts = dateStr.split(/[./-]/);
+            if (dateParts.length < 3) return "ERROR_ID";
+            const [d, m, y] = dateParts;
             const isoDate = `${y}-${m}-${d}`;
 
-            const t = timeStr.trim().toUpperCase();
+            // Normalize Time: Detect AN/FN
+            const t = parts[1].trim().toUpperCase();
             let sessionType = "FN";
-            // Logic: PM or 12:xx or 13:xx+ implies AN.
-            if (t.includes("PM") || t.startsWith("12:") || t.startsWith("12.") || 
-                t.startsWith("13:") || t.startsWith("14:") || t.startsWith("15:")) {
+            if (t.includes("PM") || t.includes("AN") || 
+                t.startsWith("12:") || t.startsWith("13:") || 
+                t.startsWith("14:") || t.startsWith("15:") || t.startsWith("16:")) {
                 sessionType = "AN";
             }
             return `${isoDate}_${sessionType}`;
         } catch (e) {
-            console.error("Session ID Gen Error:", sessionKey);
-            return "ERROR_ID";
+            console.error("ID Gen Error:", e);
+            return "ERROR";
         }
     }
 
+    // --- NEW: Universal Student Matcher (Handles all date/time formats) ---
+    window.getStudentsForSession = function(allData, targetDate, targetTime) {
+        if (!allData || !targetDate || !targetTime) return [];
+        
+        const dateRaw = targetDate.trim().replace(/[./-]/g, '');
+        const timeRaw = targetTime.trim().toUpperCase();
+
+        return allData.filter(s => {
+            // 1. Normalize Date
+            const studentDateNorm = (s.Date || "").replace(/[./-]/g, '');
+            const dateMatch = studentDateNorm === dateRaw;
+            
+            // 2. Smart Time Match
+            let timeMatch = s.Time === timeRaw;
+            if (!timeMatch) {
+                const isAN = timeRaw.includes("AN") || timeRaw.includes("PM") || 
+                             timeRaw.startsWith("12:") || timeRaw.startsWith("13:");
+                const sTime = (s.Time || "").toUpperCase();
+                const sIsAN = sTime.includes("PM") || sTime.includes("AN") || 
+                              sTime.startsWith("12:") || sTime.startsWith("13:") || 
+                              sTime.startsWith("14:") || sTime.startsWith("15:") || 
+                              sTime.startsWith("16:");
+                timeMatch = (isAN === sIsAN);
+            }
+            return dateMatch && timeMatch;
+        });
+    };
+
+
+    
+
+async function deleteSessionFromCloud(sessionKey) {
+    if (!currentCollegeId || !navigator.onLine) return;
+    
+    updateSyncStatus(`Deleting ${sessionKey}...`, "neutral");
+    const { db, doc, deleteDoc } = window.firebase;
+    const sessionId = generateSessionId(sessionKey);
+    
+    try {
+        await deleteDoc(doc(db, 'colleges', currentCollegeId, 'sessions', sessionId));
+        updateSyncStatus("Deleted from Cloud", "success");
+    } catch (e) {
+        console.error("Session Delete Error:", e);
+        updateSyncStatus("Delete Failed", "error");
+    }
+}
+
+
+    
    async function syncSessionToCloud(sessionKey) {
         // FIX: Use 'currentCollegeId' directly, NOT 'window.currentCollegeId'
         if (!currentCollegeId || !navigator.onLine) return;
@@ -1031,32 +1553,48 @@ function updateLocalSlotsFromStudents() {
         // Scribes
         const allScribes = JSON.parse(localStorage.getItem('examScribeAllotment') || '{}');
         const sessionScribes = allScribes[sessionKey] || {};
+               // Invigilator Mapping (The Missing Part!)
+        const allInvigMapping = JSON.parse(localStorage.getItem('examInvigilatorMapping') || '{}');
+        const sessionInvigMap = allInvigMapping[sessionKey] || {};
 
-        // 2. Construct Payload
+
+    // 2. Construct Payload
         const sessionDoc = {
             id: sessionId,
             date: cleanDate,
             time: cleanTime,
-            students: students,
+            // students: students, // REMOVED TO SAVE EGRESS COSTS
             roomAllotment: sessionAllotment,
             qpCodes: sessionQPs,
             absentees: sessionAbsentees,
             scribeAllotment: sessionScribes,
+            invigilatorMapping: sessionInvigMap, 
             meta: { 
                 studentCount: students.length, 
                 lastUpdated: new Date().toISOString() 
             }
         };
 
+        // --- NEW: Heavy Array Sub-Collection ---
+        const sessionStudentsDoc = {
+            students: students,
+            lastUpdated: new Date().toISOString() 
+        };
+
         // 3. Write to Firestore (Modular Write)
         try {
-            // FIX: Use 'currentCollegeId' directly here too
+            updateSyncStatus("Saving Metadata...", "neutral"); // <-- NEW RIBBON ALERT
             await setDoc(doc(db, 'colleges', currentCollegeId, 'sessions', sessionId), sessionDoc);
-            updateSyncStatus("Saved (V2)", "success");
+            
+            updateSyncStatus("Uploading Master Student List...", "neutral"); // <-- NEW RIBBON ALERT
+            await setDoc(doc(db, 'colleges', currentCollegeId, 'session_students', sessionId), sessionStudentsDoc);
+
+            updateSyncStatus("All Data Synced!", "success"); // <-- UPDATED SUCCESS MESSAGE
+
             
             // Recalculate Invigilation Slots
             if (typeof updateLocalSlotsFromStudents === 'function') {
-                updateLocalSlotsFromStudents();
+                await updateLocalSlotsFromStudents();
             }
             
             // Sync Slots (This function call is fine)
@@ -1140,6 +1678,21 @@ function updateLocalSlotsFromStudents() {
                 };
                 await setDoc(doc(db, "colleges", cid, "system_data", "slots"), data, { merge: true });
             }
+
+            // Add this as case #6 inside syncDataToCloud(targetSection)
+            else if (targetSection === 'baseData') {
+                const students = await loadExamDataIDB();
+                if (students && students.length > 0) {
+                    const { storage, ref, uploadString } = window.firebase;
+                    const storageRef = ref(storage, `colleges/${cid}/data/examBaseData.json`);
+                    await uploadString(storageRef, JSON.stringify(students), 'raw', {
+                contentType: 'application/json'
+                    });
+                console.log("📁 Heavy Data (examBaseData) synced to Firebase Storage.");
+                    }
+                }
+
+            
 
             updateSyncStatus("Saved", "success");
 
@@ -1910,13 +2463,23 @@ function generateDayWisePDF() {
             y += 10;
             doc.setFontSize(16); doc.text(collegeName, w/2, y, {align:'center'});
             y += 7;
-            doc.setFontSize(14); doc.text(title, w/2, y, {align:'center'});
+
+            // ✅ INSERTED: Dynamically fetch and display the Exam Name
+            const examName = getExamName(date, time, stream);
+            if (examName) {
+                doc.setFontSize(13); doc.setFont("helvetica", "bold");
+                doc.text(examName, w/2, y, {align:'center'});
+                y += 6; // Shift subsequent lines down
+            }
+
+            doc.setFontSize(12); doc.text(title, w/2, y, {align:'center'});
             y += 6;
             doc.setFontSize(11); doc.setFont("helvetica", "normal");
             doc.text(`${date} | ${time}`, w/2, y, {align:'center'});
             
             return y + 8; 
         };
+
 
         const drawColumnHeader = (x, y) => {
             doc.setFillColor(220); // Grey
@@ -3357,14 +3920,17 @@ if (toggleButton && sidebar) {
         if (!timeStr) return "FN"; // Default
         const t = timeStr.toUpperCase().trim();
 
-        // Logic: PM or 12:xx or 13:xx+ implies AN. Everything else is FN.
-        if (t.includes("PM") || t.startsWith("12:") || t.startsWith("12.") ||
-            t.startsWith("13:") || t.startsWith("14:") || t.startsWith("15:") || t.startsWith("16:")) {
-            return "AN";
-        }
-        return "FN";
-    }
+            // Logic: Includes 'PM' or 'AN' or starts with Afternoon hours implies AN.
+                if (t.includes("PM") || t.includes("AN") || 
+                t.startsWith("12:") || t.startsWith("12.") || 
+                t.startsWith("13:") || t.startsWith("14:") || 
+                t.startsWith("15:") || t.startsWith("16:")) {
+                return "AN";
+            }
 
+        return "FN";
+
+}
     // Helper to convert Date+Session to a strictly comparable number (YYYYMMDDS)
     function getSessionValue(dateStr, sessionType) {
         if (!dateStr) return 0;
@@ -3390,11 +3956,29 @@ if (toggleButton && sidebar) {
 // --- CORE: Get Exam Name (Simplified) ---
     // Previously used dates to guess name. Now strictly relies on Data Tagging.
     // This is kept for backward compatibility to prevent crashes.
-    function getExamName(date, time, stream) {
-        // Logic moved to "Data Tagging" during upload.
-        // Returns empty string so reports fall back to the tag inside student data.
-        return ""; 
-    }
+/** ✅ FIXED: Corrected variable name to allStudentData **/
+function getExamName(date, time, stream) {
+    if (typeof allStudentData === 'undefined' || !allStudentData || allStudentData.length === 0) return "";
+    
+    // 1. Filter students for this specific session
+    const sessionStudents = allStudentData.filter(s => 
+        s.Date === date && 
+        s.Time === time && 
+        (s.Stream || "Regular") === stream
+    );
+
+    if (sessionStudents.length === 0) return "";
+
+    // 2. Extract the Exam Name tagged during upload
+    // ✅ FIXED: Look for both "Exam Name" (CSV/PDF) and "examName" (Internal)
+    const names = sessionStudents.map(s => s.examName || s['Exam Name']).filter(Boolean);
+
+    if (names.length === 0) return "";
+    
+    // Return the first valid one found for the session
+    return names[0];
+}
+
     
 
     // --- UI ELEMENTS ---
@@ -4035,9 +4619,45 @@ if (toggleButton && sidebar) {
                 dateSelect.appendChild(option);
             });
             if (currentVal) dateSelect.value = currentVal;
-            dateSelect.onchange = (e) => {
-                updateSpecificDateGrid(e.target.value, specificDateGrid);
+                        dateSelect.onchange = async (e) => {
+                const selectedDate = e.target.value;
+                if (!selectedDate) {
+                    updateSpecificDateGrid('', specificDateGrid);
+                    return;
+                }
+
+                // Check if data for this date is already in local memory
+                const localMatch = allStudentData.some(s => s.Date === selectedDate);
+
+                if (!localMatch && window.ExamCloudCache) {
+                    const fetched = await window.ExamCloudCache.fetchHistoricalData(selectedDate);
+                    if (fetched && fetched.length > 0) {
+                        allStudentData = [...allStudentData, ...fetched];
+                    }
+                }
+
+                // Show historical context notice if a context package was loaded for this date
+                const histCtx = window.historicalContextCache && window.historicalContextCache[selectedDate];
+                const existingNotice = document.getElementById('historical-context-notice');
+                if (existingNotice) existingNotice.remove();
+
+                if (histCtx && (Object.keys(histCtx.roomAllotment || {}).length > 0 || Object.keys(histCtx.invigilatorMapping || {}).length > 0)) {
+                    const notice = document.createElement('div');
+                    notice.id = 'historical-context-notice';
+                    notice.className = 'mt-3 p-3 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-800 font-medium';
+                    const rCount = Object.keys(histCtx.roomAllotment || {}).length;
+                    const iCount = Object.keys(histCtx.invigilatorMapping || {}).length;
+                    const sCount = Object.keys(histCtx.scribeAllotment || {}).length;
+                    notice.innerHTML = `☁️ <strong>Historical context loaded for ${selectedDate}</strong> — 
+                        Rooms: ${rCount} sessions, Invigilators: ${iCount} sessions, Scribes: ${sCount} sessions. 
+                        <em>(This data is read-only and does not affect your current session.)</em>`;
+                    specificDateGrid.parentElement.insertBefore(notice, specificDateGrid);
+                }
+
+                updateSpecificDateGrid(selectedDate, specificDateGrid);
+
             };
+
         }
 
         // --- 5. UPDATE DATA LOADING TAB STATUS ---
@@ -4130,7 +4750,45 @@ if (toggleButton && sidebar) {
 
         const monthData = {};
 
+        // --- 📡 NEW: Scan Metadata Registry for Historical Sessions ---
+        const registryRaw = localStorage.getItem('examAllKnownSessions');
+        if (registryRaw) {
+            const registry = JSON.parse(registryRaw);
+            const targetMonthStr = String(month + 1).padStart(2, '0');
+            const targetYearStr = String(year);
+
+            registry.forEach(sessionKey => {
+                const [dateRaw, timeRaw] = sessionKey.split(' | ');
+                // Support both dots and slashes
+                const dParts = dateRaw.trim().split(/[./-]/);
+                if (dParts.length < 3) return;
+                const [d, m, y] = dParts;
+                
+                if (m === targetMonthStr && y === targetYearStr) {
+                    const dayKey = parseInt(d);
+                    const tNorm = timeRaw.toUpperCase();
+                    // Match the logic in common helpers
+                    const isPM = tNorm.includes("PM") || tNorm.includes("AN") || 
+                                 tNorm.startsWith("12:") || tNorm.startsWith("13:");
+                    const sessionKeyId = isPM ? 'pm' : 'am';
+
+                    if (!monthData[dayKey]) {
+                        monthData[dayKey] = {
+                            am: { students: 0, regCount: 0, othCount: 0, scribeCount: 0, isMetadata: true },
+                            pm: { students: 0, regCount: 0, othCount: 0, scribeCount: 0, isMetadata: true }
+                        };
+                    }
+                    // If no real students yet, mark as active so the red bubble appears
+                    if (monthData[dayKey][sessionKeyId].students === 0) {
+                        monthData[dayKey][sessionKeyId].students = "—"; // Indicator for 'Known via Metadata'
+                    }
+                }
+            });
+        }
+
+        // Keep your existing allStudentData scan...
         if (allStudentData && allStudentData.length > 0) {
+
             const targetMonthStr = String(month + 1).padStart(2, '0');
             const targetYearStr = String(year);
 
@@ -4148,9 +4806,15 @@ if (toggleButton && sidebar) {
                     };
 
                     const stats = monthData[dayKey][sessionKey];
+                    
+                    // --- 🛠️ FIX: Clean the '—' placeholder back to 0 before we do math ---
+                    if (stats.students === "—") {
+                        stats.students = 0;
+                    }
                     stats.students++;
 
                     if (scribeRegNos.has(s['Register Number'])) {
+
                         stats.scribeCount++;
                     } else {
                         if (!s.Stream || s.Stream === "Regular") stats.regCount++;
@@ -4204,8 +4868,8 @@ if (toggleButton && sidebar) {
             }
 
             if (data) {
-                const hasFN = data.am.students > 0;
-                const hasAN = data.pm.students > 0;
+               const hasFN = data.am.students > 0 || data.am.students === "—";
+                const hasAN = data.pm.students > 0 || data.pm.students === "—";
 
                 if (hasFN || hasAN) {
                     circleClass = "w-8 h-8 text-sm md:w-20 md:h-20 md:text-3xl rounded-full flex flex-col items-center justify-center relative font-bold text-red-900 border border-red-200 overflow-hidden shadow-sm";
@@ -4254,7 +4918,7 @@ if (toggleButton && sidebar) {
                                 <span class="md:hidden">FN</span>
                                 <span class="hidden md:inline">Morning (FN)</span>
                             </strong>
-                            <span class='text-gray-900 font-bold text-xs'>${data.am.students}</span>
+                            <span class='text-gray-900 font-bold text-xs'>${data.am.students === "—" ? "Past Session (Click to Load)" : data.am.students}</span>
                         </div>
                         <div class="mt-1 bg-gray-50 p-1.5 rounded border border-gray-100">
                             <div class="flex justify-between text-xs font-bold text-gray-700">
@@ -4287,7 +4951,7 @@ if (toggleButton && sidebar) {
                                 <span class="md:hidden">AN</span>
                                 <span class="hidden md:inline">Afternoon (AN)</span>
                             </strong>
-                            <span class='text-gray-900 font-bold text-xs'>${data.pm.students}</span>
+                           <span class='text-gray-900 font-bold text-xs'>${data.pm.students === "—" ? "Past Session (Click to Load)" : data.pm.students}</span>
                         </div>
                         <div class="mt-1 bg-gray-50 p-1.5 rounded border border-gray-100">
                             <div class="flex justify-between text-xs font-bold text-gray-700">
@@ -4707,7 +5371,8 @@ if (toggleButton && sidebar) {
                 const pageStream = session.students.length > 0 ? (session.students[0].Stream || "Regular") : "Regular";
 
                 const examName = getExamName(session.Date, session.Time, pageStream);
-                const examNameHtml = examName ? `<h2 style="font-size:14pt; font-weight:bold; margin:2px 0;">${examName}</h2>` : "";
+                const examNameHtml = examName ? `<h2 class="print-exam-name" style="font-size:14pt; font-weight:bold; margin:2px 0; text-align:center;">${examName}</h2>` : "";
+
 
                 // NEW: Get Invigilator Name
                 const invigMap = JSON.parse(localStorage.getItem(INVIG_MAPPING_KEY) || '{}');
@@ -4873,31 +5538,34 @@ if (toggleButton && sidebar) {
                 const studentsPage1 = session.students.sort((a, b) => a.seatNumber - b.seatNumber).slice(0, 20);
                 const studentsPage2 = session.students.slice(20);
 
-                const getHeader = (pageNum) => {
+                                const getHeader = (pageNum) => {
                     if (pageNum === 1) {
                         return `
-                        <div class="print-header-group" style="position: relative; margin-bottom: 5px;">
+                        <div class="print-header-group" style="position: relative; text-align: center; margin-bottom: 5px;">
                             <div style="position: absolute; top: 0; right: 0; font-weight: bold; font-size: 11pt; border: 1px solid #000; padding: 2px 6px;">
                                 ${pageStream}
                             </div>
                             <div style="position: absolute; top: 0; left: 0; font-weight: bold; font-size: 12pt;">
                                 Page ${pageNum}
                             </div>
-                            <h1>${currentCollegeName}</h1> 
-                            ${examNameHtml}
-                            <h2>${serialNo} &nbsp;|&nbsp; ${session.Date} &nbsp;|&nbsp; ${session.Time}</h2>
+                            <h1 style="margin-bottom: 2px; text-transform: uppercase;">${currentCollegeName}</h1> 
+                            <!-- ✅ Center aligned Exam Name -->
+                            <div style="font-size: 14pt; font-weight: bold; margin: 2px 0;">${examName}</div>
+                            <h2 style="margin: 2px 0;">Hall: ${serialNo} &nbsp;|&nbsp; ${session.Date} &nbsp;|&nbsp; ${session.Time}</h2>
                             ${locationHtml} 
                         </div>`;
                     } else {
                         return `
                         <div class="print-header-group" style="margin-bottom: 5px; border-bottom: 1px dashed #ccc; padding-bottom: 2px;">
-                            <div style="display: flex; justify-content: space-between; font-weight: bold; font-size: 10pt; color: #444;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; font-weight: bold; font-size: 10pt; color: #444;">
                                 <span>Hall: ${serialNo} (${session.Room})</span>
-                                <span>Page 2 - ${pageStream}</span>
+                                <span style="font-size: 11pt; color: #000;">${examName}</span> <!-- ✅ Added to Page 2 -->
+                                <span>Page ${pageNum} - ${pageStream}</span>
                             </div>
                         </div>`;
                     }
                 };
+
 
                 const tableHeader = `
                 <table class="print-table" style="border-collapse: collapse; width: 100%;">
@@ -7469,7 +8137,7 @@ if (toggleButton && sidebar) {
 
 
 // V34: INTERACTIVE DIFF MERGE (With Add/Delete Permissions)
-function parseCsvAndLoadData(csvText) {
+async function parseCsvAndLoadData(csvText) {
     try {
         // --- 1. PARSE THE CSV ---
         const lines = csvText.trim().split('\n');
@@ -7518,8 +8186,9 @@ function parseCsvAndLoadData(csvText) {
             }
         });
 
-        // Get current DB data
-        const currentDB = JSON.parse(localStorage.getItem(BASE_DATA_KEY) || '[]');
+        // Get current DB data from IDB
+        const currentDB = await loadExamDataIDB() || [];
+
 
         // Split DB into:
         // A. IRRELEVANT DATA (Exams not in this file) -> We keep these 100%
@@ -7581,7 +8250,15 @@ function parseCsvAndLoadData(csvText) {
 
         // Save
         jsonDataStore.innerHTML = JSON.stringify(allStudentData);
-        localStorage.setItem(BASE_DATA_KEY, JSON.stringify(allStudentData));
+       // localStorage.setItem(BASE_DATA_KEY, JSON.stringify(allStudentData));
+        await saveExamDataIDB(allStudentData);
+        // Add this after saveExamDataIDB(allStudentData);
+        const modifiedSessions = new Set();
+        finalBatch.forEach(s => modifiedSessions.add(`${s.Date} | ${s.Time}`));
+        for (const sessionKey of modifiedSessions) {
+        await syncSessionToCloud(sessionKey);
+        }
+
 
         // Update UI
         csvLoadStatus.textContent = `Processed. Total Students: ${allStudentData.length}`;
@@ -7638,7 +8315,11 @@ window.real_populate_session_dropdown = function () {
             updateUniqueStudentList();
 
             const sessions = new Set(allStudentData.map(s => `${s.Date} | ${s.Time}`));
+            const knownRegistry = JSON.parse(localStorage.getItem('examAllKnownSessions') || '[]');
+            knownRegistry.forEach(k => sessions.add(k));
             allStudentSessions = Array.from(sessions).sort(compareSessionStrings);
+
+
 
             // Clear Options
             [sessionSelect, reportsSessionSelect, editSessionSelect, searchSessionSelect].forEach(el => {
@@ -7714,7 +8395,18 @@ window.real_populate_session_dropdown = function () {
   
    
 
-    sessionSelect.addEventListener('change', () => {
+        sessionSelect.addEventListener('change', async () => {
+        const savedSession = sessionSelect.value;
+        await window.fetchHeavyDataOnDemand(savedSession);
+
+        // Sync local list from store
+        if (typeof jsonDataStore !== 'undefined') {
+            allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
+        }
+
+        sessionSelect.value = savedSession;
+
+
         const sessionKey = sessionSelect.value;
         if (sessionKey) {
             absenteeSearchSection.classList.remove('hidden');
@@ -7751,7 +8443,7 @@ window.real_populate_session_dropdown = function () {
         const [date, time] = sessionKey.split(' | ');
 
         // Filter students for this session
-        const sessionStudents = allStudentData.filter(s => s.Date === date && s.Time === time);
+        const sessionStudents = window.getStudentsForSession(allStudentData, date, time);
 
         // Filter by search query
         const matches = sessionStudents.filter(s => s['Register Number'].toUpperCase().includes(query)).slice(0, 10);
@@ -8057,7 +8749,43 @@ window.real_populate_session_dropdown = function () {
     // V89: Loads the *entire* QP code map from localStorage into the global var
     function loadQPCodes() {
         qpCodeMap = JSON.parse(localStorage.getItem(QP_CODE_LIST_KEY) || '{}');
+        let needsSave = false;
+
+        // --- NEW: Auto-Migrate V1 QP Codes (Course Only) to V2 (Stream-Aware) ---
+        for (const sessionKey in qpCodeMap) {
+            const sessionData = qpCodeMap[sessionKey];
+            const migratedData = {};
+            let sessionMigrated = false;
+
+            for (const oldKey in sessionData) {
+                try {
+                    const decoded = decodeURIComponent(escape(atob(oldKey)));
+                    // If the old key doesn't have the V2 Stream separator '|', it's a V1 backup!
+                    if (!decoded.includes('|')) {
+                        // Upgrade it by attaching the default 'Regular' stream layout
+                        const newKey = btoa(unescape(encodeURIComponent(`${decoded}|Regular`)));
+                        migratedData[newKey] = sessionData[oldKey];
+                        sessionMigrated = true;
+                        needsSave = true;
+                    } else {
+                        migratedData[oldKey] = sessionData[oldKey];
+                    }
+                } catch (e) {
+                    migratedData[oldKey] = sessionData[oldKey];
+                }
+            }
+            if (sessionMigrated) {
+                qpCodeMap[sessionKey] = migratedData;
+            }
+        }
+
+        // Save the freshly migrated data safely back to memory so subsequent reads don't fail
+        if (needsSave) {
+            localStorage.setItem(QP_CODE_LIST_KEY, JSON.stringify(qpCodeMap));
+        }
+        // ------------------------------------------------------------------------
     }
+
 
     // --- NEW: Real-time Cloud Listener ---
     function subscribeToQPSession(sessionKey) {
@@ -8104,14 +8832,20 @@ window.real_populate_qp_code_session_dropdown = function () {
             if (allStudentData.length === 0) {
                 allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
             }
-            if (allStudentData.length === 0) {
+            const knownRegistry_qp = JSON.parse(localStorage.getItem('examAllKnownSessions') || '[]');
+            if (allStudentData.length === 0 && knownRegistry_qp.length === 0) {
                 disable_qpcode_tab(true);
                 return;
             }
+            if (knownRegistry_qp.length > 0) disable_qpcode_tab(false);
+
 
             const previousSelection = sessionSelectQP.value;
             const sessions = new Set(allStudentData.map(s => `${s.Date} | ${s.Time}`));
+            const knownRegistry = JSON.parse(localStorage.getItem('examAllKnownSessions') || '[]');
+            knownRegistry.forEach(k => sessions.add(k));
             allStudentSessions = Array.from(sessions).sort(compareSessionStrings);
+
 
 
             sessionSelectQP.innerHTML = '<option value="">-- Select a Session --</option>';
@@ -8166,7 +8900,18 @@ window.real_populate_qp_code_session_dropdown = function () {
     
 
     // Event listener for the QP Code session dropdown
-    sessionSelectQP.addEventListener('change', () => {
+     sessionSelectQP.addEventListener('change', async () => {
+        const savedSession = sessionSelectQP.value;
+        await window.fetchHeavyDataOnDemand(savedSession);
+
+        // Sync local list from store
+        if (typeof jsonDataStore !== 'undefined') {
+            allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
+        }
+
+        sessionSelectQP.value = savedSession;
+
+
         const sessionKey = sessionSelectQP.value;
         if (sessionKey) {
             qpEntrySection.classList.remove('hidden');
@@ -8450,14 +9195,18 @@ window.real_populate_qp_code_session_dropdown = function () {
     }
     // 3. Backup All Data
     if (backupDataButton) {
-        backupDataButton.addEventListener('click', () => {
+        backupDataButton.addEventListener('click', async () => {
             const backupData = {};
-            ALL_DATA_KEYS.forEach(key => {
+            for (const key of ALL_DATA_KEYS) {
+            if (key === BASE_DATA_KEY) {
+                const idbData = await loadExamDataIDB();
+                if (idbData && idbData.length > 0) backupData[key] = JSON.stringify(idbData);
+            } else {
                 const data = localStorage.getItem(key);
-                if (data) {
-                    backupData[key] = data;
-                }
-            });
+                if (data) backupData[key] = data;
+            }
+        }
+
 
             if (Object.keys(backupData).length === 0) {
                 alert("No data found in local storage to back up.");
@@ -8495,42 +9244,48 @@ window.real_populate_qp_code_session_dropdown = function () {
             const reader = new FileReader();
                reader.onload = async (event) => { //
                 try {
-                    const jsonString = event.target.result;
+
+
+                                        const jsonString = event.target.result;
                     const restoredData = JSON.parse(jsonString);
 
-                    // Clear existing data first
-                    localStorage.clear();
+                    // Ask user for Restore Mode
+                    const isMerge = confirm("RESTORE MODE:\n\nClick [OK] to MERGE the imported file's data with your existing data.\nClick [Cancel] to REPLACE entirely (wiping all existing local data first).");
 
-                    // Restore data
+                    if (!isMerge) {
+                        localStorage.clear();
+                        await saveExamDataIDB([]);
+                    }
+
+                    // Restore data with Interception
                     for (const key in restoredData) {
                         if (Object.hasOwnProperty.call(restoredData, key)) {
-                            localStorage.setItem(key, restoredData[key]);
+                            if (key === 'examBaseData') {
+                                const importedStudents = restoredData[key];
+                                if (isMerge) {
+                                    const existingData = await loadExamDataIDB() || [];
+                                    const getRowKey = r => `${r.Date || ""} | ${r.Time || ""} | ${r['Register Number'] || ""} | ${r.Stream || "REGULAR"}`.toUpperCase();
+                                    const existingKeys = new Set(existingData.map(getRowKey));
+                                    
+                                    const newUniqueData = importedStudents.filter(student => !existingKeys.has(getRowKey(student)));
+                                    await saveExamDataIDB([...existingData, ...newUniqueData]);
+                                } else {
+                                    await saveExamDataIDB(importedStudents);
+                                }
+                    
+                            } else if (key !== 'examData_v2') {
+                                // Restore everything else normally (except stale v2 backups)
+                                localStorage.setItem(key, restoredData[key]);
+                            }
                         }
                     }
+
 
                     alert('Restore successful! Syncing all sessions to V2 Cloud...');
+                    localStorage.setItem('pendingDriveRestoreSync', 'true'); // 🚨 CRITICAL FLAG
+                    localStorage.removeItem('searchIndex');
+                    location.reload();
                     
-                    // MODULAR SYNC (V2) - Loop through ALL restored sessions
-                    if (typeof syncSessionToCloud === 'function') {
-                        // 1. Identify all sessions in the restored file
-                        const sessionsToSync = new Set();
-                        if (allStudentData) {
-                            allStudentData.forEach(s => sessionsToSync.add(`${s.Date} | ${s.Time}`));
-                        }
-
-                        // 2. Sync them one by one to 'colleges/{id}/sessions'
-                        // This DOES NOT touch 'colleges/{id}/data' (V1 is safe)
-                        let count = 0;
-                        for (const sessionKey of sessionsToSync) {
-                            count++;
-                            updateSyncStatus(`Restoring ${count}/${sessionsToSync.size}...`, "neutral");
-                            await syncSessionToCloud(sessionKey);
-                        }
-                        
-                        updateSyncStatus("Restore Complete", "success");
-                    }
-                    
-                    window.location.reload();
 
                 } catch (e) {
                     console.error("Error parsing restore file:", e);
@@ -8759,10 +9514,16 @@ window.real_populate_qp_code_session_dropdown = function () {
         const now = new Date().toISOString();
         localStorage.setItem('lastUpdated', now);
 
-        ALL_DATA_KEYS.forEach(key => {
-            const data = localStorage.getItem(key);
-            if (data) backupData[key] = data;
-        });
+        for (const key of ALL_DATA_KEYS) {
+            if (key === BASE_DATA_KEY) {
+                const idbData = await loadExamDataIDB();
+                if (idbData && idbData.length > 0) backupData[key] = JSON.stringify(idbData);
+            } else {
+                const data = localStorage.getItem(key);
+                if (data) backupData[key] = data;
+            }
+        }
+
         backupData['lastUpdated'] = now;
 
         const jsonString = JSON.stringify(backupData, null, 2);
@@ -8785,8 +9546,13 @@ window.real_populate_qp_code_session_dropdown = function () {
         const restoredData = JSON.parse(text);
 
         for (const key in restoredData) {
-            localStorage.setItem(key, restoredData[key]);
+            if (key === BASE_DATA_KEY) {
+                await saveExamDataIDB(JSON.parse(restoredData[key]));
+            } else {
+                localStorage.setItem(key, restoredData[key]);
+            }
         }
+
 
         alert(`✅ Restored from ${file.name}.\nPage will reload.`);
         window.location.reload();
@@ -8999,14 +9765,20 @@ window.real_populate_qp_code_session_dropdown = function () {
             if (allStudentData.length === 0) {
                 allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
             }
-            if (allStudentData.length === 0) {
+            const knownRegistry_room = JSON.parse(localStorage.getItem('examAllKnownSessions') || '[]');
+            if (allStudentData.length === 0 && knownRegistry_room.length === 0) {
                 disable_room_allotment_tab(true);
                 return;
             }
+            if (knownRegistry_room.length > 0) disable_room_allotment_tab(false);
+
 
             const previousSelection = allotmentSessionSelect.value;
             const sessions = new Set(allStudentData.map(s => `${s.Date} | ${s.Time}`));
+            const knownRegistry = JSON.parse(localStorage.getItem('examAllKnownSessions') || '[]');
+            knownRegistry.forEach(k => sessions.add(k));
             allStudentSessions = Array.from(sessions).sort(compareSessionStrings);
+
 
             allotmentSessionSelect.innerHTML = '<option value="">-- Select a Session --</option>';
             // --- 🧠 SMART DEFAULT LOGIC (Today's Active vs Next Upcoming) ---
@@ -9057,6 +9829,51 @@ window.real_populate_qp_code_session_dropdown = function () {
         }
     }
    
+    // --- NEW: Pre-splits the session student list into Part A and Part B ---
+    // Call this whenever a new session is loaded OR strategy radio changes.
+    function precomputeSessionParts(sessionKey, strategy) {
+            mixingActiveStrategy = strategy;
+        mixingParts = {};  // Reset all per-stream data
+
+        if (strategy === 'none' || !sessionKey) return;
+
+        const [date, time] = sessionKey.split(' | ');
+
+        // Get all students for this session
+        const sessionStudents = window.getStudentsForSession(allStudentData, date, time);
+
+        // Get every distinct stream present in this session
+        const streams = [...new Set(sessionStudents.map(s => s.Stream || 'Regular'))];
+
+        // For EACH stream, build its own independent Part A and Part B
+        streams.forEach(stream => {
+            const streamStudents = sessionStudents
+                .filter(s => (s.Stream || 'Regular') === stream)
+                .sort((a, b) => {
+                    if (a.Course !== b.Course) return a.Course.localeCompare(b.Course);
+                    const rA = (a['Register Number'] || '').toString().trim();
+                    const rB = (b['Register Number'] || '').toString().trim();
+                    return rA.localeCompare(rB);
+                });
+
+            const total = streamStudents.length;
+            const splitAt = (strategy === 'ratio_2_1')
+                ? Math.round(total * (2 / 3))
+                : Math.round(total * 0.5); // ratio_1_1
+
+            mixingParts[stream] = {
+                partA: streamStudents.slice(0, splitAt),
+                partB: streamStudents.slice(splitAt),
+                pA: 0,
+                pB: 0
+            };
+
+            console.log(`🎯 [${stream}] Pre-split: A=${mixingParts[stream].partA.length}, B=${mixingParts[stream].partB.length}`);
+        });
+
+    }
+    // -------------------------------------------------------------------
+
 
     // Load Room Allotment for a session
     function loadRoomAllotment(sessionKey) {
@@ -9084,6 +9901,10 @@ window.real_populate_qp_code_session_dropdown = function () {
         container.innerHTML = '';
         container.className = "mb-6 grid grid-cols-1 md:grid-cols-2 gap-4";
         container.classList.remove('hidden');
+                // Show the mixing strategy panel once a session is loaded
+        const mixPanel = document.getElementById('mixing-strategy-panel');
+        if (mixPanel) mixPanel.classList.remove('hidden');
+
 
         // 1. Calculate Stats
         const streamStats = {};
@@ -9293,14 +10114,21 @@ window.real_populate_qp_code_session_dropdown = function () {
                         <h4 class="font-bold text-gray-800 text-base">
                             ${room.roomName} ${location}
                         </h4>
+
                         <div class="flex gap-2 mt-1 items-center">
                             <span class="text-xs px-2 py-0.5 rounded-full font-medium ${badgeColor}">
                                 ${streamName}
                             </span>
                             <span class="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 flex items-center">
                                 ${room.students.length} / ${room.capacity} Students ${capBadge}
+                                ${room.students.length > 30 ? `
+                                    <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 font-bold ml-1">
+                                        Leftover Grace
+                                    </span>
+                                ` : ''}
                             </span>
                         </div>
+
                     </div>
                 </div>
                 
@@ -9408,6 +10236,12 @@ window.real_populate_qp_code_session_dropdown = function () {
         </div>
     `;
         roomSelectionList.insertAdjacentHTML('beforeend', streamSelectHtml);
+        // Show selected strategy as read-only info in modal
+        const activeStrategy = document.querySelector('input[name="mixing-strategy"]:checked')?.value || 'none';
+        const strategyLabels = { 'none': 'No Mix', 'ratio_1_1': '1:1 Mix', 'ratio_2_1': '2:1 Mix' };
+        const strategyInfoHtml = `<div class="mb-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2 font-bold">Active Strategy: ${strategyLabels[activeStrategy]}</div>`;
+        roomSelectionList.insertAdjacentHTML('beforeend', strategyInfoHtml);
+
 
         // 2. List Rooms (Updated Logic)
 
@@ -9467,9 +10301,13 @@ window.real_populate_qp_code_session_dropdown = function () {
             if (!isUnavailable) {
                 roomOption.onclick = () => {
                     const selectedStream = document.getElementById('allotment-stream-select').value;
-                    selectRoomForAllotment(roomName, room.capacity, selectedStream);
+                    // Read the strategy from the persistent radio buttons on the main page
+                    const selectedStrategy = document.querySelector('input[name="mixing-strategy"]:checked')?.value || 'none';
+                    selectRoomForAllotment(roomName, room.capacity, selectedStream, selectedStrategy);
                 };
             }
+
+
 
             roomSelectionList.appendChild(roomOption);
         });
@@ -9478,7 +10316,7 @@ window.real_populate_qp_code_session_dropdown = function () {
     }
 
     // Select a room and allot students (Auto-Save & Sync enabled)
-    async function selectRoomForAllotment(roomName, capacity, targetStream) {
+       async function selectRoomForAllotment(roomName, capacity, targetStream, strategy = 'none') {
         const [date, time] = currentSessionKey.split(' | ');
 
         const sessionStudentRecords = allStudentData.filter(s => s.Date === date && s.Time === time);
@@ -9519,12 +10357,59 @@ window.real_populate_qp_code_session_dropdown = function () {
             }
         }
 
-        // SMART ALLOTMENT: If remaining students are <= 33, put them ALL in this room
-        let limit = capacity;
-        if (candidates.length <= 33) {
-            limit = candidates.length;
+       
+        // --- MIXING ENGINE: Per-Stream Pre-Split Queue Strategy ---
+        let limit = parseInt(capacity) || 30;
+        let newStudents = [];
+
+        const streamPart = mixingParts[targetStream]; // This stream's own independent queues
+
+        // ── GUARD 1: Last room / Leftover Logic (V1 Feature Restored) ───────
+        // If unallotted students are 33 or below, allot them all to this room
+        // even if the capacity is standard (30), to avoid a stray 1 or 2 students.
+        const leftoverThreshold = Math.max(limit, 33); 
+        
+        if (candidates.length <= leftoverThreshold) {
+            newStudents = candidates.slice();
+            console.log(`💡 Leftover Guard: Allotting all ${candidates.length} students to this room.`);
+
+
+        // ── GUARD 2: Only one course in this stream ───────────────────────────
+        // partB will be empty if all students belong to a single course.
+        // Mixing is meaningless — fall back to standard fill.
+        } else if (!streamPart || streamPart.partB.length === 0) {
+            newStudents = candidates.slice(0, limit);
+
+        // ── MIXING ENGINE ─────────────────────────────────────────────────────
+        } else if (mixingActiveStrategy === 'ratio_1_1' || mixingActiveStrategy === 'ratio_2_1') {
+
+            const ratio = (mixingActiveStrategy === 'ratio_2_1') ? (2 / 3) : 0.5;
+            let takeA = Math.round(limit * ratio);
+            let takeB = limit - takeA;
+
+            // Take from THIS stream's own Part A and Part B using its own pointers
+            const sliceA = streamPart.partA.slice(streamPart.pA, streamPart.pA + takeA);
+            const sliceB = streamPart.partB.slice(streamPart.pB, streamPart.pB + takeB);
+
+            // ── GUARD 3: Partial last room — one course nearly exhausted ──────
+            // If either slice is shorter than requested, mixing can't be done
+            // cleanly. Take all remaining candidates as-is. No scramble.
+            if (sliceA.length < takeA || sliceB.length < takeB) {
+                newStudents = candidates.slice(0, candidates.length);
+            } else {
+                // Normal mixed room: combine Part A and Part B, advance pointers
+                newStudents = [...sliceA, ...sliceB];
+                streamPart.pA += sliceA.length;
+                streamPart.pB += sliceB.length;
             }
-        const newStudents = candidates.slice(0, limit);
+
+        } else {
+            // No Mix selected: standard fill, original behaviour preserved
+            newStudents = candidates.slice(0, limit);
+        }
+        // -----------------------------------------------
+
+
 
         if (newStudents.length === 0) {
             alert(`No unallotted students found for stream: ${targetStream}`);
@@ -9558,12 +10443,27 @@ window.real_populate_qp_code_session_dropdown = function () {
 
     // Event Listeners for Room Allotment
     if (allotmentSessionSelect) {
-        allotmentSessionSelect.addEventListener('change', () => {
+        allotmentSessionSelect.addEventListener('change', async () => {
+        const savedSession = allotmentSessionSelect.value;
+        await window.fetchHeavyDataOnDemand(savedSession);
+
+        // Sync local list from store
+        if (typeof jsonDataStore !== 'undefined') {
+            allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
+        }
+
+        allotmentSessionSelect.value = savedSession;
+
+
             const sessionKey = allotmentSessionSelect.value;
 
             // 1. Reset Dirty Flag (New session loaded fresh)
             hasUnsavedAllotment = false;
             hasUnsavedScribes = false;   // ADD THIS
+            // 2. Pre-compute mixing parts for the new session
+            const activeStrategy = document.querySelector('input[name="mixing-strategy"]:checked')?.value || 'none';
+            precomputeSessionParts(sessionKey, activeStrategy);
+
 
             populateAbsenteeQpFilter(sessionKey);
 
@@ -9585,6 +10485,14 @@ window.real_populate_qp_code_session_dropdown = function () {
 
     addRoomAllotmentButton.addEventListener('click', () => {
         showRoomSelectionModal();
+    });
+    // Re-compute session parts whenever the mixing strategy changes
+    document.querySelectorAll('input[name="mixing-strategy"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+            if (currentSessionKey) {
+                precomputeSessionParts(currentSessionKey, radio.value);
+            }
+        });
     });
 
     closeRoomModal.addEventListener('click', () => {
@@ -10311,23 +11219,31 @@ function renderScribeAllotmentList(sessionKey) {
     // **********************************
 
     // --- Helper function to disable all report buttons ---
-    window.real_disable_all_report_buttons = function (disabled) {
-        const ids = [
-            'generate-report-button',
-            'generate-daywise-report-button', // <--- Updated to match HTML
-            'generate-qpaper-report-button',
-            'generate-scribe-report-button',
-            'generate-scribe-proforma-button',
-            'generate-qp-distribution-report-button',
-            'generate-invigilator-report-button',
-            'generate-absentee-report-button'
-        ];
+   /* Standardized Report Button Controller */
+window.real_disable_all_report_buttons = function (disabled) {
+    const ids = [
+        'generate-qpaper-report-button',        // 1
+        'generate-qp-distribution-report-button', // 2
+        'generate-report-button',                // 3
+        'generate-daywise-report-button',         // 4
+        'generate-sticker-button',               // 5
+        'generate-scribe-proforma-button',       // 6
+        'generate-scribe-report-button',         // 7
+        'generate-invigilator-report-button',    // 8
+        'generate-room-summary-button',          // 9
+        'generate-absentee-report-button'
+    ];
+    ids.forEach(id => {
+        const btn = document.getElementById(id);
+        if (btn) {
+            btn.disabled = disabled;
+            // Add/Remove visual "disabled" look
+            if (disabled) btn.classList.add('opacity-50');
+            else btn.classList.remove('opacity-50');
+        }
+    });
+};
 
-        ids.forEach(id => {
-            const btn = document.getElementById(id);
-            if (btn) btn.disabled = disabled;
-        });
-    }
 
     // --- NEW: STUDENT DATA EDIT FUNCTIONALITY (MODAL VERSION) ---
 
@@ -10356,8 +11272,18 @@ function renderScribeAllotmentList(sessionKey) {
     const modalCancelBtn = document.getElementById('modal-cancel-student');
 
     // 1. Session selection (Updated: Splits Course by Stream)
-    editSessionSelect.addEventListener('change', () => {
-        currentEditSession = editSessionSelect.value;
+       editSessionSelect.addEventListener('change', async () => {
+        const savedSession = editSessionSelect.value;
+        await window.fetchHeavyDataOnDemand(savedSession);
+
+        // Sync local list from store
+        if (typeof jsonDataStore !== 'undefined') {
+            allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
+        }
+
+        editSessionSelect.value = savedSession;
+        currentEditSession = savedSession;
+
         const sessionOpsContainer = document.getElementById('bulk-session-ops-container');
 
         // --- NEW: Select the badge element ---
@@ -10383,9 +11309,12 @@ function renderScribeAllotmentList(sessionKey) {
         const bulkContainer = document.getElementById('bulk-course-update-container');
         if (bulkContainer) bulkContainer.classList.add('hidden');
 
-        if (currentEditSession) {
-            const [date, time] = currentEditSession.split(' | ');
-            const sessionStudents = allStudentData.filter(s => s.Date === date && s.Time === time);
+                if (currentEditSession) {
+            const [dateRaw, timeRaw] = currentEditSession.split(' | ');
+            const sessionStudents = window.getStudentsForSession(allStudentData, dateRaw.trim(), timeRaw.trim());
+
+
+
 
             // --- NEW: Update and Show Badge Count ---
             if (opsCountBadge) {
@@ -10853,7 +11782,7 @@ function renderScribeAllotmentList(sessionKey) {
     });
 
     // 10. Save All Changes to LocalStorage
-    saveEditDataButton.addEventListener('click', () => {
+    saveEditDataButton.addEventListener('click', async () => {
         if (!hasUnsavedEdits) {
             editDataStatus.textContent = 'No changes to save.';
             setTimeout(() => { editDataStatus.textContent = ''; }, 3000);
@@ -10878,10 +11807,12 @@ function renderScribeAllotmentList(sessionKey) {
 
             // 2. Create the new master list
             const updatedAllStudentData = [...otherStudents, ...currentCourseStudents];
-
-            // 3. Update the global variable and localStorage
+          
+            // 3. Update the global variable and IDB
             allStudentData = updatedAllStudentData;
-            localStorage.setItem(BASE_DATA_KEY, JSON.stringify(allStudentData));
+            await saveExamDataIDB(allStudentData);
+
+
 
             editDataStatus.textContent = 'All changes saved successfully!';
             setUnsavedChanges(false);
@@ -11189,8 +12120,9 @@ Are you sure you want to update these records?
                     }
                 });
 
-                // 7. Save & Sync
-                localStorage.setItem(BASE_DATA_KEY, JSON.stringify(allStudentData));
+                // 7. Save to IDB & Sync
+                await saveExamDataIDB(allStudentData);
+
                 
                 alert(`✅ Updated ${updateCount} students! Syncing changes...`);
                 
@@ -11293,8 +12225,12 @@ Are you sure you want to update these records?
             }
 
             let tableRowsHtml = '';
+            
+            
+            
             // Grand Totals
             let grandTotalInvigs = 0;
+            let grandTotalReserves = 0; // Track reserves
 
             sortedSessionKeys.forEach(key => {
                 const stats = sessionStats[key];
@@ -11316,10 +12252,10 @@ Are you sure you want to update these records?
                     streamInvigTotal += requiredInvigs;
                     
                     streamHtmlParts.push(`
-                        <div class="flex justify-between items-center text-sm mb-1 border-b border-gray-200 pb-1 last:border-0">
-                            <span class="font-medium text-gray-700">${strm}:</span>
-                            <span class="text-gray-600">
-                                <strong>${count}</strong> Students <span class="text-xs text-gray-400">→</span> <strong class="text-blue-600">${requiredInvigs}</strong> Inv
+                        <div class="flex justify-between items-center text-sm py-1 border-b border-slate-100 last:border-0">
+                            <span class="font-medium text-slate-700">${strm}</span>
+                            <span class="text-slate-600">
+                                <span class="inline-block w-8 text-right font-bold">${count}</span> <span class="text-[10px] text-slate-300 mx-1">▶</span> <strong class="text-indigo-600 inline-block w-4 text-right">${requiredInvigs}</strong>
                             </span>
                         </div>
                     `);
@@ -11329,21 +12265,33 @@ Are you sure you want to update these records?
                 const scribeCount = stats.scribeCount;
                 const scribeInvigs = Math.ceil(scribeCount / 5); // 1 per 5 rule
 
-                // C. Session Total
+                // C. Session Total & Reserves
                 const sessionTotalInvigs = streamInvigTotal + scribeInvigs;
+                const sessionReserve = Math.ceil(sessionTotalInvigs * 0.10); // 10% Reserves
+                const sessionFinalTotal = sessionTotalInvigs + sessionReserve;
+
                 grandTotalInvigs += sessionTotalInvigs;
+                grandTotalReserves += sessionReserve;
 
                 tableRowsHtml += `
-                    <tr>
-                        <td style="border: 1px solid #ccc; padding: 8px; font-weight: bold;">${key}</td>
-                        <td style="border: 1px solid #ccc; padding: 8px; vertical-align: top;">
+                    <tr class="hover:bg-slate-50 transition-colors bg-white print:bg-white">
+                        <td class="border border-slate-300 print:border-slate-400 p-3 font-bold text-slate-800 align-middle">
+                            ${key.replace(' | ', '<br><span class="text-xs font-normal text-slate-500 print:text-slate-600">')}</span>
+                        </td>
+                        <td class="border border-slate-300 print:border-slate-400 p-2 align-top">
                             ${streamHtmlParts.join('')}
                         </td>
-                        <td style="border: 1px solid #ccc; padding: 8px; vertical-align: top;">
-                             ${scribeCount > 0 ? `<strong>${scribeCount}</strong> Scribes <span class="text-xs text-gray-400">→</span> <strong class="text-orange-600">${scribeInvigs}</strong> Inv` : '<span class="text-gray-400">-</span>'}
+                        <td class="border border-slate-300 print:border-slate-400 p-3 align-middle text-sm text-center">
+                             ${scribeCount > 0 ? `<div class="bg-amber-50 print:bg-transparent rounded px-2 py-1 border border-amber-100 print:border-0 tracking-tight"><strong class="text-amber-800 print:text-black">${scribeCount}</strong> Scr <span class="text-[10px] text-amber-300 print:text-black mx-1">▶</span> <strong class="text-amber-600 print:text-black">${scribeInvigs}</strong> Inv</div>` : '<span class="text-slate-300">-</span>'}
                         </td>
-                        <td style="border: 1px solid #ccc; padding: 8px; text-align: center; font-weight: bold; font-size: 1.1em; color: #0d9488;">
+                        <td class="border border-slate-300 print:border-slate-400 p-3 text-center align-middle font-bold text-teal-700 bg-teal-50/50 print:bg-transparent print:text-black text-lg">
                             ${sessionTotalInvigs}
+                        </td>
+                        <td class="border border-slate-300 print:border-slate-400 p-3 text-center align-middle font-bold text-amber-600 bg-amber-50/50 print:bg-transparent print:text-black text-lg">
+                            ${sessionReserve}
+                        </td>
+                        <td class="border border-slate-300 print:border-slate-400 p-3 text-center align-middle font-bold text-rose-700 bg-rose-50 print:bg-transparent print:text-black text-xl">
+                            ${sessionFinalTotal}
                         </td>
                     </tr>
                 `;
@@ -11351,42 +12299,60 @@ Are you sure you want to update these records?
 
             // Summary Row
             tableRowsHtml += `
-                <tr style="background-color: #f0fdf4; border-top: 2px solid #0d9488;">
-                    <td colspan="3" style="border: 1px solid #ccc; padding: 10px; text-align: right; font-weight: bold;">GRAND TOTAL DUTIES REQUIRED:</td>
-                    <td style="border: 1px solid #ccc; padding: 10px; text-align: center; font-weight: bold; font-size: 1.2em; color: #0d9488;">${grandTotalInvigs}</td>
+                <tr class="bg-slate-800 text-white print:bg-slate-200 print:text-black">
+                    <td colspan="3" class="border border-slate-700 print:border-slate-400 p-4 text-right text-sm font-bold tracking-wide uppercase">GRAND TOTAL DUTIES REQUIRED:</td>
+                    <td class="border border-slate-700 print:border-slate-400 p-4 text-center font-bold text-xl">${grandTotalInvigs}</td>
+                    <td class="border border-slate-700 print:border-slate-400 p-4 text-center font-bold text-xl">${grandTotalReserves}</td>
+                    <td class="border border-slate-700 print:border-slate-400 p-4 text-center font-extrabold text-2xl">${grandTotalInvigs + grandTotalReserves}</td>
                 </tr>
             `;
 
             const fullHtml = `
-                <div class="print-page">
-                    <div class="print-header-group text-center mb-6 border-b-2 border-black pb-4">
-                        <h1 class="text-xl font-bold text-gray-900 uppercase">${currentCollegeName}</h1>
-                        <h2 class="text-lg font-bold text-gray-700 mt-1">Invigilator Requirement Summary</h2>
-                        <p class="text-sm text-gray-500 mt-1">Generated on: ${new Date().toLocaleString()}</p>
-                        ${filterFutureOnly && filterFutureOnly.checked ? '<span class="inline-block mt-1 px-2 py-0.5 bg-teal-100 text-teal-800 text-xs font-bold rounded">Filtered: Upcoming Exams Only</span>' : ''}
+                <div class="print-page bg-white p-2">
+                    <div class="text-center mb-6 pb-4 border-b-2 border-slate-300">
+                        <h1 class="text-2xl font-black text-slate-900 tracking-tight uppercase">${currentCollegeName}</h1>
+                        <h2 class="text-lg font-bold text-slate-700 mt-2 tracking-wide">Invigilator Requirement Summary</h2>
+                            <div class="mt-2 text-sm text-slate-500 flex flex-col sm:flex-row items-center justify-center gap-2">
+                            <span>Generated: <strong class="text-slate-700">${new Date().toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}</strong></span>
+                            ${filterFutureOnly && filterFutureOnly.checked ? '<span class="px-2 py-0.5 bg-emerald-100 text-emerald-800 text-xs font-bold rounded-full uppercase tracking-wider">Upcoming Exams Only</span>' : ''}
+                        </div>
                     </div>
 
-                    <table style="width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 10pt;">
-                        <thead>
-                            <tr style="background-color: #f3f4f6;">
-                                <th style="border: 1px solid #ccc; padding: 8px; text-align: left; width: 25%;">Date | Time</th>
-                                <th style="border: 1px solid #ccc; padding: 8px; text-align: left;">Stream-wise Requirements (1:30)</th>
-                                <th style="border: 1px solid #ccc; padding: 8px; text-align: left; width: 20%;">Scribe Requirements (1:5)</th>
-                                <th style="border: 1px solid #ccc; padding: 8px; text-align: center; width: 10%;">Total</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${tableRowsHtml}
-                        </tbody>
-                    </table>
+                    <div class="overflow-x-auto overflow-y-hidden rounded-xl border border-slate-300 shadow-sm print:overflow-visible print:rounded-none print:shadow-none print:border-none">
+                        <table class="w-full min-w-[700px] text-left text-slate-700 border-collapse print:border-slate-400">
+
+                            <thead>
+                                <tr class="bg-slate-100 print:bg-slate-200 text-slate-600 print:text-slate-900 uppercase text-xs tracking-wider border-b-2 border-slate-300 print:border-slate-400">
+                                    <th class="p-4 font-bold border-r border-slate-300 print:border-slate-400 w-1/5">Date / Time</th>
+                                    <th class="p-4 font-bold border-r border-slate-300 print:border-slate-400">Stream-wise Required (1:30)</th>
+                                    <th class="p-4 font-bold border-r border-slate-300 print:border-slate-400 w-32 text-center">Scribes (1:5)</th>
+                                    <th class="p-4 font-bold border-r border-slate-300 print:border-slate-400 w-20 text-center text-teal-700">Base</th>
+                                    <th class="p-4 font-bold border-r border-slate-300 print:border-slate-400 w-20 text-center text-amber-600">Resv(10%)</th>
+                                    <th class="p-4 font-bold text-center w-24 text-rose-700">Total</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${tableRowsHtml}
+                            </tbody>
+                        </table>
+                    </div>
                     
-                    <div class="mt-8 text-xs text-gray-500">
-                        <p><strong>Note:</strong> Calculation based on 1 Invigilator per 30 Candidates (Normal) and 1 Invigilator per 5 Scribes.</p>
+                    <div class="mt-6 p-4 bg-slate-50 print:bg-transparent rounded-lg border border-slate-200 print:border-0 text-xs text-slate-600 leading-relaxed max-w-2xl mx-auto text-center">
+                        <p><strong>Note:</strong> Base Calculation utilizes 1 Invigilator per 30 Normal Candidates (calculated per stream) and 1 Invigilator per 5 Scribes. A robust mathematically rounded <strong>10% Reserve Buffer</strong> is subsequently applied to each session.</p>
                     </div>
                 </div>
             `;
 
             reportOutputArea.innerHTML = fullHtml;
+
+
+
+
+            
+
+
+
+            
             reportOutputArea.style.display = 'block';
             reportStatus.textContent = `Generated summary for ${sortedSessionKeys.length} sessions.`;
             reportControls.classList.remove('hidden');
@@ -11684,14 +12650,25 @@ Are you sure you want to update these records?
     searchModeGlobalRadio.addEventListener('change', toggleSearchMode);
 
     // 1. Listen for session change (Session Mode Only)
-    searchSessionSelect.addEventListener('change', () => {
+      searchSessionSelect.addEventListener('change', async () => {
+        const savedSession = searchSessionSelect.value;
+        await window.fetchHeavyDataOnDemand(savedSession);
+
+        // Sync local list from store
+        if (typeof jsonDataStore !== 'undefined') {
+            allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
+        }
+
+        searchSessionSelect.value = savedSession;
+
+
         const sessionKey = searchSessionSelect.value;
         studentSearchInput.value = '';
         studentSearchAutocomplete.classList.add('hidden');
 
         if (sessionKey) {
             const [date, time] = sessionKey.split(' | ');
-            searchSessionStudents = allStudentData.filter(s => s.Date === date && s.Time === time);
+            searchSessionStudents = window.getStudentsForSession(allStudentData, date, time);
             studentSearchSection.classList.remove('hidden');
             studentSearchInput.disabled = false;
             studentSearchStatus.textContent = `Loaded ${searchSessionStudents.length} students for this session.`;
@@ -11821,7 +12798,15 @@ function showStudentDetailsModal(regNo, sessionKey) {
     if (allocatedStudent && allocatedStudent['Room No'] !== "Unallotted") {
         const roomName = allocatedStudent['Room No'];
         const roomInfo = currentRoomConfig[roomName] || {};
-        document.getElementById('search-result-room').textContent = roomName;
+
+                // --- NEW: Use Built-in Serial Map for Exact Allotment Order ---
+        const serialMap = getRoomSerialMap(sessionKey);
+        const serialNum = serialMap[roomName] ? `#${serialMap[roomName]}` : "N/A";
+        
+        document.getElementById('search-result-room').textContent = serialNum;
+        // --------------------------------------------------------------
+
+
         document.getElementById('search-result-seat').textContent = allocatedStudent.seatNumber;
         document.getElementById('search-result-room-location').textContent = roomInfo.location || "N/A";
         
@@ -11837,7 +12822,14 @@ function showStudentDetailsModal(regNo, sessionKey) {
     const scribeBlock = document.getElementById('search-result-scribe-block');
     if (scribeRoom) {
         const scribeInfo = currentRoomConfig[scribeRoom] || {};
-        document.getElementById('search-result-scribe-room').textContent = scribeRoom;
+        // --- NEW: Use Built-in Serial Map for Scribe Result ---
+        const serialMap = getRoomSerialMap(sessionKey);
+        const scribeSerial = serialMap[scribeRoom] ? `#${serialMap[scribeRoom]}` : "N/A";
+        
+        document.getElementById('search-result-scribe-room').textContent = scribeSerial;
+        // ------------------------------------------------------
+
+
         document.getElementById('search-result-scribe-room-location').textContent = scribeInfo.location || "N/A";
         
         if(scribeBlock) scribeBlock.classList.remove('hidden');
@@ -12043,7 +13035,6 @@ Are you sure?
                         sStream === targetStream);
                 });
 
-                localStorage.setItem(BASE_DATA_KEY, JSON.stringify(allStudentData));
                 alert(`Deleted ${studentsToDelete.length} records.\nThe page will now reload.`);
 
                // MODULAR SYNC (V2)
@@ -12247,6 +13238,7 @@ Are you sure?
     async function findMyCollege(user) {
         // Run Super Admin Check
         checkSuperAdminAccess(user);
+        updateLoaderProgress(25, "Locating College Database...");
 
         updateSyncStatus("Searching...", "neutral");
         const { db, collection, query, where, getDocs, doc, getDoc } = window.firebase;
@@ -12264,6 +13256,8 @@ Are you sure?
                 currentCollegeId = collegeDoc.id;
                 console.log("Joined College:", currentCollegeId);
                 syncDataFromCloud(currentCollegeId);
+                document.getElementById('cloud-migration-wrapper')?.classList.remove('hidden');
+
             } else {
                 // FAIL: No college found. 
                 // 2. CHECK WHITELIST: Is this user allowed to create a NEW college?
@@ -12293,10 +13287,14 @@ Are you sure?
                     signOut(auth).then(() => location.reload());
                 }
             }
-        } catch (e) {
+                } catch (e) {
             console.error("Error finding college:", e);
             updateSyncStatus("Auth Error", "error");
+            // Guarantee loader is dismissed even if college lookup fails
+            await loadInitialData();
+            if (typeof finalizeAppLoad === 'function') finalizeAppLoad();
         }
+
     }
     // 7. SWITCH COLLEGE (SUPER ADMIN)
     const btnAdminSwitch = document.getElementById('btn-admin-switch-college');
@@ -12590,7 +13588,7 @@ window.loadStudentData = function(dataArray, sessionsToSync = null) {
     // 2. Update Data Stores
     const jsonStr = JSON.stringify(dataArray);
     if(typeof jsonDataStore !== 'undefined') jsonDataStore.innerHTML = jsonStr;
-    localStorage.setItem(BASE_DATA_KEY, jsonStr);
+    saveExamDataIDB(dataArray);
 
     // 3. Update UI
     if(typeof updateUniqueStudentList === 'function') updateUniqueStudentList();
@@ -12660,7 +13658,7 @@ window.loadStudentData = function(dataArray, sessionsToSync = null) {
 // ==========================================
 // 🐍 PYTHON INTEGRATION (With Stream-Aware Merge)
 // ==========================================
-window.handlePythonExtraction = function (jsonString) {
+window.handlePythonExtraction = async function (jsonString) {
     console.log("Received data from Python...");
     
     // 1. Get Configuration
@@ -12707,7 +13705,7 @@ window.handlePythonExtraction = function (jsonString) {
         });
 
         // 4. Merge Logic (Interactive Diff)
-        const currentDB = JSON.parse(localStorage.getItem('examBaseData') || '[]');
+        const currentDB = await loadExamDataIDB();
 
         // A. IGNORED DATA: Keep everything that doesn't match our specific Course+Date+Stream
         // (This protects Regular students when uploading EDE, and vice versa)
@@ -13205,6 +14203,9 @@ window.handlePythonExtraction = function (jsonString) {
 
                 // --- A. LOCAL WIPE (Browser) ---
                 keysToWipe.forEach(key => localStorage.removeItem(key));
+                                // ✅ ADDED: Wipe the student database (IndexedDB)
+                if (typeof saveExamDataIDB === 'function') await saveExamDataIDB([]); 
+
 
                 // --- B. CLOUD WIPE (Firebase) ---
                 if (currentCollegeId) {
@@ -13333,20 +14334,22 @@ window.handlePythonExtraction = function (jsonString) {
                         if (typeof loadRoomConfig === 'function') loadRoomConfig();
                         if (typeof loadStreamConfig === 'function') loadStreamConfig();
                         if (typeof loadGlobalScribeList === 'function') loadGlobalScribeList();
-                        if (typeof renderExamNameSettings === 'function') renderExamNameSettings(); // Refresh UI
+                     
+                    if (typeof renderExamNameSettings === 'function') renderExamNameSettings();
 
-                        // Sync (THE FIX: Force sync settings & allocation)
-                        // REPLACE line 8591 with:
-                        if (typeof syncDataToCloud === 'function') {
+                    // Sync to Cloud
+                    if (typeof syncDataToCloud === 'function') {
                         await syncDataToCloud('settings');
-                        await syncDataToCloud('allocation'); // In case scribe list is in backup
-                        await syncDataToCloud('ops');        // In case QP codes are in backup
-                        }
+                        await syncDataToCloud('allocation');
+                        await syncDataToCloud('ops');
+                    }
 
-                        alert("Settings updated and synced!");
+                    alert("Settings updated and synced!");
+
                     } else {
                         alert("No valid settings found in this file.");
                     }
+
 
                 } catch (err) {
                     console.error(err);
@@ -13375,7 +14378,7 @@ window.handlePythonExtraction = function (jsonString) {
     }
 
     // --- V65: Initial Data Load on Startup (Clean Version) ---
-    function loadInitialData() {
+async function loadInitialData() { 
         try {
             console.log("Loading Local Data...");
             updateHeaderCollegeName(); // <--- ADD THIS LINE HERE
@@ -13389,42 +14392,62 @@ window.handlePythonExtraction = function (jsonString) {
             // ******************************************************************************
             if (typeof initRemunerationModule === 'function') initRemunerationModule();
             // 2. Check for base student data persistence
-            const savedDataJson = localStorage.getItem(BASE_DATA_KEY);
-            if (savedDataJson) {
-                try {
-                    const savedData = JSON.parse(savedDataJson);
-                    if (savedData && savedData.length > 0) {
-                        jsonDataStore.innerHTML = JSON.stringify(savedData);
+            const savedData = await loadExamDataIDB();
 
-                        // Enable UI
-                        if (typeof disable_absentee_tab === 'function') disable_absentee_tab(false);
-                        if (typeof disable_qpcode_tab === 'function') disable_qpcode_tab(false);
-                        if (typeof disable_room_allotment_tab === 'function') disable_room_allotment_tab(false);
-                        if (typeof disable_scribe_settings_tab === 'function') disable_scribe_settings_tab(false);
-                        if (typeof disable_edit_data_tab === 'function') disable_edit_data_tab(false);
-                        if (typeof disable_all_report_buttons === 'function') disable_all_report_buttons(false);
-
-                        if (typeof populate_session_dropdown === 'function') populate_session_dropdown();
-                        if (typeof populate_qp_code_session_dropdown === 'function') populate_qp_code_session_dropdown();
-                        if (typeof populate_room_allotment_session_dropdown === 'function') populate_room_allotment_session_dropdown();
-                        if (typeof loadGlobalScribeList === 'function') loadGlobalScribeList();
-                        if (typeof updateDashboard === 'function') updateDashboard();
-
-                        // NOTE: renderExamNameSettings was removed from here because it's now in Step 1
-
-                        console.log(`Successfully loaded ${savedData.length} records.`);
-                        const statusLog = document.getElementById("status-log");
-                        if (statusLog) statusLog.innerHTML = `<p class="mb-1 text-green-700">&gt; Data loaded from memory.</p>`;
-                    }
-                } catch (e) {
-                    console.error("Failed to parse saved student data:", e);
+    // 2. Check for base student data persistence in IndexedDB
+    if (savedData && savedData.length > 0) {
+        try {
+            // No need to parse JSON, IDB returns the object directly
+            // We create dummy data stores to allow reports to run
+            const qPaperSummary = {};
+            
+            savedData.forEach(student => {
+                const key = `${student.Date}_${student.Time}_${student.Course}`;
+                if (!qPaperSummary[key]) {
+                    qPaperSummary[key] = { 
+                        Date: student.Date, 
+                        Time: student.Time, 
+                        Course: student.Course, 
+                        'Student Count': 0 
+                    };
                 }
-            }
+                qPaperSummary[key]['Student Count']++;
+            });
+            
+            // Update UI Stores
+            jsonDataStore.innerHTML = JSON.stringify(savedData);
+            qPaperDataStore.innerHTML = JSON.stringify(Object.values(qPaperSummary));
+            // --- NEW CRITICAL SYNC ---
+            allStudentData = savedData; // Link to global variable
+            disable_edit_data_tab(false); // Enable the Editor tab
+            updateDashboard(); // Refresh the counts on the home screen
+            // --------------------------
+
+            
+            // Enable UI
+            if (typeof disable_all_report_buttons === 'function') disable_all_report_buttons(false);
+            disable_absentee_tab(false);
+            disable_qpcode_tab(false);
+            disable_room_allotment_tab(false);
+            disable_scribe_settings_tab(false);
+            
+            populate_session_dropdown();
+            populate_qp_code_session_dropdown();
+            populate_room_allotment_session_dropdown();
+            loadGlobalScribeList();
+            
+            console.log(`Successfully loaded ${savedData.length} records from IndexedDB.`);
+
+            
         } catch (criticalError) {
             console.error("CRITICAL APP STARTUP ERROR:", criticalError);
             if (typeof finalizeAppLoad === 'function') finalizeAppLoad();
         }
     }
+    } catch (error) {
+        console.error("Startup Logic Error:", error);
+    }
+}
 
     // ==========================================
     // 💰 REMUNERATION LOGIC (FINAL - B&W + EXAM FILTER)
@@ -14178,20 +15201,30 @@ if (btnSessionReschedule) {
 
             if (!currentSession) return alert("No session selected.");
 
-            // Validation: Must have EITHER (Date+Time) OR (ExamName)
-            if ((!rawDate || !rawTime) && !newExamName) {
-                return alert("Please enter a New Date/Time OR a New Exam Name to apply changes.");
+
+                        // Validation: Must have AT LEAST ONE field changed
+            if (!rawDate && !rawTime && !newExamName) {
+                return alert("Please enter a New Date, a New Time, OR a New Exam Name to apply changes.");
             }
 
-            // A. Determine New Date/Time
+            // A. Determine New Date/Time (Support changing Date or Time independently)
             let newDate = "";
             let newTime = "";
             let isMove = false; // Tracks if we are changing the session key
+            
+            const parts = currentSession.split('|');
+            const oldDate = parts[0].trim();
+            const oldTime = parts[1].trim();
 
-            if (rawDate && rawTime) {
+            if (rawDate) {
                 const [y, m, d] = rawDate.split('-');
                 newDate = `${d}.${m}.${y}`;
-                
+
+            } else {
+                newDate = oldDate;
+            }
+
+            if (rawTime) {
                 if (typeof normalizeTime === 'function') {
                     newTime = normalizeTime(rawTime);
                 } else {
@@ -14201,18 +15234,16 @@ if (btnSessionReschedule) {
                     hours = hours % 12;
                     hours = hours ? hours : 12;
                     newTime = `${String(hours).padStart(2, '0')}:${min} ${ampm}`;
+
                 }
-                
-                const newSessionKey = `${newDate} | ${newTime}`;
-                if (newSessionKey !== currentSession) isMove = true;
             } else {
-                // Keep existing Date/Time
-                const parts = currentSession.split('|');
-                newDate = parts[0].trim();
-                newTime = parts[1].trim();
+                newTime = oldTime;
             }
 
             const newSessionKey = `${newDate} | ${newTime}`;
+            if (newSessionKey !== currentSession) isMove = true;
+
+            
 
             // B. Confirmation Message
             let changesMsg = "";
@@ -14250,7 +15281,7 @@ if (btnSessionReschedule) {
                 });
 
                 // Save to Local Storage
-                localStorage.setItem(BASE_DATA_KEY, JSON.stringify(allStudentData));
+                await saveExamDataIDB(allStudentData);
 
                 // 2. Move Auxiliary Data (ONLY IF MOVING)
                 if (isMove) {
@@ -14324,7 +15355,8 @@ if (btnSessionReschedule) {
             try {
                 // 1. Delete Students
                 allStudentData = allStudentData.filter(s => !(s.Date === oldDate && s.Time === oldTime));
-                localStorage.setItem(BASE_DATA_KEY, JSON.stringify(allStudentData));
+                await saveExamDataIDB(allStudentData);
+
 
                 // 2. Helper to Delete Key
                 const deleteKeyInStorage = (storageKey) => {
@@ -14551,6 +15583,7 @@ if (btnSessionReschedule) {
         const list = document.getElementById('invigilator-list-container');
         const sessionKey = allotmentSessionSelect.value; 
 
+        
         if (!sessionKey) {
             if (section) section.classList.add('hidden');
             return;
@@ -14743,13 +15776,15 @@ if (btnSessionReschedule) {
     
 
     // 2. Handle Swap Interaction
-    window.handleSwapClick = function (roomName) {
+   window.handleSwapClick = async function (roomName) {
+
         if (swapSourceRoom === roomName) {
             // Clicked same room -> Cancel Swap
             swapSourceRoom = null;
         } else if (swapSourceRoom) {
             // Clicked different room -> Perform Swap
-            performSwap(swapSourceRoom, roomName);
+        await performSwap(swapSourceRoom, roomName);
+
             return; // performSwap calls render
         } else {
             // Start Swap Mode
@@ -14759,7 +15794,7 @@ if (btnSessionReschedule) {
     }
 
     // 3. Execute Swap Logic
-    window.performSwap = function (roomA, roomB) {
+        window.performSwap = async function (roomA, roomB) {
         const sessionKey = allotmentSessionSelect.value;
         const invigNameA = currentInvigMapping[roomA];
         const invigNameB = currentInvigMapping[roomB];
@@ -14781,7 +15816,14 @@ if (btnSessionReschedule) {
         const allMappings = JSON.parse(localStorage.getItem(INVIG_MAPPING_KEY) || '{}');
         allMappings[sessionKey] = currentInvigMapping;
         localStorage.setItem(INVIG_MAPPING_KEY, JSON.stringify(allMappings));
-        if (typeof syncDataToCloud === 'function') syncDataToCloud('staff');
+        
+               // Sync (Added Session Sync)
+        if (typeof syncDataToCloud === 'function') {
+            await syncDataToCloud('staff');
+            if (typeof syncSessionToCloud === 'function') {
+                await syncSessionToCloud(sessionKey);
+            }
+        }
 
         // Reset UI
         swapSourceRoom = null;
@@ -14790,6 +15832,7 @@ if (btnSessionReschedule) {
         // Optional Feedback
         // alert("Swapped successfully!"); 
     }
+
 
     // 4. Open Modal (Populates List)
     window.openInvigModal = function (roomName) {
@@ -14867,53 +15910,77 @@ if (btnSessionReschedule) {
     }
 
     // 5. Save Assignment (And Close Modal)
-    window.saveInvigAssignment = function (room, name) {
+    window.saveInvigAssignment = async function (room, name) {
         const sessionKey = allotmentSessionSelect.value;
         if (!sessionKey) return;
 
-        // --- START FIX: Remove Old Invigilator from Pool ---
+
+        // --- START FIX: Handle Old & New Invigilator in Pool ---
         const oldName = currentInvigMapping[room];
-        if (oldName && oldName !== name) { // If we are replacing someone
-            // 1. Find the Email of the Old Staff (Pool uses Emails)
+        if (oldName && oldName !== name) { // If we are changing or replacing someone
             const staffData = JSON.parse(localStorage.getItem('examStaffData') || '[]');
             const oldStaff = staffData.find(s => s.name === oldName);
+            const newStaff = staffData.find(s => s.name === name);
             
-            if (oldStaff && oldStaff.email) {
-                // 2. Remove them from the Session Slot "Assigned" List (The Pool)
+            if (oldStaff && oldStaff.email && newStaff && newStaff.email) {
                 const allSlots = JSON.parse(localStorage.getItem('examInvigilationSlots') || '{}');
                 const slot = allSlots[sessionKey];
                 
                 if (slot && slot.assigned) {
-                    const idx = slot.assigned.indexOf(oldStaff.email);
+                    const oldIdx = slot.assigned.indexOf(oldStaff.email);
+                    const newIdx = slot.assigned.indexOf(newStaff.email);
 
-                    // [NEW CODE] - Paste this instead
-if (idx > -1) {
-    // 1. Remove from active pool (so they don't show as Reserve)
-    slot.assigned.splice(idx, 1); 
+                // If New Staff is NOT in the pool (Global Replace used)
+                    if (newIdx === -1) {
+                        // Add new staff to the pool first
+                        slot.assigned.push(newStaff.email); 
+                        
+                        // Ask the Admin what to do with the old staff
+                        if (oldIdx > -1) {
+                             if (confirm(`Do you want to completely REMOVE ${oldStaff.name} from this session's duty list?\n\n• Click OK to remove them completely.\n• Click Cancel to keep them as a Reserve.`)) {
+                                 // recalculate index because we pushed to array
+                                 const currentOldIdx = slot.assigned.indexOf(oldStaff.email);
+                                 if (currentOldIdx > -1) slot.assigned.splice(currentOldIdx, 1);
+                             }
+                        }
+                    } 
 
-    // 2. Add to 'replaced' history (So they are NOT deleted from system)
-    if (!slot.replaced) slot.replaced = [];
-    slot.replaced.push({
-        original: oldStaff.email,
-        replacement: name,
-        room: room,
-        timestamp: new Date().toISOString()
-    });
+                    // If New Staff IS in the pool (Regular Change used):
+                    // We DO NOT splice out the old staff, so they properly become a Reserve!
 
-    localStorage.setItem('examInvigilationSlots', JSON.stringify(allSlots));
-    
-    // Force Sync 'slots'
-    if (typeof syncDataToCloud === 'function') syncDataToCloud('slots');
-}
+                    // Keep a log of the replacement
+                    if (!slot.replaced) slot.replaced = [];
+                    slot.replaced.push({
+                        original: oldStaff.email,
+                        replacement: newStaff.email,
+                        room: room,
+                        timestamp: new Date().toISOString()
+                    });
 
+                    localStorage.setItem('examInvigilationSlots', JSON.stringify(allSlots));
                     
+                    // Force Sync 'slots'
+                    if (typeof syncDataToCloud === 'function') syncDataToCloud('slots');
                 }
             }
         }
         // --- END FIX ---
 
+
         
+
+        
+    // FIX: Prevent Duplicate Room Assignments
+        if (currentInvigMapping) {
+            // Find if this specific name is already assigned to a different room
+            const existingRoom = Object.keys(currentInvigMapping).find(k => currentInvigMapping[k] === name);
+            if (existingRoom && existingRoom !== room) {
+                // Remove them from the old room so they "move" instead of duplicate
+                delete currentInvigMapping[existingRoom];
+            }
+        }
         currentInvigMapping[room] = name;
+
 
         // Save Global
         const allMappings = JSON.parse(localStorage.getItem(INVIG_MAPPING_KEY) || '{}');
@@ -14921,7 +15988,17 @@ if (idx > -1) {
         localStorage.setItem(INVIG_MAPPING_KEY, JSON.stringify(allMappings));
 
         // Sync
-        if (typeof syncDataToCloud === 'function') syncDataToCloud('staff');
+        // Sync (Added Slots and Session Mapping Sync)
+        if (typeof syncDataToCloud === 'function') {
+            await syncDataToCloud('staff');
+            await syncDataToCloud('slots'); // Sync the pool change
+            
+            // Sync the specific room-to-person mapping (Crucial for other PCs)
+            if (typeof syncSessionToCloud === 'function') {
+                await syncSessionToCloud(sessionKey);
+            }
+        }
+
 
         // Hide Modal
         document.getElementById('invigilator-select-modal').classList.add('hidden');
@@ -14988,7 +16065,7 @@ if (idx > -1) {
     }
 
     // 7. Unassign All Invigilators
-    window.unassignAllInvigilators = function () {
+    window.unassignAllInvigilators = async function () {
         const sessionKey = allotmentSessionSelect.value;
         if (!sessionKey) return;
 
@@ -15006,13 +16083,20 @@ if (idx > -1) {
             localStorage.setItem(INVIG_MAPPING_KEY, JSON.stringify(allMappings));
 
             // Sync to Cloud
-            if (typeof syncDataToCloud === 'function') syncDataToCloud('staff');
+            if (typeof syncDataToCloud === 'function') {
+                await syncDataToCloud('staff');
+                await syncDataToCloud('slots'); 
+                if (typeof syncSessionToCloud === 'function') {
+                    await syncSessionToCloud(sessionKey);
+                }
+            }
 
             // Refresh UI
             renderInvigilationPanel();
             alert("All invigilator assignments cleared for this session.");
         }
-    }
+    };
+
 
     // --- Helper: Fetch Active Official for Date ---
     function getOfficialForDate(roleName, dateObj) {
@@ -15294,10 +16378,11 @@ if (displayLoc) {
             <title>Invigilation List - ${date}</title>
             <style>
                 body { font-family: 'Arial', sans-serif; padding: 20px; }
-                .header { text-align: center; margin-bottom: 20px; }
+                .header { text-align: center; margin-bottom: 25px; border-bottom: 2px solid #000; padding-bottom: 10px; }
                 .header h1 { margin: 0; font-size: 16pt; text-transform: uppercase; font-weight: bold; }
-                .header h2 { margin: 5px 0 0; font-size: 14pt; font-weight: bold; }
-                .header h3 { margin: 5px 0 0; font-size: 12pt; }
+                .header h2 { margin: 3px 0; font-size: 14pt; font-weight: bold; color: #333; }
+                .header h3 { margin: 2px 0; font-size: 12pt; font-weight: normal; }
+
                 
                 table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 10pt; }
                 th { background: #eee; border: 1px solid #000; padding: 8px; text-align: center; font-weight: bold; }
@@ -15369,6 +16454,96 @@ if (displayLoc) {
     w.document.close();
 }; // END FUNCTION
 
+    window.printAllotmentSummary = function () {
+        if (!currentSessionKey || currentSessionAllotment.length === 0) {
+            alert("Please allot rooms before printing the summary.");
+            return;
+        }
+
+        const [date, time] = currentSessionKey.split(' | ');
+        const collegeName = localStorage.getItem('examCollegeName') || "Exam Allotment System";
+        const roomSerialMap = getRoomSerialMap(currentSessionKey);
+        
+        let totalStudents = 0;
+        const rowsHtml = currentSessionAllotment.map(room => {
+            const serial = roomSerialMap[room.roomName] || '-';
+            const roomInfo = currentRoomConfig[room.roomName];
+            const loc = (roomInfo && roomInfo.location) ? roomInfo.location : '-';
+            const stream = room.stream || "Regular";
+            const count = room.students.length;
+            totalStudents += count;
+
+            return `
+                <tr>
+                    <td style="text-align: center;">${serial}</td>
+                    <td>${room.roomName}</td>
+                    <td>${loc}</td>
+                    <td style="text-align: center;">${stream}</td>
+                    <td style="text-align: center; font-weight: bold;">${count}</td>
+                </tr>
+            `;
+        }).join('');
+
+        const summaryHtml = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Room Allotment Summary - ${date}</title>
+                <style>
+                    @page { size: A4; margin: 15mm; }
+                    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; line-height: 1.4; }
+                    .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 15px; margin-bottom: 25px; }
+                    .header h1 { margin: 0; font-size: 18pt; text-transform: uppercase; letter-spacing: 1px; }
+                    .header h2 { margin: 5px 0; font-size: 14pt; color: #555; }
+                    .header .meta { margin-top: 10px; font-size: 11pt; font-weight: bold; color: #000; }
+                    
+                    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+                    th { background-color: #f2f2f2; border: 1px solid #333; padding: 10px; font-size: 10pt; text-transform: uppercase; }
+                    td { border: 1px solid #333; padding: 8px 10px; font-size: 10pt; }
+                    
+                    .footer { margin-top: 30px; text-align: right; font-weight: bold; font-size: 12pt; border-top: 1px solid #eee; padding-top: 10px; }
+                    .print-btn { background: #4f46e5; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: bold; margin-bottom: 20px; }
+                    @media print { .print-btn { display: none; } }
+                </style>
+            </head>
+            <body>
+                <div style="text-align: right;"><button class="print-btn" onclick="window.print()">Print Report</button></div>
+                
+                <div class="header">
+                    <h1>${collegeName}</h1>
+                    <h2>Room Allotment Summary</h2>
+                    <div class="meta">Date: ${date} &nbsp; | &nbsp; Session: ${time}</div>
+                </div>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 8%;">S.No</th>
+                            <th style="width: 25%;">Room Name</th>
+                            <th style="width: 30%;">Location</th>
+                            <th style="width: 20%;">Stream</th>
+                            <th style="width: 17%;">Students</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rowsHtml}
+                    </tbody>
+                </table>
+
+                <div class="footer">
+                    Total Allotted Students: ${totalStudents}
+                </div>
+
+                <script>window.onload = function() { setTimeout(() => window.print(), 800); };<\/script>
+            </body>
+            </html>
+        `;
+
+        const printWin = window.open('', '_blank');
+        printWin.document.write(summaryHtml);
+        printWin.document.close();
+    };
+
 // ==========================================
     // 🔧 DATA NORMALIZATION TOOL (Fixes Time Formats)
     // ==========================================
@@ -15415,7 +16590,8 @@ if (displayLoc) {
                             studentUpdateCount++;
                         }
                     });
-                    localStorage.setItem(BASE_DATA_KEY, JSON.stringify(allStudentData));
+                    await saveExamDataIDB(allStudentData);
+
                 }
 
                 // 3. Fix Object Keys (Slots, Allotments, etc.)
@@ -15760,15 +16936,39 @@ if (displayLoc) {
                         throw new Error("Invalid or empty backup file.");
                     }
 
-                    // Restore to Local Storage
+                    // Ask user for Restore Mode
+                    const isMerge = confirm("RESTORE MODE:\n\nClick [OK] to MERGE the imported backup with your existing data.\nClick [Cancel] to REPLACE entirely (wiping all existing local data first).");
+
+                    if (!isMerge) {
+                        localStorage.clear();
+                        await saveExamDataIDB([]);
+                    }
+
+                    // Restore & Sync securely
                     let count = 0;
-                    Object.keys(data).forEach(key => {
-                        // Restore known keys or all keys that look like app data
-                        if ((typeof ALL_DATA_KEYS !== 'undefined' && ALL_DATA_KEYS.includes(key)) || key.startsWith('exam')) {
-                            localStorage.setItem(key, data[key]);
+                    for (const key of Object.keys(data)) {
+                        if (key === 'examBaseData') {
+                            const importedStudents = data[key];
+                            if (isMerge) {
+                                const existingData = await loadExamDataIDB() || [];
+                                const getRowKey = r => `${r.Date || ""} | ${r.Time || ""} | ${r['Register Number'] || ""} | ${r.Stream || "REGULAR"}`.toUpperCase();
+                                const existingKeys = new Set(existingData.map(getRowKey));
+                                
+                                const newUniqueData = importedStudents.filter(student => !existingKeys.has(getRowKey(student)));
+                                await saveExamDataIDB([...existingData, ...newUniqueData]);
+                            } else {
+                                await saveExamDataIDB(importedStudents);
+                            }
+                            count++;
+                            
+                        } else if ((typeof ALL_DATA_KEYS !== 'undefined' && ALL_DATA_KEYS.includes(key)) || key.startsWith('exam')) {
+                            // Skip stale v2 backups, restore everything else
+                            if (key !== 'examData_v2') {
+                                localStorage.setItem(key, data[key]);
+                            }
                             count++;
                         }
-                    });
+                    }
 
                     // Sync to Cloud (if online)
                     if (typeof syncDataToCloud === 'function' && count > 0) {
@@ -15779,7 +16979,7 @@ if (displayLoc) {
                         await syncDataToCloud('staff');
                         await syncDataToCloud('slots');
                     }
-
+                    localStorage.setItem('pendingDriveRestoreSync', 'true'); // 🚨 CRITICAL FLAG
                     alert(`✅ Recovery Successful!\n\nRestored ${count} data modules.\nThe app will now reload.`);
                     window.location.reload();
 
@@ -16640,7 +17840,7 @@ async function runSystemHealthCheck() {
         if (!streams || streams.length === 0) log('fail', 'Settings', 'No Exam Streams defined.');
 
         // LAYER 2: SESSION SCOPE & DATA
-        const allStudents = JSON.parse(localStorage.getItem('examBaseData') || '[]');
+        const allStudents = await loadExamDataIDB() || [];
         const scribesList = JSON.parse(localStorage.getItem('examScribes') || '[]');
         
         if (allStudents.length === 0) {
@@ -16966,7 +18166,12 @@ window.executeBulkDelete = async function() {
             const key = `${s.Date} | ${s.Time}`;
             return !sessionSet.has(key);
         });
-        localStorage.setItem('examBaseData', JSON.stringify(allStudentData));
+        //localStorage.setItem('examBaseData', JSON.stringify(allStudentData));
+        await saveExamDataIDB(allStudentData);
+        
+        // 🟢 FIX: Purge old legacy keys to prevent deleted data from resurrecting
+        localStorage.removeItem('examBaseData');
+        localStorage.removeItem('examData_v2');
 
         // 2. Remove Aux Data (Assignments, Rooms, etc.)
         // 🟢 EXCLUDING 'examInvigilationSlots' and 'examInvigilatorMapping' so they survive.
@@ -16990,6 +18195,10 @@ window.executeBulkDelete = async function() {
         });
 
         // 3. Sync to Cloud
+        // A. DELETE MODULAR SESSIONS (V2)
+        for (const sessionKey of sessionsToDelete) {
+            await deleteSessionFromCloud(sessionKey);
+            }
         // Only sync Ops & Allocation. Do NOT sync 'slots' or 'staff' to avoid overwriting with empty data.
         if (typeof syncDataToCloud === 'function') {
             await syncDataToCloud('ops');
@@ -17008,7 +18217,7 @@ window.executeBulkDelete = async function() {
 };
 
 
-window.downloadInvigilationListPDF = function () {
+window.downloadInvigilationListPDF = async function () {
     const sessionKey = (typeof allotmentSessionSelect !== 'undefined' && allotmentSessionSelect.value) 
         ? allotmentSessionSelect.value 
         : document.getElementById('allotment-session-select')?.value;
@@ -17020,7 +18229,8 @@ window.downloadInvigilationListPDF = function () {
     const currentSessionInvigs = invigMap[sessionKey] || {};
     const roomConfig = JSON.parse(localStorage.getItem('examRoomConfig') || '{}');
     const staffData = JSON.parse(localStorage.getItem('examStaffData') || '[]');
-    const allStudentData = JSON.parse(localStorage.getItem('examData_v2') || '[]');
+    const allStudentData = await loadExamDataIDB() || [];
+
     
     // Scribe Data
     const allScribeAllotments = JSON.parse(localStorage.getItem('examScribeAllotmentV2') || '{}');
@@ -17163,11 +18373,22 @@ window.downloadInvigilationListPDF = function () {
     const doc = new jsPDF();
     
     doc.setFontSize(14);
-    doc.text(localStorage.getItem('examCollegeName') || "GOVERNMENT VICTORIA COLLEGE", 105, 15, { align: "center" });
+    doc.text(localStorage.getItem('examCollegeName') || "GOVERNMENT VICTORIA COLLEGE", 105, 12, { align: "center" });
+    
+    // ✅ ADDED: Dynamically fetch and display the Exam Name for this session
+    const pageExamName = getExamName(date, time, "Regular");
+    if (pageExamName) {
+        doc.setFontSize(12);
+        doc.setFont("helvetica", "bold");
+        doc.text(pageExamName, 105, 19, { align: "center" });
+    }
+
     doc.setFontSize(11);
-    doc.text("Invigilation Duty List", 105, 22, { align: "center" });
+    doc.setFont("helvetica", "normal");
+    doc.text("Invigilation Duty List", 105, 26, { align: "center" });
     doc.setFontSize(10);
-    doc.text(`Date: ${date}  |  Session: ${time}`, 105, 28, { align: "center" });
+    doc.text(`Date: ${date}  |  Session: ${time}`, 105, 32, { align: "center" });
+
 
     doc.autoTable({
         head: [['Sl', 'Hall / Location', 'Invigilator', 'RNBB', 'Asgd', 'Used', 'Retd', 'Remarks', 'Sign']],
@@ -17312,10 +18533,10 @@ window.downloadInvigilationListPDF = function () {
         input.oninput = (e) => renderList(e.target.value);
     };
 
-    // --- NEW: Execute Replace ---
-    window.replaceInvigilator = function(room, name) {
+    window.replaceInvigilator = async function(room, name) {
         if(!confirm(`Confirm replace with ${name}?`)) return;
-        window.saveInvigAssignment(room, name); // Reuse existing save logic
+        await window.saveInvigAssignment(room, name); // Wait for sync
+
         
         // Reset Modal Title
         const subtitle = document.getElementById('invig-modal-subtitle');
@@ -17401,3 +18622,85 @@ window.downloadInvigilationListPDF = function () {
     // Call it after data is loaded
     restoreActiveTab();
 });
+
+
+
+// ==========================================
+// 🔒 APP SECURITY: DAILY ENTRY LOCK
+// ==========================================
+function verifyAppPassword() {
+    const input = document.getElementById('app-entry-password').value.trim().toLowerCase();
+    const error = document.getElementById('app-entry-error');
+    
+    const today = new Date();
+    
+    // Passcode 1: Generate today's date in DDMMYYYY exactly
+    const dd = String(today.getDate()).padStart(2, '0');
+    const mm = String(today.getMonth() + 1).padStart(2, '0'); // January is 0
+    const yyyy = today.getFullYear();
+    const requiredPasscodeDate = dd + mm + yyyy; // e.g., 21032026
+
+    // Passcode 2: Generate today's name in lowercase
+    const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const requiredPasscodeDay = days[today.getDay()];
+
+    if (input === requiredPasscodeDate || input === requiredPasscodeDay) {
+        // --- NEW: Save to LocalStorage for today ---
+        // Save the date string as the verification token so it automatically expires tomorrow
+        localStorage.setItem('appDailyPasscodeToken', requiredPasscodeDate);
+        // ---------------------------------------------
+        
+        document.getElementById('password-lock-screen').style.opacity = '0';
+        document.getElementById('password-lock-screen').style.pointerEvents = 'none';
+        setTimeout(() => {
+            const lockScreen = document.getElementById('password-lock-screen');
+            if (lockScreen) lockScreen.remove();
+        }, 300);
+    } else {
+        error.classList.remove('opacity-0');
+        document.getElementById('app-entry-password').value = ''; // clear it
+        setTimeout(() => { error.classList.add('opacity-0'); }, 2000); // hide error after 2s
+    }
+}
+
+// Attach Event Listeners on Load
+document.addEventListener('DOMContentLoaded', () => {
+    // --- App Security Toggle Logic ---
+    const toggleAppPassword = document.getElementById('toggle-app-password');
+    const isPasswordEnabled = localStorage.getItem('appPasswordEnabled') === 'true'; // Default is false
+
+    if (toggleAppPassword) {
+        toggleAppPassword.checked = isPasswordEnabled;
+        toggleAppPassword.addEventListener('change', (e) => {
+            localStorage.setItem('appPasswordEnabled', e.target.checked);
+        });
+    }
+
+    // --- Auto-bypass if password is off OR already entered today ---
+    const today = new Date();
+    const dd = String(today.getDate()).padStart(2, '0');
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const yyyy = today.getFullYear();
+    const currentToken = dd + mm + yyyy;
+
+    const savedToken = localStorage.getItem('appDailyPasscodeToken');
+    
+    if (!isPasswordEnabled || savedToken === currentToken) {
+        // Automatically remove the lock screen before the user sees it
+        const lockScreen = document.getElementById('password-lock-screen');
+        if (lockScreen) lockScreen.remove();
+        return; // Exit early, no need to attach listeners to UI that doesn't exist
+    }
+    // --------------------------------------------------
+
+    const btn = document.getElementById('app-entry-btn');
+    const inp = document.getElementById('app-entry-password');
+    if (btn) btn.addEventListener('click', verifyAppPassword);
+    if (inp) {
+        inp.addEventListener('keypress', (e) => { 
+            if (e.key === 'Enter') verifyAppPassword(); 
+        });
+    }
+});
+
+

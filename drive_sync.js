@@ -17,6 +17,41 @@ const DATA_KEYS = [
     'examSessionNames', 'examRemunerationConfig'
 ];
 
+// --- IndexedDB Configuration (Sync with app.js) ---
+const IDB_NAME = 'AntigravityDB';
+const IDB_STORE = 'examStore';
+const IDB_KEY = 'examBaseData';
+
+function openExamDB() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(IDB_NAME, 2);
+        req.onupgradeneeded = e => { const db = e.target.result; if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE); };
+        req.onsuccess = e => resolve(e.target.result);
+        req.onerror = e => reject(e.target.error);
+    });
+}
+function loadExamDataIDB() {
+    return openExamDB().then(db => {
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(IDB_STORE, 'readonly');
+            const req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+            req.onsuccess = e => { db.close(); resolve(e.target.result || []); };
+            req.onerror = e => { db.close(); reject(e.target.error); };
+        });
+    });
+}
+function saveExamDataIDB(dataArray) {
+    return openExamDB().then(db => {
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(IDB_STORE, 'readwrite');
+            tx.objectStore(IDB_STORE).put(dataArray, IDB_KEY);
+            tx.oncomplete = () => { db.close(); resolve(); };
+            tx.onerror = e => { db.close(); reject(e.target.error); };
+        });
+    });
+}
+
+
 // --- INITIALIZATION ---
 function gapiLoaded() { gapi.load('client', intializeGapiClient); }
 async function intializeGapiClient() {
@@ -140,7 +175,25 @@ function handleAuthClick() {
 
 async function getBackupFolder() {
     const q = "mimeType='application/vnd.google-apps.folder' and name='ExamFlow_Backups' and trashed=false";
-    const res = await gapi.client.drive.files.list({ q: q, fields: 'files(id)' });
+    let res;
+    try {
+        res = await gapi.client.drive.files.list({ q: q, fields: 'files(id)' });
+    } catch(e) {
+        localStorage.removeItem('drive_access_token');
+        localStorage.removeItem('drive_token_expiry');
+        localStorage.removeItem('isDriveConnected');
+        gapi.client.setToken(null);
+        showReconnectState();
+        throw new Error('Drive session expired. Please click Reconnect Drive and try again.');
+    }
+    if (res.status === 401) {
+        localStorage.removeItem('drive_access_token');
+        localStorage.removeItem('drive_token_expiry');
+        localStorage.removeItem('isDriveConnected');
+        gapi.client.setToken(null);
+        showReconnectState();
+        throw new Error('Drive session expired. Please click Reconnect Drive and try again.');
+    }
     if (res.result.files.length > 0) return res.result.files[0].id;
     const meta = { 'name': 'ExamFlow_Backups', 'mimeType': 'application/vnd.google-apps.folder' };
     const createRes = await gapi.client.drive.files.create({ resource: meta, fields: 'id' });
@@ -171,12 +224,30 @@ async function syncData() {
     btn.disabled = true;
 
     try {
+        // Check if token is still valid, refresh silently if needed
+        const currentToken = gapi.client.getToken();
+        if (!currentToken || !currentToken.access_token) {
+            btn.innerHTML = "🔄 Refreshing login...";
+            await new Promise((resolve, reject) => {
+                tokenClient.callback = (resp) => {
+                    if (resp.error) reject(new Error('Login refresh failed. Please reconnect Drive.'));
+                    else { handleTokenResponse(resp); resolve(); }
+                };
+                tokenClient.requestAccessToken({ prompt: '' });
+            });
+        }
+
         const folderId = await getBackupFolder();
         const localData = {};
-        DATA_KEYS.forEach(k => {
+        for (const k of DATA_KEYS) {
+        if (k === 'examBaseData') {
+            localData[k] = await loadExamDataIDB();
+        } else {
             const v = localStorage.getItem(k);
             if(v) { try { localData[k] = JSON.parse(v); } catch(e) { localData[k] = v; } }
-        });
+        }
+    }
+
         
         const now = new Date();
         const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-');
@@ -201,11 +272,17 @@ async function syncData() {
         btn.innerHTML = "✅ Saved!";
         setTimeout(() => btn.innerHTML = originalText, 2000);
         
-    } catch (e) {
+
+} catch (e) {
         console.error(e);
-        alert("Backup Failed: " + e.message);
+        // Show a friendly message for token/auth errors
+        if (e.message && e.message.includes('expired')) {
+            alert("⚠️ Google Drive session expired.\n\nPlease click the 'Reconnect Drive' button in Settings and try again.");
+        } else {
+            alert("Backup Failed: " + e.message);
+        }
         btn.innerHTML = "❌ Error";
-        setTimeout(() => btn.innerHTML = originalText, 2000);
+        setTimeout(() => btn.innerHTML = originalText, 3000);
     }
     btn.disabled = false;
 }
@@ -225,8 +302,9 @@ async function manageRetention(folderId) {
 
 async function restoreFromDrive() {
     if (typeof currentCollegeId !== 'undefined' && currentCollegeId && navigator.onLine) {
-        if (!confirm("⚠️ FIREBASE ACTIVE: Restoring will overwrite local data. Continue?")) return;
+        if (!(await UiModal.confirm("Drive Restore", "⚠️ FIREBASE ACTIVE: Restoring will overwrite local data. Continue?"))) return;
     }
+
 
     try {
         const folderId = await getBackupFolder();
@@ -280,18 +358,105 @@ function showRestoreModal(files) {
 
 window.executeRestore = async function(fileId) {
     document.getElementById('drive-restore-modal').remove();
+
     try {
         const response = await gapi.client.drive.files.get({ fileId: fileId, alt: 'media' });
         const cloudData = response.result;
-        Object.keys(cloudData).forEach(key => {
-            if (DATA_KEYS.includes(key)) {
-                const val = cloudData[key];
-                if (typeof val === 'object') localStorage.setItem(key, JSON.stringify(val));
-                else localStorage.setItem(key, val);
+        
+        // Ask user for Restore Mode
+        const isMerge = confirm("RESTORE MODE:\n\nClick [OK] to MERGE the imported Google Drive data with your existing local data.\nClick [Cancel] to REPLACE entirely (wiping all existing local data first).");
+
+        // If REPLACE, wipe local data for a clean slate
+        if (!isMerge) {
+            localStorage.clear();
+            await saveExamDataIDB([]); 
+        }
+
+        for (const key of Object.keys(cloudData)) {
+        if (DATA_KEYS.includes(key)) {
+            const val = cloudData[key];
+            
+            if (key === 'examBaseData') {
+                // Smart Merge Logic for Student Data
+                if (isMerge) {
+                    const existingData = await loadExamDataIDB() || [];
+                    const getRowKey = r => `${r.Date || ""} | ${r.Time || ""} | ${r['Register Number'] || ""} | ${r.Stream || "REGULAR"}`.toUpperCase();
+                    const existingKeys = new Set(existingData.map(getRowKey));
+                    
+                    const newUniqueData = val.filter(student => !existingKeys.has(getRowKey(student)));
+                    await saveExamDataIDB([...existingData, ...newUniqueData]);
+                } else {
+                    // Replace strictly
+                    await saveExamDataIDB(val);
+                }
+                        } else {
+                // In MERGE mode: preserve all existing local config keys.
+                // Only write this key if user chose REPLACE, OR if the key doesn't exist locally yet.
+                if (!isMerge) {
+                    // REPLACE mode: overwrite everything
+                    if (typeof val === 'object') localStorage.setItem(key, JSON.stringify(val));
+                    else localStorage.setItem(key, val);
+                } else {
+                    // MERGE mode: only write if key is completely absent locally
+                    // (never overwrite existing Scribe List, Room Allotment, Invigilator data etc.)
+                    if (!localStorage.getItem(key)) {
+                        if (typeof val === 'object') localStorage.setItem(key, JSON.stringify(val));
+                        else localStorage.setItem(key, val);
+                    }
+                }
             }
-        });
+
+        }
+    }
+
+    // KILL GHOST DATA BEFORE RELOAD
+        localStorage.removeItem('examBaseData');
+        localStorage.removeItem('examData_v2');
+
+                // NEW: Offer to also push examBaseData to Firebase Storage as date-chunks
+        if (window.currentCollegeId && navigator.onLine && cloudData.examBaseData && Array.isArray(cloudData.examBaseData)) {
+            const pushToCloud = confirm("☁️ Cloud Storage Sync:\n\nDo you also want to push the restored student data to Firebase Storage as on-demand date chunks?\n\nThis allows historical data to be lazy-loaded on other devices.\nClick [OK] to Push, [Cancel] to skip.");
+
+            if (pushToCloud) {
+                const { storage, ref, uploadString, getDownloadURL } = window.firebase;
+                const pushIsMerge = confirm("CLOUD PUSH MODE:\n\nClick [OK] to MERGE with existing cloud chunks.\nClick [Cancel] to OVERWRITE existing cloud chunks.");
+
+                // Group restored data by Date
+                const groupedByDate = {};
+                cloudData.examBaseData.forEach(student => {
+                    const d = student.Date ? student.Date.trim() : "Unknown_Date";
+                    if (!groupedByDate[d]) groupedByDate[d] = [];
+                    groupedByDate[d].push(student);
+                });
+
+                let cloudPushCount = 0;
+                for (const dateKey of Object.keys(groupedByDate)) {
+                    if (dateKey === "Unknown_Date") continue;
+                    const fileRef = ref(storage, `historical_sessions/${currentCollegeId}/${dateKey}.json`);
+                    let finalData = groupedByDate[dateKey];
+
+                    if (pushIsMerge) {
+                        try {
+                            const url = await getDownloadURL(fileRef);
+                            const existing = await fetch(url).then(r => r.json());
+                            const getKey = r => `${r.Date || ''}|${r.Time || ''}|${r['Register Number'] || ''}`.toUpperCase();
+                            const existingKeys = new Set(existing.map(getKey));
+                            const newOnly = finalData.filter(r => !existingKeys.has(getKey(r)));
+                            finalData = [...existing, ...newOnly];
+                        } catch (e) { /* No existing chunk, first upload */ }
+                    }
+
+                    await uploadString(fileRef, JSON.stringify(finalData), 'raw', { contentType: 'application/json' });
+                    cloudPushCount++;
+                }
+                alert(`☁️ Cloud Push Complete: ${cloudPushCount} date chunks pushed to Firebase Storage.`);
+            }
+        }
+
+        localStorage.setItem('pendingDriveRestoreSync', 'true'); // 🚨 CRITICAL FLAG
         alert("✅ Restored successfully! Reloading...");
         location.reload();
+
     } catch (e) { alert("Restore Error: " + e.message); }
 };
 
@@ -301,3 +466,211 @@ if (!document.getElementById('drive-anim-style')) {
     style.innerHTML = `@keyframes fadeIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } } .animate-fadeIn { animation: fadeIn 0.2s ease-out; }`;
     document.head.appendChild(style);
 }
+
+
+// ==========================================
+// ☁️ HYBRID DATA MANAGER (BASIC USERS + CLOUD USERS)
+// ==========================================
+window.ExamCloudCache = {
+    // Stores the last 10 loaded historical dates to prevent memory bloat (for Cloud users)
+    recentDatesLoaded: new Set(),
+
+    async fetchHistoricalData(dateKey) {
+        // 1. BASIC USER CHECK: If not logged into a college Firebase, use Full Local DB
+        if (!window.currentCollegeId) {
+            console.log("👤 Basic User Mode: Relying entirely on local IndexedDB.");
+            const allLocalData = await loadExamDataIDB();
+            // Basic users have everything in IDB. Return the filtered chunk for this date.
+            return allLocalData.filter(student => student.Date === dateKey.split(' | ')[0]);
+        }
+
+        // 2. CLOUD USER: Offline Check
+        if (!navigator.onLine) {
+            alert("⚠️ Cannot fetch historical data for " + dateKey + " while offline. Please connect to the internet.");
+            return [];
+        }
+
+        // 3. CLOUD USER: Fetch from Firebase Storage
+        try {
+            // Show Loading Indicator
+            const loader = document.createElement('div');
+            loader.id = 'cloud-lazy-loader';
+            loader.className = 'fixed inset-0 bg-black bg-opacity-50 z-[200] flex flex-col items-center justify-center text-white font-bold';
+            loader.innerHTML = `<div class="animate-spin rounded-full h-12 w-12 border-b-4 border-white mb-4"></div> Loading Cloud Data for ${dateKey}...`;
+            document.body.appendChild(loader);
+
+            const { storage, ref, getDownloadURL } = window.firebase;
+            
+            // Extract just the Date part (DD.MM.YYYY) from the session key
+            const cleanDate = dateKey.includes('|') ? dateKey.split(' | ')[0].trim() : dateKey.trim();
+            const fileRef = ref(storage, `historical_sessions/${currentCollegeId}/${cleanDate}.json`);
+            
+            const url = await getDownloadURL(fileRef);
+            const response = await fetch(url);
+            
+            if (!response.ok) throw new Error("File missing");
+            const datePackage = await response.json();
+
+            // Handle both old format (plain array) and new format (object with students key)
+            const students = Array.isArray(datePackage) ? datePackage : (datePackage.students || []);
+
+            // Merge only the student records into IDB (allotments stay in memory only)
+            const existingCache = await loadExamDataIDB();
+            const getKey = r => `${r.Date||''}|${r.Time||''}|${r['Register Number']||''}`.toUpperCase();
+            const existingKeys = new Set(existingCache.map(getKey));
+            const newOnly = students.filter(r => !existingKeys.has(getKey(r)));
+            await saveExamDataIDB([...existingCache, ...newOnly], true);
+
+            // Store the full historical context in memory (NOT in localStorage)
+            // This lets the UI read allotments for this date without touching current data
+            if (!window.historicalContextCache) window.historicalContextCache = {};
+            window.historicalContextCache[cleanDate] = Array.isArray(datePackage) ? {} : datePackage;
+
+            this.recentDatesLoaded.add(cleanDate);
+            document.getElementById('cloud-lazy-loader').remove();
+            return students;
+
+
+        } catch (e) {
+            if(document.getElementById('cloud-lazy-loader')) document.getElementById('cloud-lazy-loader').remove();
+            
+            // Only alert if we know it's an actual unexpected error, ignore 404s for empty exam days
+            if(e.message !== "File missing" && !e.message.includes("Object 'historical_sessions")) {
+                console.error("Cloud Fetch Error:", e);
+                alert("Cloud Request Failed: " + e.message);
+            }
+            return []; 
+        }
+    }
+};
+
+
+
+// ==========================================
+// 🚀 HISTORICAL DATA MIGRATION LOGIC
+// ==========================================
+window.startHistoricalMigration = async function() {
+    // Only logged-in users can push to cloud
+    if (!window.currentCollegeId) {
+        alert("Basic Users operate exclusively offline. Cloud Migration requires a Firebase Login.");
+        return;
+    }
+
+    const fileInput = document.getElementById('historical-json-upload');
+    if (!fileInput.files.length) {
+        alert("Please select a JSON file first.");
+        return;
+    }
+
+    const { storage, ref, uploadString } = window.firebase;
+    const file = fileInput.files[0];
+    const reader = new FileReader();
+
+        reader.onload = async function(e) {
+        try {
+            const parsed = JSON.parse(e.target.result);
+            
+            // Support both formats:
+            // Format A: Array (old-style examBaseData only)
+            // Format B: Object (full Drive backup with DATA_KEYS)
+            const isFullBackup = !Array.isArray(parsed) && typeof parsed === 'object';
+            const studentArray = isFullBackup ? (parsed.examBaseData || []) : parsed;
+            
+            if (!Array.isArray(studentArray) || studentArray.length === 0) {
+                alert("Invalid JSON. No valid student records found.");
+                return;
+            }
+
+            // Extract session-keyed data maps from full backup (empty if Format A)
+            const rawRoomAllotment    = isFullBackup ? (typeof parsed.examRoomAllotment === 'string' ? JSON.parse(parsed.examRoomAllotment) : (parsed.examRoomAllotment || {})) : {};
+            const rawScribeAllotment  = isFullBackup ? (typeof parsed.examScribeAllotment === 'string' ? JSON.parse(parsed.examScribeAllotment) : (parsed.examScribeAllotment || {})) : {};
+            const rawInvigMapping     = isFullBackup ? (typeof parsed.examInvigilatorMapping === 'string' ? JSON.parse(parsed.examInvigilatorMapping) : (parsed.examInvigilatorMapping || {})) : {};
+            const rawQPCodes          = isFullBackup ? (typeof parsed.examQPCodes === 'string' ? JSON.parse(parsed.examQPCodes) : (parsed.examQPCodes || {})) : {};
+            const rawAbsentees        = isFullBackup ? (typeof parsed.examAbsenteeList === 'string' ? JSON.parse(parsed.examAbsenteeList) : (parsed.examAbsenteeList || {})) : {};
+
+            // Helper: filter an object by date prefix
+            const filterByDate = (obj, dateKey) => {
+                const result = {};
+                Object.keys(obj).forEach(k => { if (k.startsWith(dateKey)) result[k] = obj[k]; });
+                return result;
+            };
+
+            // 1. Group student records by Date (DD.MM.YYYY)
+            const groupedByDate = {};
+            studentArray.forEach(student => {
+                const d = student.Date ? student.Date.trim() : "Unknown_Date";
+                if (!groupedByDate[d]) groupedByDate[d] = [];
+                groupedByDate[d].push(student);
+            });
+
+
+            const uniqueDates = Object.keys(groupedByDate);
+            if (!confirm(`Found ${uniqueDates.length} unique dates in your data.\n\nReady to upload to Firebase Storage?`)) return;
+
+            // NEW: Ask Merge or Overwrite for cloud chunks
+            const isMergeCloud = confirm("CLOUD UPLOAD MODE:\n\nClick [OK] to MERGE with existing cloud data (safe, keeps old records).\nClick [Cancel] to OVERWRITE — replaces existing cloud chunks entirely.");
+
+
+            // 2. Upload Chunks loop
+            let successCount = 0;
+            const btn = document.querySelector('button[onclick="window.startHistoricalMigration()"]');
+            const originalText = btn.innerHTML;
+
+            for (let i = 0; i < uniqueDates.length; i++) {
+                const dateKey = uniqueDates[i];
+                if (dateKey === "Unknown_Date") continue; // Skip bad data
+
+                btn.innerHTML = `Uploading: ${i + 1} / ${uniqueDates.length}...`;
+                
+                // Format the chunk
+                // Build complete date context package
+                const datePackage = {
+                    students:          groupedByDate[dateKey],
+                    roomAllotment:     filterByDate(rawRoomAllotment, dateKey),
+                    scribeAllotment:   filterByDate(rawScribeAllotment, dateKey),
+                    invigilatorMapping: filterByDate(rawInvigMapping, dateKey),
+                    qpCodes:           filterByDate(rawQPCodes, dateKey),
+                    absentees:         filterByDate(rawAbsentees, dateKey)
+                };
+                const chunkData = JSON.stringify(datePackage);
+
+                
+                // Path: historical_sessions/COLLEGE_ID/DD.MM.YYYY.json
+                const fileRef = ref(storage, `historical_sessions/${currentCollegeId}/${dateKey}.json`);
+
+                let finalChunkData = chunkData; // Default: use incoming data as-is (OVERWRITE)
+
+                if (isMergeCloud) {
+                    // MERGE: Try to fetch existing cloud chunk and deduplicate
+                    try {
+                        const { getDownloadURL } = window.firebase;
+                        const url = await getDownloadURL(fileRef);
+                        const existing = await fetch(url).then(r => r.json());
+                        const getKey = r => `${r.Date || ''}|${r.Time || ''}|${r['Register Number'] || ''}`.toUpperCase();
+                        const existingKeys = new Set(existing.map(getKey));
+                        const incoming = groupedByDate[dateKey];
+                        const newOnly = incoming.filter(r => !existingKeys.has(getKey(r)));
+                        finalChunkData = JSON.stringify([...existing, ...newOnly]);
+                    } catch (fetchErr) {
+                        // No existing chunk found — first upload, proceed normally
+                        finalChunkData = chunkData;
+                    }
+                }
+
+                await uploadString(fileRef, finalChunkData, 'raw', { contentType: 'application/json' });
+
+                successCount++;
+            }
+
+            btn.innerHTML = originalText;
+            alert(`✅ Migration Complete! Successfully uploaded ${successCount} date chunks to Firebase Storage.`);
+            
+        } catch (err) {
+            console.error("Migration Error:", err);
+            alert("Migration Failed: " + err.message);
+        }
+    };
+
+    reader.readAsText(file);
+};
+

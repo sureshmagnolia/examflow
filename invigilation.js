@@ -1,4 +1,4 @@
-import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged }
+import { getAuth, signInWithPopup, signInWithRedirect, getRedirectResult, GoogleAuthProvider, signOut, onAuthStateChanged  }
     from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, updateDoc, arrayUnion, arrayRemove, deleteField, collection, query, where, getDocs, orderBy, onSnapshot, serverTimestamp, limit }
     from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
@@ -35,6 +35,16 @@ const appCheck = initializeAppCheck(app, {
 const auth = window.firebase.auth;
 const db = window.firebase.db;
 const provider = window.firebase.provider;
+// ⚡ FIX: Gracefully handle mobile browser partition and redirect errors
+getRedirectResult(auth).catch((error) => {
+    if (error.code === 'auth/missing-initial-state') {
+        console.warn("Caught partitioned storage redirect error.");
+        alert("⚠️ Login Blocked by Browser Privacy Settings.\n\nTo fix this: Open this page directly in a standard browser (like Chrome or Safari). If you opened this link inside an app like WhatsApp or Telegram, the login system is blocked.");
+    } else {
+        console.error("Auth Error:", error);
+    }
+});
+
 
 // --- CONFIG ---
 const DEFAULT_DESIGNATIONS = { "Assistant Professor": 2, "Associate Professor": 1, "Guest Lecturer": 4, "Professor": 0 };
@@ -91,9 +101,11 @@ let cloudUnsubscribe = null;
 let slotsUnsubscribe = null;
 let staffUnsubscribe = null;
 let allocUnsubscribe = null; // For invigilation mapping
+let sessionsUnsubscribe = null; // <--- ADD THIS LINE
 let advanceUnavailability = {}; // Stores { "DD.MM.YYYY": { FN: [], AN: [] } }
 let globalDutyTarget = 2; // Default
 let guestGlobalTarget = 2; // Default (Guest Lecturer Base)
+let vacationDutyTarget = 0; // Default (Vacation Target)
 let googleScriptUrl = "";
 let isEmailConfigLocked = true; // <--- NEW
 let isRoleLocked = true;
@@ -155,7 +167,17 @@ onAuthStateChanged(auth, async (user) => {
     }
 });
 
-document.getElementById('login-btn').addEventListener('click', () => signInWithPopup(auth, provider));
+document.getElementById('login-btn').addEventListener('click', () => {
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    if (isMobile) {
+        signInWithRedirect(auth, provider);
+    } else {
+        signInWithPopup(auth, provider).catch(err => {
+            if (err.code === 'auth/popup-blocked') signInWithRedirect(auth, provider);
+        });
+    }
+});
+
 document.getElementById('logout-btn').addEventListener('click', () => signOut(auth).then(() => window.location.reload()));
 
 // --- CORE FUNCTIONS ---
@@ -294,24 +316,47 @@ function setupLiveSync(collegeId, mode) {
             // Dynamic UI Refresh based on what is visible
             const adminView = document.getElementById('view-admin');
             const staffView = document.getElementById('view-staff');
+if (adminView && !adminView.classList.contains('hidden')) {
+    renderSlotsGridAdmin();
+    renderAdminTodayStats();
+    populateAttendanceSessions();
+} else if (staffView && !staffView.classList.contains('hidden')) {
+    // If staff view is open, refresh calendar
+    let emailToRender = currentUser ? currentUser.email : null;
+    if (staffData.length > 0 && currentUser) {
+         const me = staffData.find(s => s.email.toLowerCase() === currentUser.email.toLowerCase());
+         if (me) emailToRender = me.email;
+    }
+    if (emailToRender) {
+        renderStaffCalendar(emailToRender);
+        if (typeof renderExchangeMarket === "function") renderExchangeMarket(emailToRender);
+        if (typeof renderStaffUpcomingSummary === "function") renderStaffUpcomingSummary(emailToRender);
+    }
+} else if (mode === 'admin') {
+    // Mobile fallback: admin view not ready yet when first snapshot fires
+    setTimeout(() => {
+        if (adminView && !adminView.classList.contains('hidden')) {
+            renderSlotsGridAdmin();
+            renderAdminTodayStats();
+            populateAttendanceSessions();
+        }
+    }, 800);
+} else if (mode === 'staff') {
+    // Mobile fallback: staff view not ready yet when first snapshot fires
+    setTimeout(() => {
+        if (staffView && !staffView.classList.contains('hidden') && currentUser) {
+            let emailToRender = currentUser.email;
+            const me = staffData.find(s => s.email.toLowerCase() === currentUser.email.toLowerCase());
+            if (me) emailToRender = me.email;
+            renderStaffCalendar(emailToRender);
+            if (typeof renderExchangeMarket === "function") renderExchangeMarket(emailToRender);
+            if (typeof renderStaffUpcomingSummary === "function") renderStaffUpcomingSummary(emailToRender);
+        }
+    }, 800);
+}
 
-            if (adminView && !adminView.classList.contains('hidden')) {
-                renderSlotsGridAdmin();
-                renderAdminTodayStats();
-                populateAttendanceSessions(); // 🟢 ADD THIS LINE HERE
-            } else if (staffView && !staffView.classList.contains('hidden')) {
-                // If staff view is open, refresh calendar
-                let emailToRender = currentUser ? currentUser.email : null;
-                if (staffData.length > 0 && currentUser) {
-                     const me = staffData.find(s => s.email.toLowerCase() === currentUser.email.toLowerCase());
-                     if (me) emailToRender = me.email;
-                }
-                if (emailToRender) {
-                    renderStaffCalendar(emailToRender);
-                    if (typeof renderExchangeMarket === "function") renderExchangeMarket(emailToRender);
-                    if (typeof renderStaffUpcomingSummary === "function") renderStaffUpcomingSummary(emailToRender);
-                }
-            }
+
+        
         }
     });
 
@@ -344,13 +389,50 @@ function setupLiveSync(collegeId, mode) {
                 // If user is just logging in, initialize their dashboard now
                 if (currentUser) {
                     const me = staffData.find(s => s.email.toLowerCase() === currentUser.email.toLowerCase());
-                    if (me && document.getElementById('view-staff').classList.contains('hidden')) {
-                         initStaffDashboard(me);
+                   if (me) {
+                    // Initialize regardless of current visibility — safe to call multiple times
+                    initStaffDashboard(me);
                     }
+
                 }
             }
         });
     }
+    // --- 4. SESSION DATA LISTENER (Live Updates) ---
+    const sessionsRef = collection(db, "colleges", collegeId, "sessions");
+    if (sessionsUnsubscribe) sessionsUnsubscribe(); 
+    
+    sessionsUnsubscribe = onSnapshot(sessionsRef, (snap) => {
+        if (!snap.empty) {
+            console.log("📡 Staff Portal: Session Data Updated Live.");
+
+            // 🔄 SYNC INCOMING DATA TO LOCAL STORAGE (Crucial Link)
+            snap.docs.forEach(doc => {
+                const data = doc.data();
+                const sKey = `${data.date} | ${data.time}`;
+                
+                // Update Local Invigilator Mapping
+                const allInvig = JSON.parse(localStorage.getItem('examInvigilatorMapping') || '{}');
+                allInvig[sKey] = data.invigilatorMapping || {};
+                localStorage.setItem('examInvigilatorMapping', JSON.stringify(allInvig));
+                
+                // Update Local Room Allotment (For Capacity/Stats)
+                const allRooms = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+                allRooms[sKey] = data.roomAllotment || [];
+                localStorage.setItem('examRoomAllotment', JSON.stringify(allRooms));
+            });
+
+            if (isAdmin) {
+                renderAdminTodayStats();
+                populateAttendanceSessions();
+                renderSlotsGridAdmin();
+            } else if (currentUser) {
+                const me = staffData.find(s => s.email.toLowerCase() === currentUser.email.toLowerCase());
+                if (me) initStaffDashboard(me);
+            }
+        }
+    });
+
 }
 
 // Helper to apply config (Shared by Cache & Live)
@@ -369,6 +451,10 @@ function applyCollegeConfig(data, mode, triggerRender) {
     
     if (collegeData.invigGlobalTarget !== undefined) globalDutyTarget = parseInt(collegeData.invigGlobalTarget);
     if (collegeData.invigGuestTarget !== undefined) guestGlobalTarget = parseInt(collegeData.invigGuestTarget);
+    if (collegeData.invigVacationTarget !== undefined) vacationDutyTarget = parseInt(collegeData.invigVacationTarget);
+    window.vacationDutyDates = (collegeData.invigVacationDutyDates || "").split(',').map(d => d.trim()).filter(d => Boolean(d));
+
+
 
     if (triggerRender && mode === 'admin') {
         if (document.getElementById('view-admin').classList.contains('hidden') &&
@@ -394,6 +480,18 @@ function initAdminDashboard() {
 
     showView('admin');
 }
+
+
+function isDateInVacation(dateObj) {
+    if (!vacationStart || !vacationEnd) return false;
+    const start = new Date(vacationStart);
+    const end = new Date(vacationEnd);
+    return dateObj >= start && dateObj <= end;
+}
+
+
+
+
 // Updated: Calculate Duties Done based on actual attendance (Filtered by Current AY)
 function getDutiesDoneCount(email) {
     let count = 0;
@@ -406,6 +504,8 @@ function getDutiesDoneCount(email) {
 
         // Filter by Academic Year (Ignore old duties)
         if (dateObj < acYear.start || dateObj > acYear.end) return;
+        
+        if (isDateInVacation(dateObj)) return;
 
         if (slot.attendance && slot.attendance.includes(email)) {
             count++;
@@ -413,6 +513,73 @@ function getDutiesDoneCount(email) {
     });
     return count;
 }
+// NEW: Get duty count broken down per ROLE PERIOD
+// Returns an object: { "Chief Superintendent": 3, "Senior Asst. Superintendent": 5, "Regular": 7 }
+function getDutiesDoneByRole(email) {
+    const acYear = getCurrentAcademicYear();
+    const staff = staffData.find(s => s.email === email);
+    const breakdown = {};
+
+    Object.keys(invigilationSlots).forEach(key => {
+        const slot = invigilationSlots[key];
+        const dateObj = parseDate(key);
+
+        if (dateObj < acYear.start || dateObj > acYear.end) return;
+        if (isDateInVacation(dateObj)) return;
+        if (!slot.attendance || !slot.attendance.includes(email)) return;
+
+        // Find which role this person held on THIS specific slot date
+        let roleName = "Regular";
+        if (staff && staff.roleHistory && staff.roleHistory.length > 0) {
+            const activeRole = staff.roleHistory.find(r => {
+                const rStart = new Date(r.start); rStart.setHours(0, 0, 0, 0);
+                const rEnd = r.end ? new Date(r.end) : new Date("9999-12-31"); rEnd.setHours(23, 59, 59, 999);
+                return dateObj >= rStart && dateObj <= rEnd;
+            });
+            if (activeRole) roleName = activeRole.role;
+        }
+
+        breakdown[roleName] = (breakdown[roleName] || 0) + 1;
+    });
+
+    return breakdown;
+}
+function getVacationDutiesDoneCount(email) {
+    let count = 0;
+    Object.keys(invigilationSlots).forEach(key => {
+        const slot = invigilationSlots[key];
+        const dateObj = parseDate(key);
+        
+        // Count if in standard vacation range OR manually marked as an Extra Date
+        const isExtraDutyDate = window.vacationDutyDates && window.vacationDutyDates.includes(key);
+        if (isDateInVacation(dateObj) || isExtraDutyDate) {
+
+            // Check if attended (or assigned if no attendance data yet)
+            if (slot.attendance && slot.attendance.length > 0) {
+                if (slot.attendance.includes(email)) count++;
+            } else if (slot.assigned.includes(email)) {
+                count++;
+            }
+        }
+    });
+    return count;
+}
+
+
+// Centralized way to get the pending count based on the specific session date
+function getPendingCountForSession(staffEmail, sessionKey) {
+    const s = staffData.find(st => st.email === staffEmail);
+    if (!s) return 0;
+
+    const dateObj = sessionKey ? parseDate(sessionKey) : new Date();
+
+    if (isDateInVacation(dateObj)) {
+        return Math.max(0, vacationDutyTarget - getVacationDutiesDoneCount(staffEmail));
+    } else {
+        return Math.max(0, calculateStaffTarget(s) - getDutiesDoneCount(staffEmail));
+    }
+}
+
 
 
 function calculateStaffTarget(staff) {
@@ -537,7 +704,8 @@ function initStaffDashboard(me) {
             const start = new Date(r.start);
             start.setHours(0, 0, 0, 0); // Normalize Start to Midnight
 
-            const end = new Date(r.end);
+            const end = r.end ? new Date(r.end) : new Date("9999-12-31");
+
             end.setHours(23, 59, 59, 999); // Fix: Set End Date to the VERY END of the day
 
             // 3. Check Role Name (Case Insensitive)
@@ -605,13 +773,34 @@ function isUserUnavailable(slot, email, key) {
             if (t.includes("PM") || t.startsWith("12:") || t.startsWith("12.")) session = "AN";
 
             const list = advanceUnavailability[dateStr][session];
-            if (list) {
+                        if (list) {
                 return list.some(u => (typeof u === 'string' ? u === email : u.email === email));
             }
         }
     }
+
+    // 4. FIX: Block Administrative Roles (CS, SAS, Principal, etc.) from being available everywhere
+    if (key) {
+        const dateObj = parseDate(key);
+        const slotTargetDateStr = `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}-${String(dateObj.getDate()).padStart(2, '0')}`;
+        const staff = staffData.find(s => s.email === email);
+        if (staff && staff.roleHistory && Array.isArray(staff.roleHistory)) {
+             const exemptRoles = ['EXCL', 'Principal', 'Chief Superintendent', 'Chief Supt', 'CS', 'Senior Asst. Superintendent', 'Senior Assistant Superintendent', 'Senior Assistant Supt', 'SAS', 'Exam Chief'];
+            const targetStamp = new Date(slotTargetDateStr).getTime();
+             if (staff.roleHistory.some(r => {
+                 const startStamp = new Date(r.start).getTime();
+                 const endStamp = r.end ? new Date(r.end).setHours(23, 59, 59, 999) : Infinity;
+                 return exemptRoles.includes(r.role) && targetStamp >= startStamp && targetStamp <= endStamp;
+             })) {
+
+                 return true;
+             }
+        }
+    }
+
     return false;
 }
+
 
 
 
@@ -649,6 +838,10 @@ function updateAdminUI() {
     populateDepartmentSelect();
 
     renderStaffTable();
+    if (typeof window.updateCompletionSessionDropdown === 'function') {
+        window.updateCompletionSessionDropdown();
+    }
+
 }
 // --- HELPER: Get First Name ---
 function getFirstName(fullName) {
@@ -683,9 +876,14 @@ window.sendSingleEmail = function (btn, email, name, subject, message) {
             body: htmlBody 
         })
     })
-    .then(() => {
-        console.log('Request sent to Google Script');
+      .then(() => {
+        try {
+            const keys = JSON.parse(btn ? (btn.dataset.dutyKeys || '[]') : '[]');
+            if (keys.length > 0) window.markUserAlerted(email, keys, 'email');
+        } catch(e) {}
+        
         btn.innerHTML = `
+
             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
             Sent
         `;
@@ -870,9 +1068,13 @@ function renderSlotsGridAdmin() {
                     </div>
                     <button onclick="runWeeklyAutoAssign('${group.month}', ${group.week})" class="text-[10px] bg-indigo-600 text-white border border-indigo-700 px-2 py-1 rounded hover:bg-indigo-700 font-bold shadow-sm">⚡ Auto</button>
                     
+                    <!-- NEW LOGS BUTTON -->
+                    <button onclick="viewAutoAssignLogs()" class="text-[10px] bg-gray-600 text-white border border-gray-700 px-2 py-1 rounded hover:bg-gray-700 font-bold shadow-sm" title="View Logs">📜</button>
+                    
                     <button onclick="openWeeklyNotificationModal('${group.month}', ${group.week})" class="text-[10px] bg-green-600 text-white border border-green-700 px-2 py-1 rounded hover:bg-green-700 font-bold shadow-sm flex items-center gap-1">📢 Notify</button>
                 </div>
             </div>`;
+
 
         group.items.sort((a, b) => {
             if (a.date - b.date !== 0) return a.date - b.date;
@@ -973,7 +1175,9 @@ function renderSlotsGridAdmin() {
                         </button>
                     </div>
 
-                    <div class="grid grid-cols-4 gap-1.5 mt-2">
+                    <div class="grid grid-cols-6 gap-1 mt-2">
+                        <button onclick="directAddStaff('${key}')" class="bg-indigo-50 text-indigo-700 border border-indigo-200 rounded py-1 hover:bg-indigo-100 text-[10px] font-bold transition shadow-sm" title="Direct Add Staff">+ Add</button>
+                        <button onclick="directUnavailStaff('${key}')" class="bg-red-50 text-red-700 border border-red-200 rounded py-1 hover:bg-red-100 text-[10px] font-bold transition shadow-sm" title="Mark Staff Unavailable">⛔ Excuse</button>
                         <button onclick="openDashboardInvigModal('${key}')" class="bg-white text-blue-600 border border-blue-200 rounded py-1 hover:bg-blue-50 text-[10px] font-bold" title="View Dashboard / God Mode">👁️</button>
                          <button onclick="openSlotReminderModal('${key}')" class="bg-white text-green-700 border border-green-200 rounded py-1 hover:bg-green-50 text-[10px]">🔔</button>
                          <button onclick="printSessionReport('${key}')" class="bg-white text-gray-700 border border-gray-300 rounded py-1 hover:bg-gray-50 text-[10px]">🖨️</button>
@@ -1090,9 +1294,10 @@ function renderStaffTable() {
         if (staff.roleHistory && staff.roleHistory.length > 0) {
             const activeRole = staff.roleHistory.find(r => {
                 const start = new Date(r.start);
-                const end = new Date(r.end);
+                const end = r.end ? new Date(r.end) : new Date("9999-12-31");
                 return start <= today && end >= today;
             });
+
             if (activeRole) activeRoleLabel = `<span class="bg-purple-100 text-purple-800 text-[10px] px-2 py-0.5 rounded ml-1 border border-purple-200 font-bold">${activeRole.role}</span>`;
         }
 
@@ -1187,11 +1392,34 @@ function renderStaffTable() {
     });
 }
 
-function renderStaffRankList(myEmail) {
+function renderStaffRankList(myEmail, targetDate = new Date()) {
+
     // 1. Calculate and Sort
+    const exemptRoles = ['EXCL', 'Principal', 'Chief Superintendent', 'Chief Supt', 'CS', 'Senior Asst. Superintendent', 'Senior Assistant Superintendent', 'Senior Assistant Supt', 'SAS', 'Exam Chief'];
+        // Ensure targetDate is a valid Date object
+    if (!(targetDate instanceof Date) || isNaN(targetDate)) targetDate = new Date();
+
+    const slotTargetDateStr = `${targetDate.getFullYear()}-${String(targetDate.getMonth() + 1).padStart(2, '0')}-${String(targetDate.getDate()).padStart(2, '0')}`;
+
+    const targetStamp = new Date(slotTargetDateStr).getTime();
+
     const rankedStaff = staffData
-        .filter(s => s.status !== 'archived')
+        .filter(s => {
+            if (s.status === 'archived') return false;
+            
+            // Check if user has an Exempt Role active on this date
+            if (s.roleHistory && Array.isArray(s.roleHistory)) {
+                const isExempt = s.roleHistory.some(r => {
+                    const startStamp = new Date(r.start).getTime();
+                    const endStamp = r.end ? new Date(r.end).setHours(23, 59, 59, 999) : Infinity;
+                    return exemptRoles.includes(r.role) && targetStamp >= startStamp && targetStamp <= endStamp;
+                });
+                if (isExempt) return false; // Hide them completely from selection
+            }
+            return true;
+        })
         .map(s => {
+
             const target = calculateStaffTarget(s);
             const done = getDutiesDoneCount(s.email);
             const pending = target - done;
@@ -2540,7 +2768,8 @@ window.runAutoAllocation = async function () {
                 if (dAssigned >= Math.ceil(dTotal * 0.5)) return null;
             }
 
-            let score = s.pending * 100;
+            const dynamicPending = getPendingCountForSession(s.email, key);
+            let score = dynamicPending * 100;
             let warnings = [];
 
             // Weekly Soft Limit
@@ -2625,7 +2854,7 @@ For any queries contact examinations@gvc.ac.in _Exam Committee - ${sasPhone}_ Th
 
 window.sendWelcomeMessage = function(email) {
     // Safe robust lookup
-    const staff = staffData.find(s => s.email.toLowerCase() === email.toLowerCase());
+    const staff = staffData.find(s => s.email && email && s.email.toLowerCase() === email.toLowerCase());
     if (!staff) return alert("Staff record not found.");
     const msg = window.generateWelcomeText(staff.name, staff.dept);
     
@@ -2817,7 +3046,26 @@ window.openRoleAssignmentModal = function (index) {
     const select = document.getElementById('assign-role-select');
     select.innerHTML = Object.keys(rolesConfig).map(r => `<option value="${r}">${r}</option>`).join('');
     const hist = document.getElementById('role-history-list');
-    hist.innerHTML = (staff.roleHistory || []).map((h, i) => `<div class="flex justify-between text-xs p-1 bg-gray-50 mb-1"><span>${h.role}</span> <button onclick="removeRoleFromStaff(${index},${i})" class="text-red-500">&times;</button></div>`).join('');
+        // FIX: Render interactive date editors for each active role block
+    hist.innerHTML = (staff.roleHistory || []).map((h, i) => `
+        <div class="flex flex-col gap-1 text-xs p-2 bg-gray-50 mb-2 rounded border border-gray-200 shadow-sm">
+            <div class="flex justify-between items-center font-bold text-gray-700">
+                <span class="text-indigo-700">${h.role}</span>
+                <button onclick="removeRoleFromStaff(${index},${i})" class="text-red-400 hover:text-red-600 bg-red-50 hover:bg-red-100 border border-red-200 px-2 py-0.5 rounded transition shadow-sm font-black text-xs" title="Remove entire role layout">&times; Revoke</button>
+            </div>
+            <div class="flex gap-2 items-center mt-1">
+                <div class="flex flex-col flex-1">
+                    <label class="text-[9px] text-gray-500 uppercase font-black">Start Date</label>
+                    <input type="date" value="${h.start || ''}" onchange="updateRolePeriod(${index}, ${i}, 'start', this.value)" class="border border-gray-300 rounded px-1.5 py-1 text-xs focus:ring-2 focus:ring-indigo-300 outline-none w-full bg-white transition cursor-pointer">
+                </div>
+                <div class="flex flex-col flex-1">
+                    <label class="text-[9px] text-gray-500 uppercase font-black">End Date</label>
+                    <input type="date" value="${h.end || ''}" onchange="updateRolePeriod(${index}, ${i}, 'end', this.value)" class="border border-gray-300 rounded px-1.5 py-1 text-xs focus:ring-2 focus:ring-indigo-300 outline-none w-full bg-white transition cursor-pointer">
+                </div>
+            </div>
+        </div>
+    `).join('');
+
     modal.classList.remove('hidden');
 }
 
@@ -2848,7 +3096,24 @@ window.removeRoleFromStaff = async function (sIdx, rIdx) {
     await syncStaffToCloud();
     window.closeModal('role-assignment-modal');
     renderStaffTable();
-}
+};
+
+// NEW: Instantly edits underlying roles right from the active list UI  
+window.updateRolePeriod = async function (sIdx, rIdx, field, value) {
+    if (!staffData[sIdx] || !staffData[sIdx].roleHistory || !staffData[sIdx].roleHistory[rIdx]) return;
+    
+    // Update the exact start/end value in memory safely
+    staffData[sIdx].roleHistory[rIdx][field] = value;
+    
+    const roleName = staffData[sIdx].roleHistory[rIdx].role;
+    logActivity("Role Period Edited", `Updated ${field} date for historical role '${roleName}' on ${staffData[sIdx].name} to [${value || 'No End Date'}].`);
+    
+    // Auto-sync gracefully behind the scenes (No need to close modal)
+    await syncStaffToCloud();
+    renderStaffTable();
+};
+
+
 
 // [In invigilation.js]
 
@@ -2988,12 +3253,29 @@ window.openRoleConfigModal = function () {
         targetInput.disabled = true;
     }
 
+const mathDateInput = document.getElementById('vacation-math-date-input');
+    if (mathDateInput) {
+        mathDateInput.value = "";
+        renderVacationMathDates();
+    }
+
+
+    
     const guestInput = document.getElementById('guest-duty-target');
     if (guestInput) {
         guestInput.value = guestGlobalTarget;
         guestInput.disabled = true;
     }
 
+    
+
+    const vacationInput = document.getElementById('vacation-duty-target');
+    if (vacationInput) {
+        vacationInput.value = vacationDutyTarget;
+        vacationInput.disabled = true; // Will be toggled by the lock button
+    }
+
+    
     // 4. Render Lists
     renderRolesList();
     if (typeof renderDepartmentsList === "function") renderDepartmentsList();
@@ -3090,12 +3372,17 @@ window.deleteRoleConfig = function (role) {
 window.saveRoleConfig = async function () {
     const newGlobal = parseInt(document.getElementById('global-duty-target').value);
     const newGuest = parseInt(document.getElementById('guest-duty-target').value);
+    const newVacation = parseInt(document.getElementById('vacation-duty-target').value) || 0;
+    const newExtraDates = window.vacationDutyDates ? window.vacationDutyDates.join(',') : "";
+
 
     if (isNaN(newGlobal) || newGlobal < 0) return alert("Invalid Global Target");
     if (isNaN(newGuest) || newGuest < 0) return alert("Invalid Guest Target");
 
     globalDutyTarget = newGlobal;
     guestGlobalTarget = newGuest;
+    vacationDutyTarget = newVacation;
+
 
     // CAPTURE URL
     const newUrl = document.getElementById('google-script-url').value.trim();
@@ -3108,6 +3395,10 @@ window.saveRoleConfig = async function () {
         invigDepartments: JSON.stringify(departmentsConfig),
         invigGlobalTarget: globalDutyTarget,
         invigGuestTarget: guestGlobalTarget, // <--- SAVED HERE
+        invigVacationTarget: vacationDutyTarget,
+        invigVacationDutyDates: newExtraDates,
+
+
         invigGoogleScriptUrl: googleScriptUrl
     });
 
@@ -3140,7 +3431,7 @@ window.openDutyNormsModal = function () {
             const textClass = isExempt ? "text-green-700" : "text-gray-700";
             const countDisplay = isExempt ? "EXEMPT" : `<b>${target}</b> / mo`;
 
-            container.innerHTML += `
+                        container.innerHTML += `
                 <div class="flex justify-between items-center text-xs p-2.5 rounded border ${bgClass} mb-1.5">
                     <span class="${textClass} font-bold">${role}</span>
                     <span class="text-gray-600 ${isExempt ? 'font-bold text-green-600 text-[10px]' : ''}">${countDisplay}</span>
@@ -3150,7 +3441,45 @@ window.openDutyNormsModal = function () {
     }
 
     window.openModal('norms-modal');
-}
+};
+
+/** ✅ NEW: Populate Completion Session Dropdown (Properly Placed Outside) **/
+/** ✅ MODERNIZED: Populate Completion Session Dropdown (Date-Wise Sorting) **/
+window.updateCompletionSessionDropdown = function() {
+    const select = document.getElementById('dept-completion-session-select');
+    if (!select) return;
+
+    const currentVal = select.value;
+    select.innerHTML = '<option value="">-- Select Completed Session --</option>';
+
+    // Filter sessions that have attendance and sort them by date (Descending)
+    const completedSessionKeys = Object.keys(invigilationSlots).filter(key => {
+        const slot = invigilationSlots[key];
+        return slot.attendance && slot.attendance.length > 0;
+    }).sort((a, b) => {
+        // --- Date-Wise Sorting (Descending) ---
+        return parseDate(b) - parseDate(a); 
+    });
+
+    if (completedSessionKeys.length === 0) {
+        select.innerHTML = '<option value="">No completed records found</option>';
+        return;
+    }
+
+    completedSessionKeys.forEach(key => {
+        const opt = document.createElement('option');
+        opt.value = key;
+        // Text format: "✅ DD.MM.YYYY | HH:MM AM/PM"
+        opt.textContent = `✅ ${key}`; 
+        select.appendChild(opt);
+    });
+
+    if (currentVal) select.value = currentVal;
+};
+
+
+window.updateCompletionSessionDropdown();
+
 
 // --- ATTENDANCE MARKING LOGIC ---
 
@@ -3176,6 +3505,11 @@ function populateAttendanceSessions() {
         opt.textContent = `${mark}${key}`;
         ui.attSessionSelect.appendChild(opt);
     });
+    // ✅ NEW: Keep the Completion Dropdown in sync
+    if (typeof window.updateCompletionSessionDropdown === 'function') {
+        window.updateCompletionSessionDropdown();
+    }
+
 }
 
 window.loadSessionAttendance = function () {
@@ -3222,12 +3556,26 @@ window.loadSessionAttendance = function () {
     const isCS = (r) => { const s = r.toLowerCase().trim(); return s === "cs" || s.includes("chief"); };
     const isSAS = (r) => { const s = r.toLowerCase().trim(); return s === "sas" || s.includes("senior"); };
 
-    staffData.forEach(s => {
+       staffData.forEach(s => {
         if (s.roleHistory) {
-            const activeRole = s.roleHistory.find(r => {
-                const rStart = new Date(r.start); rStart.setHours(0, 0, 0, 0);
-                const rEnd = new Date(r.end); rEnd.setHours(23, 59, 59, 999);
-                return rStart <= endOfDay && rEnd >= startOfDay && (isCS(r.role) || isSAS(r.role));
+            // Sort history so most recent assignments take automatic precedence
+            const sortedHistory = [...s.roleHistory].sort((a, b) => new Date(b.start) - new Date(a.start));
+            
+            const activeRole = sortedHistory.find(r => {
+                // Must be a CS or SAS variant
+                if (!(isCS(r.role) || isSAS(r.role))) return false;
+                
+                const rStart = new Date(r.start); 
+                rStart.setHours(0, 0, 0, 0);
+                
+                // If no end date is provided, role continues indefinitely into the future
+                let rEnd = new Date("9999-12-31"); 
+                if (r.end) {
+                    rEnd = new Date(r.end);
+                    rEnd.setHours(23, 59, 59, 999);
+                }
+                
+                return rStart <= endOfDay && rEnd >= startOfDay;
             });
 
             if (activeRole) {
@@ -3236,6 +3584,7 @@ window.loadSessionAttendance = function () {
             }
         }
     });
+
 
     const savedSup = slot.supervision || {};
     const currentCS = savedSup.cs || defaultCS;
@@ -3258,7 +3607,7 @@ window.loadSessionAttendance = function () {
     }
 
     // --- 2. ATTENDANCE LIST ---
-    let presentSet = new Set(slot.attendance || slot.assigned || []);
+    let presentSet = new Set(slot.attendance && slot.attendance.length > 0 ? slot.attendance : (slot.assigned || []));
 
     // Auto-Mark CS/SAS as Present
     if (currentCS && !presentSet.has(currentCS)) presentSet.add(currentCS);
@@ -3397,7 +3746,7 @@ window.saveAttendance = async function () {
     logActivity("Attendance Marked", `Marked ${presentEmails.length} staff present for ${key}. CS: ${getNameFromEmail(csVal)}, SAS: ${getNameFromEmail(sasVal)}`);
 
     await syncSlotsToCloud();
-
+    window.updateCompletionSessionDropdown();
     populateAttendanceSessions();
     renderStaffTable();
     alert("Attendance & Supervision Saved!");
@@ -4019,7 +4368,26 @@ window.openCompletedDutiesModal = function (email) {
     });
 
     // 2. Sort (Newest First)
+        // 2. Sort (Newest First)
     history.sort((a, b) => b.dateObj - a.dateObj);
+
+    // --- NEW: Calculate Role Breakdown ---
+    let csCount = 0, sasCount = 0, invigCount = 0;
+    history.forEach(h => {
+        if (h.role === "Chief Supt.") csCount++;
+        else if (h.role === "Senior Asst.") sasCount++;
+        else invigCount++;
+    });
+
+    // Update Modal Header with Breakdown Badges
+    if (headerSub) {
+        let statsHtml = `<span class="font-bold text-gray-700">Total: ${history.length}</span> <span class="text-gray-400 font-normal ml-1"> (AY ${acYear.label})</span> <br>`;
+        if (csCount > 0) statsHtml += `<span class="mt-1 inline-block px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-[10px] font-bold border border-purple-200 shadow-sm mr-1">CS: ${csCount}</span>`;
+        if (sasCount > 0) statsHtml += `<span class="mt-1 inline-block px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px] font-bold border border-blue-200 shadow-sm mr-1">SAS: ${sasCount}</span>`;
+        if (invigCount > 0) statsHtml += `<span class="mt-1 inline-block px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-[10px] font-bold border border-green-200 shadow-sm">INV: ${invigCount}</span>`;
+        headerSub.innerHTML = statsHtml;
+    }
+    // -------------------------------------
 
     // 3. Render Neat List
     if (history.length === 0) {
@@ -4209,7 +4577,30 @@ window.runWeeklyAutoAssign = async function (monthStr, weekNum) {
                 if (slot.assigned.includes(s.email)) return null;
                 if (isUserUnavailable(slot, s.email, key)) return null;
 
-                let score = s.pending * 100;
+                const dynamicPending = getPendingCountForSession(s.email, key);
+                 // --- VACATION SPECIFIC OVERRIDE ---
+                let score;
+                const slotYYYY = date.getFullYear();
+                const slotMM = String(date.getMonth() + 1).padStart(2, '0');
+                const slotDD = String(date.getDate()).padStart(2, '0');
+                const slotDateStr = `${slotYYYY}-${slotMM}-${slotDD}`;
+                    // FIX: Also check if the date falls inside the main vacation start/end period
+                    if (isDateInVacation(date) || (window.vacationDutyDates && window.vacationDutyDates.includes(slotDateStr))) {
+
+                    // FIX: Replaced window.vacationDefaultTarget with global vacationDutyTarget
+                    const vacTarget = vacationDutyTarget || 0;
+                    const vacDone = getVacationDutiesDoneCount(s.email);
+                    
+                    // If you want pure ranking by lowest duties done (ignoring target bounds):
+                    // score = -(vacDone * 100); 
+                    
+                    // OR, using the target boundary math (Standard Way):
+                    const vacPending = Math.max(0, vacTarget - vacDone);
+                    score = vacPending * 100;
+                } else {
+
+                    score = dynamicPending * 100;
+                }
                 let warnings = [];
 
                 // --- 1. Adjacent Day Rule ---
@@ -4594,17 +4985,19 @@ window.openSlotReminderModal = function (key) {
         <div class="mb-4 pb-4 border-b border-gray-100 flex justify-between items-center">
             <div class="text-xs text-gray-500">Queue: <b>${Object.keys(dailyDuties).length}</b> faculty.</div>
             <div class="flex gap-2">
-                <button id="btn-cancel-bulk" onclick="cancelBulkSending()" class="hidden bg-red-100 text-red-700 border border-red-200 text-xs font-bold px-4 py-2 rounded shadow-sm hover:bg-red-200 transition flex items-center gap-2">
+                <button id="btn-cancel-bulk" onclick="cancelBulkSending()" class="hidden bg-red-100 text-red-700 border border-red-200 text-xs font-bold px-4 py-2 rounded shadow-sm hover:bg-red-200 transition items-center gap-2">
                     Stop / Cancel
                 </button>
-                <button id="btn-bulk-email-day" onclick="sendBulkEmails('btn-bulk-email-day')" 
-                    class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-4 py-2 rounded shadow-md transition flex items-center gap-2">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
-                    Send Bulk Emails
+                <button onclick="sendBulkEmails('new')" class="bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold px-4 py-2 rounded shadow-md transition flex items-center gap-2">
+                    Send to NEW Only
+                </button>
+                <button onclick="sendBulkEmails('all')" class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-4 py-2 rounded shadow-md transition flex items-center gap-2">
+                    Send to ALL
                 </button>
             </div>
         </div>
     `;
+
 
     // ... (Rest of the loop logic is same as previous) ...
     // (Use the loop from the previous openSlotReminderModal)
@@ -4629,9 +5022,33 @@ window.openSlotReminderModal = function (key) {
         const emailBody = generateProfessionalEmail(fullName, duties, "Invigilation Duty");
         const btnId = `email-btn-${index}`;
 
+        const dutyKeys = duties.map(d => `${d.date} | ${d.time}`);
+        
+
+    // Check mail and WA separately
+        let isMailed = true;
+        let isWA = true;
+        dutyKeys.forEach(k => {
+            const as = invigilationSlots[k] && invigilationSlots[k].alertStatus && invigilationSlots[k].alertStatus[email];
+            if (!as || !as.email) isMailed = false;
+            if (!as || !as.wa) isWA = false;
+        });
+
+        const mailedBadge = isMailed ? '<span class="ml-1 text-[10px] bg-blue-100 text-blue-800 px-2 py-0.5 rounded border border-blue-200">✉ Mailed</span>' : '';
+        const waBadge = isWA ? '<span class="ml-1 text-[10px] bg-green-100 text-green-800 px-2 py-0.5 rounded border border-green-200">✔ WA Sent</span>' : '';
+        const newBadge = (!isMailed && !isWA) ? '<span class="ml-1 text-[10px] bg-red-100 text-red-800 px-2 py-0.5 rounded border border-red-200">🔔 New</span>' : '';
+        const statusBadge = mailedBadge + waBadge + newBadge;
+
+        const isNew = !isMailed; // Only email counts for "New" in bulk queue
+
+
         if (staffEmail) {
-            window.currentEmailQueue.push({ email: staffEmail, name: fullName, subject: emailSubject, body: emailBody, btnId: btnId });
+            window.currentEmailQueue.push({ 
+                email: staffEmail, name: fullName, subject: emailSubject, body: emailBody, btnId: btnId,
+                 isNew: !isMailed, dutyKeys: dutyKeys
+            });
         }
+
 
         // *** UPDATED: Generate detailed daily message ***
         // WhatsApp (Elaborate & Detailed)
@@ -4662,15 +5079,16 @@ window.openSlotReminderModal = function (key) {
         list.innerHTML += `
             <div class="flex justify-between items-center bg-white border border-gray-200 p-3 rounded-lg shadow-sm hover:shadow-md transition mt-2">
                 <div class="flex-1 min-w-0 pr-2">
-                    <div class="font-bold text-gray-800 truncate">${fullName} ${noEmailWarning}</div>
+                    <div class="font-bold text-gray-800 truncate">${fullName} ${noEmailWarning} ${statusBadge}</div>
                     <div class="text-xs text-gray-500 mt-1 font-bold text-indigo-600">Sessions: ${sessionsStr}</div>
                 </div>
                 <div class="flex gap-2 shrink-0">
-                    <button id="${btnId}" onclick="sendSingleEmail(this, '${staffEmail}', '${safeName}', '${safeSubject}', '${safeBody}')" ${emailDisabled} class="bg-gray-700 hover:bg-gray-800 text-white text-xs font-bold px-3 py-2 rounded shadow transition flex items-center gap-1">Mail</button>
+                    <button id="${btnId}"  onclick="sendSingleEmail(this, '${staffEmail}', '${safeName}', '${safeSubject}', '${safeBody}')" data-duty-keys='${JSON.stringify(dutyKeys)}' ${emailDisabled} class="bg-gray-700 hover:bg-gray-800 text-white text-xs font-bold px-3 py-2 rounded shadow transition flex items-center gap-1">Mail</button>
                     <a href="${smsLink}" target="_blank" ${phoneDisabled} class="bg-green-600 hover:bg-green-700 text-white text-xs font-bold px-3 py-2 rounded shadow transition">SMS</a>
-                    <a href="${waLink}" target="_blank" ${phoneDisabled} onclick="markAsSent(this)" class="bg-orange-600 hover:bg-orange-700 text-white text-xs font-bold px-3 py-2 rounded shadow transition">Remind</a>
+                    <a href="${waLink}" target="_blank" ${phoneDisabled} onclick="markAsSent(this); markUserAlerted('${email}', ${JSON.stringify(dutyKeys).replace(/"/g, "'")}, 'wa');" class="bg-orange-600 hover:bg-orange-700 text-white text-xs font-bold px-3 py-2 rounded shadow transition">WA Alert</a>
                 </div>
             </div>
+
         `;
     });
 
@@ -5373,79 +5791,63 @@ function formatMessageForEmail(text) {
     return html;
 }
 
-window.sendBulkEmails = async function (btnId) {
-    const btn = document.getElementById(btnId);
-    if (!btn) return;
 
-    if (window.currentEmailQueue.length === 0) return alert("No emails in queue.");
-    if (!confirm(`Send ${window.currentEmailQueue.length} emails to faculty members via the system?`)) return;
+window.sendBulkEmails = async function (mode) {
+    // Determine the target queue based on Mode
+    let queue = window.currentEmailQueue;
+    if (mode === 'new') {
+        queue = queue.filter(item => item.isNew);
+    }
+
+    if (queue.length === 0) return alert("No emails match this criteria. Everyone is already alerted!");
+    if (!confirm(`Send ${queue.length} emails to faculty members?`)) return;
 
     // UI Setup
     const progressBar = document.getElementById('bulk-progress-bar');
     const progressFill = document.getElementById('bulk-progress-fill');
     const statusText = document.getElementById('bulk-status-text');
-    const cancelBtn = document.getElementById('btn-cancel-bulk'); // If you add one
 
-    btn.classList.add('hidden'); // Hide start button
     if (progressBar) progressBar.classList.remove('hidden');
     if (statusText) statusText.classList.remove('hidden');
 
     let sentCount = 0;
     
-    for (let i = 0; i < window.currentEmailQueue.length; i++) {
-        const item = window.currentEmailQueue[i];
+    for (let i = 0; i < queue.length; i++) {
+        const item = queue[i];
         
-        // Update Status
-        if (statusText) statusText.textContent = `Sending ${i+1} of ${window.currentEmailQueue.length} to ${item.name}...`;
-        if (progressFill) progressFill.style.width = `${Math.round(((i+1) / window.currentEmailQueue.length) * 100)}%`;
+        if (statusText) statusText.textContent = `Sending ${i+1} of ${queue.length} to ${item.name}...`;
+        if (progressFill) progressFill.style.width = `${Math.round(((i+1) / queue.length) * 100)}%`;
 
-        // Update Individual Button Row
         const rowBtn = document.getElementById(item.btnId);
-        if (rowBtn) {
-            rowBtn.textContent = "...";
-            rowBtn.disabled = true;
-        }
+        if (rowBtn) { rowBtn.textContent = "..."; rowBtn.disabled = true; }
 
-        // Send
         try {
             await fetch(googleScriptUrl, {
-                method: "POST",
-                mode: "no-cors",
+                method: "POST", mode: "no-cors",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    to: item.email,
-                    subject: item.subject,
-                    body: item.body // Send the HTML body
-                })
+                body: JSON.stringify({ to: item.email, subject: item.subject, body: item.body })
             });
 
-            // Success UI
             if (rowBtn) {
                 rowBtn.innerHTML = "✅";
-                rowBtn.classList.remove('bg-indigo-600', 'hover:bg-indigo-700');
+                rowBtn.classList.remove('bg-gray-700', 'hover:bg-gray-800');
                 rowBtn.classList.add('bg-green-600', 'cursor-default');
             }
             sentCount++;
-            
-            // Delay
-            await new Promise(r => setTimeout(r, 800)); 
+            window.markUserAlerted(item.email, item.dutyKeys); // Saves the state to Cloud
 
+            await new Promise(r => setTimeout(r, 800)); 
         } catch (e) {
-            console.error(e);
-            if (rowBtn) {
-                rowBtn.textContent = "Failed";
-                rowBtn.classList.add('bg-red-600');
-            }
+            if (rowBtn) { rowBtn.textContent = "Failed"; rowBtn.disabled = false; }
         }
     }
 
-    if (statusText) statusText.textContent = `Done! Sent ${sentCount} emails.`;
-    alert(`Batch Process Complete.\nSent: ${sentCount}`);
-    
-    // Reset (Optional)
-    // btn.classList.remove('hidden');
-    // if (progressBar) progressBar.classList.add('hidden');
+    if (statusText) statusText.textContent = "Completed.";
+    alert(`Batch Complete.\\nSent ${sentCount} emails.`);
+    if (typeof logActivity === 'function') logActivity("Bulk Email", `Sent ${sentCount} duty intimations (${mode}).`);
 };
+
+
 
 
 // --- HELPER: Consolidated Department Email Template ---
@@ -5518,6 +5920,58 @@ function generateDepartmentConsolidatedEmail(deptName, facultyData, weekNum, mon
     </div>
     `;
 }
+
+// --- NEW: Daily Completion Email Template ---
+function generateDepartmentCompletionEmail(deptName, facultyData, dateStr) {
+    const collegeName = (typeof collegeData !== 'undefined' ? collegeData.examCollegeName : "") || "Government Victoria College";
+    let rows = "";
+    
+    facultyData.sort((a,b) => a.name.localeCompare(b.name)).forEach((f, idx) => {
+        const bg = idx % 2 === 0 ? "#ffffff" : "#f9fafb";
+        f.duties.forEach((d, dIdx) => {
+            const nameCell = (dIdx === 0) ? `<td rowspan="${f.duties.length}" style="padding: 10px; border: 1px solid #ddd; font-weight: bold; vertical-align: top; background-color: ${bg};">${f.name}</td>` : "";
+            rows += `
+            <tr style="background-color: ${bg};">
+                ${nameCell}
+                <td style="padding: 10px; border: 1px solid #ddd;">${d.session}</td>
+                <td style="padding: 10px; border: 1px solid #ddd; color: #555;">${d.time}</td>
+            </tr>`;
+        });
+    });
+
+    return `
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 700px; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden;">
+        <div style="background-color: #4f46e5; color: white; padding: 20px; text-align: center;">
+            <img src="https://examflow-de08f.web.app/CollegeLogo.png" alt="Logo" style="height: 45px; margin-bottom: 5px;">
+            <h2 style="margin: 0; font-size: 16px; text-transform: uppercase;">${collegeName}</h2>
+            <p style="margin: 5px 0 0; font-size: 12px; opacity: 0.9;">Duty Completion Report (Daily)</p>
+        </div>
+        <div style="padding: 25px;">
+            <p>Dear Head of Department (<b>${deptName}</b>),</p>
+            <p>This is to inform you that the following faculty members from your department have <b>successfully completed</b> their assigned invigilation duties for <b>${dateStr}</b>:</p>
+            <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 13px;">
+                <thead>
+                    <tr style="background-color: #f3f4f6; text-align: left;">
+                        <th style="padding: 10px; border: 1px solid #ddd;">Faculty Name</th>
+                        <th style="padding: 10px; border: 1px solid #ddd;">Session</th>
+                        <th style="padding: 10px; border: 1px solid #ddd;">Time</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+            <p style="font-size: 13px; color: #6b7280; line-height: 1.6;">
+                The duty participation has been recorded in the central attendance register. No further action is required from the department.
+            </p>
+        </div>
+        <div style="background-color: #f9fafb; padding: 15px; text-align: center; border-top: 1px solid #e5e7eb;">
+            <p style="margin: 0; font-size: 11px; color: #9ca3af;">Exam Cell, ${collegeName}</p>
+        </div>
+    </div>`;
+}
+
+
+
+
 window.toggleStaffListLock = function () {
     isStaffListLocked = !isStaffListLocked;
     const btn = document.getElementById('btn-staff-list-lock');
@@ -5600,6 +6054,8 @@ window.toggleGlobalTargetLock = function () {
     const input = document.getElementById('global-duty-target');
     const guestInput = document.getElementById('guest-duty-target');
     const btn = document.getElementById('global-target-lock-btn');
+    const vacInput = document.getElementById('vacation-duty-target');
+
 
     if (input) {
         input.disabled = isGlobalTargetLocked;
@@ -5624,9 +6080,37 @@ window.toggleGlobalTargetLock = function () {
         }
     }
 
+    if (vacInput) {
+        vacInput.disabled = isGlobalTargetLocked;
+        if (!isGlobalTargetLocked) {
+            vacInput.classList.remove('text-gray-600');
+            vacInput.classList.add('text-black', 'bg-white');
+        } else {
+            vacInput.classList.add('text-gray-600');
+            vacInput.classList.remove('text-black', 'bg-white');
+        }
+    }
+
+    const mathDateInput = document.getElementById('vacation-math-date-input');
+    const mathDateBtn = document.getElementById('vacation-math-date-btn');
+    if (mathDateInput && mathDateBtn) {
+        mathDateInput.disabled = isGlobalTargetLocked;
+        mathDateBtn.disabled = isGlobalTargetLocked;
+        // Re-render so the "X" buttons appear when unlocked
+        if (typeof renderVacationMathDates === "function") renderVacationMathDates();
+    }
+
+
+
+    
     if (btn) updateLockIcon('global-target-lock-btn', isGlobalTargetLocked);
     if (!isGlobalTargetLocked && input) input.focus();
 }
+
+
+
+
+
 // ==========================================
 // 💾 MASTER BACKUP & RESTORE SYSTEM
 // ==========================================
@@ -6004,119 +6488,216 @@ async function finishAttendanceUpload(count, action) {
         loadSessionAttendance();
     }
 }
-// --- MANUAL ALLOCATION SEARCH ---
+
+
+// --- MANUAL ALLOCATION CORE LOGIC ---
+// Holds state temporarily when modal is open to avoid massive DOM manipulation lag
+window.manualState = {
+    rankedStaff: [],
+    slotsToAutoFill: 0,
+    isFullEditMode: false,
+    key: "",
+    slotInfo: null
+};
+
 window.filterManualStaff = function () {
     const query = document.getElementById('manual-staff-search').value.toLowerCase();
-    const rows = document.querySelectorAll('#manual-available-list tr');
+    const cards = document.querySelectorAll('#manual-available-list .manual-card');
     const noResults = document.getElementById('manual-no-results');
     let hasVisible = false;
 
-    rows.forEach(row => {
-        // The Name is in the second column (index 1), inside a div
-        // The Dept is in the same cell, inside a div with text-[10px]
-        const textContent = row.innerText.toLowerCase(); // Simple check of all text in row
-
-        if (textContent.includes(query)) {
-            row.classList.remove('hidden');
+    cards.forEach(card => {
+        const nameNode = card.querySelector('.search-name');
+        const deptNode = card.querySelector('.search-dept');
+        const text = ((nameNode ? nameNode.textContent : '') + " " + (deptNode ? deptNode.textContent : '')).toLowerCase();
+        
+        if (text.includes(query)) {
+            card.style.display = 'flex';
             hasVisible = true;
         } else {
-            row.classList.add('hidden');
+            card.style.display = 'none';
         }
     });
 
     if (noResults) {
-        if (hasVisible) noResults.classList.add('hidden');
+        if (hasVisible || cards.length === 0) noResults.classList.add('hidden');
         else noResults.classList.remove('hidden');
     }
 }
 
+window.renderManualCards = function() {
+    const availList = document.getElementById('manual-available-list');
+    const selList = document.getElementById('manual-selected-list');
+    availList.innerHTML = '';
+    selList.innerHTML = '';
 
+    let currentSelectionCount = 0;
+
+    window.manualState.rankedStaff.forEach(s => {
+        const isUnavailable = isUserUnavailable(window.manualState.slotInfo, s.email, window.manualState.key);
+        if (s.isChecked) currentSelectionCount++;
+
+        // Hide unavailable from Available pane
+        if (isUnavailable && !s.isChecked) return; 
+
+        const disabledState = !window.manualState.isFullEditMode ? 'opacity-60 cursor-not-allowed pointer-events-none bg-gray-50' : 'cursor-pointer hover:shadow-md hover:border-indigo-300';
+        const pendingColor = s.pending > 0 ? 'text-red-600 bg-red-50' : 'text-green-700 bg-green-50';
+        
+        const warningHtml = s.badges.map(b => `<span class="text-[9px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded shadow-sm border border-amber-200 font-bold">${b}</span>`).join('');
+        const sourceMeta = window.manualState.slotInfo.assignmentMeta ? window.manualState.slotInfo.assignmentMeta[s.email] : null;
+        const sourceBadge = sourceMeta ? getSourceBadge(sourceMeta.source) : '';
+
+        const actionText = s.isChecked ? "Remove" : "+ Select";
+        const actionColor = s.isChecked ? "text-red-500 bg-red-50 hover:bg-red-500 hover:text-white border-red-200" : "text-indigo-600 bg-indigo-50 hover:bg-indigo-600 hover:text-white border-indigo-200";
+
+        // HTML for the precise modern card
+        const cardHtml = `
+            <div title="Click anywhere to ${actionText.toLowerCase()}" class="manual-card flex w-full justify-between items-center p-3 bg-white border border-gray-200 shadow-sm rounded-xl transition-all duration-200 ${disabledState}" onclick="window.toggleManualStaffCard('${s.email}')">
+                <div class="flex flex-col overflow-hidden">
+                    <div class="flex items-center gap-1.5 mb-1.5">
+                        <span class="font-black text-gray-800 text-sm truncate search-name">${s.name}</span>
+                        ${warningHtml}
+                    </div>
+                    <div class="text-[10px] text-gray-500 leading-tight search-dept flex items-center gap-1.5">
+                        <span class="font-bold">${s.dept}</span> | 
+                                                <span class="font-mono font-bold px-1.5 py-0.5 rounded border border-gray-100 ${pendingColor}">${isDateInVacation(parseDate(window.manualState.key)) ? 'Vac Rem:' : 'Rem:'} ${s.pending}</span>
+                    </div>
+                    <div class="flex flex-wrap gap-1 mt-2">
+                        <span class="flex items-center gap-0.5 text-[9px] bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200 font-bold shadow-sm">📅 Wk: ${s.weekCount || 0}</span>
+                        <span class="flex items-center gap-0.5 text-[9px] bg-purple-50 text-purple-700 px-1.5 py-0.5 rounded border border-purple-200 font-bold shadow-sm">${isDateInVacation(parseDate(window.manualState.key)) ? '🏖️ Vac Sc:' : '⚡ Sc:'} ${s.score}</span>
+                        ${sourceBadge}
+                    </div>
+                </div>
+                <div class="flex flex-col justify-center items-end shrink-0 gap-2 ml-2">
+                    <!-- Hidden checkbox powers saveManualAllocation effortlessly -->
+                    <input type="checkbox" class="manual-chk hidden" value="${s.email}" ${s.isChecked ? 'checked' : ''}>
+                    
+                    <button class="text-[10px] font-black uppercase px-3 py-1.5 rounded-lg border ${actionColor} transition shadow-sm w-full" onclick="event.stopPropagation(); window.toggleManualStaffCard('${s.email}')">${actionText}</button>
+                    
+                    ${s.isChecked ? '' : `<button onclick="event.stopPropagation(); adminMarkUnavailable('${window.manualState.key}', '${s.email}')" class="text-[9px] text-gray-500 bg-gray-100 hover:text-white hover:bg-red-500 hover:border-red-600 border border-gray-200 px-2 py-1 rounded transition w-full font-bold shadow-sm">⛔ Unavail.</button>`}
+                </div>
+            </div>`;
+
+        if (s.isChecked) selList.innerHTML += cardHtml;
+        else availList.innerHTML += cardHtml;
+    });
+
+    document.getElementById('manual-sel-count').textContent = currentSelectionCount;
+    window.filterManualStaff();
+}
+
+window.toggleManualStaffCard = function(email) {
+    if (!window.manualState.isFullEditMode) return;
+    const staff = window.manualState.rankedStaff.find(s => s.email === email);
+    if (staff) {
+        staff.isChecked = !staff.isChecked;
+        renderManualCards();
+    }
+}
 
 window.openManualAllocationModal = function (key) {
     const slot = invigilationSlots[key];
     const requiredCount = parseInt(slot.required) || 0; 
-    
-    // --- 1. DETERMINE MODE ---
-    // We allow opening even if NOT locked, but restrict actions
     const isFullEditMode = slot.isAdminLocked;
 
-    // 2. Reset Search
+    // Reset UI
     const searchInput = document.getElementById('manual-staff-search');
     if (searchInput) searchInput.value = "";
-    const noResults = document.getElementById('manual-no-results');
-    if (noResults) noResults.classList.add('hidden');
-
-    // 3. Setup Modal Header
+    
     document.getElementById('manual-session-key').value = key;
     document.getElementById('manual-modal-title').textContent = key;
-    document.getElementById('manual-modal-req').textContent = requiredCount;
+    document.getElementById('manual-modal-req').textContent = requiredCount; 
+    const displayReq = document.getElementById('manual-modal-req-display');
+    if (displayReq) displayReq.textContent = requiredCount;
 
-    // --- 4. HANDLE BUTTON STATE (LOCK LOGIC) ---
-    const saveBtn = document.querySelector('#manual-allocation-modal button[onclick="saveManualAllocation()"]');
-    const headerDiv = document.getElementById('manual-modal-title').parentNode;
+    // Handle Header Locking
+    const saveBtn = document.getElementById('manual-save-btn');
     const existingMsg = document.getElementById('manual-lock-msg');
+    const badge = document.getElementById('manual-lock-status-badge');
     if (existingMsg) existingMsg.remove();
 
     if (!isFullEditMode) {
-        // RESTRICTED MODE
         if (saveBtn) {
             saveBtn.disabled = true;
-            saveBtn.classList.add('opacity-50', 'cursor-not-allowed', 'bg-gray-400');
-            saveBtn.classList.remove('bg-indigo-600', 'hover:bg-indigo-700');
-            saveBtn.innerHTML = "🔒 Lock Slot to Edit Assignments";
+            saveBtn.innerHTML = "🔒 Slot is Unlocked (Read Only)";
         }
-        // Add Warning Banner
-        const msg = document.createElement('div');
-        msg.id = 'manual-lock-msg';
-        msg.className = "mt-2 bg-blue-50 border border-blue-200 text-blue-800 text-[10px] p-2 rounded flex items-center gap-2";
-        msg.innerHTML = "<span>ℹ️</span> <b>Read-Only Mode:</b> You can mark Unavailability (⛔), but must <b>Admin Lock (🛡️)</b> this slot to change assignments.";
-        headerDiv.appendChild(msg);
+        if (badge) badge.classList.remove('hidden');
+        const container = document.getElementById('manual-lock-msg-container');
+        if (container) {
+            container.innerHTML = `<div id="manual-lock-msg" class="mt-1.5 inline-flex items-center gap-1.5 bg-blue-50 border border-blue-200 text-blue-800 text-[10px] px-2 py-1 rounded-md shadow-sm font-medium"><span>ℹ️</span> <b>Read-Only Mode:</b> Must <b>Admin Lock (🛡️)</b> slot in dashboard to edit.</div>`;
+        }
     } else {
-        // FULL EDIT MODE
         if (saveBtn) {
             saveBtn.disabled = false;
-            saveBtn.classList.remove('opacity-50', 'cursor-not-allowed', 'bg-gray-400');
-            saveBtn.classList.add('bg-indigo-600', 'hover:bg-indigo-700');
-            saveBtn.innerHTML = "Save Assignment Changes";
+            saveBtn.innerHTML = "Save Assignments";
         }
+        if (badge) badge.classList.add('hidden');
+        const container = document.getElementById('manual-lock-msg-container');
+        if (container) container.innerHTML = '';
     }
 
-    // --- 5. SMART SORTING & CONTEXT (Standard Logic) ---
+    // Logic Context
     const targetDate = parseDate(key);
     const monthStr = targetDate.toLocaleString('default', { month: 'long', year: 'numeric' });
     const weekNum = getWeekOfMonth(targetDate);
     const targetDateString = targetDate.toDateString();
+    
+    // Sort logic exactly as before
     const prevDate = new Date(targetDate); prevDate.setDate(targetDate.getDate() - 1);
     const nextDate = new Date(targetDate); nextDate.setDate(targetDate.getDate() + 1);
-    const prevDateStr = prevDate.toDateString();
-    const nextDateStr = nextDate.toDateString();
-
     const staffContext = {};
     staffData.forEach(s => staffContext[s.email] = { weekCount: 0, hasSameDay: false, hasAdjacent: false });
 
     Object.keys(invigilationSlots).forEach(k => {
         if (k === key) return;
-        const sSlot = invigilationSlots[k];
         const sDate = parseDate(k);
-        const sDateString = sDate.toDateString();
-        const sMonth = sDate.toLocaleString('default', { month: 'long', year: 'numeric' });
-        const sWeek = getWeekOfMonth(sDate);
-        
-        (sSlot.assigned || []).forEach(email => {
+        (invigilationSlots[k].assigned || []).forEach(email => {
             if (staffContext[email]) {
-                if (sMonth === monthStr && sWeek === weekNum) staffContext[email].weekCount++;
-                if (sDateString === targetDateString) staffContext[email].hasSameDay = true;
-                if (sDateString === prevDateStr || sDateString === nextDateStr) staffContext[email].hasAdjacent = true;
+                if (sDate.toLocaleString('default', { month: 'long', year: 'numeric' }) === monthStr && getWeekOfMonth(sDate) === weekNum) staffContext[email].weekCount++;
+                if (sDate.toDateString() === targetDateString) staffContext[email].hasSameDay = true;
+                if (sDate.toDateString() === prevDate.toDateString() || sDate.toDateString() === nextDate.toDateString()) staffContext[email].hasAdjacent = true;
             }
         });
     });
 
+    const exemptRoles = ['EXCL', 'Principal', 'Chief Superintendent', 'Chief Supt', 'CS', 'Senior Asst. Superintendent', 'Senior Assistant Superintendent', 'Senior Assistant Supt', 'SAS', 'Exam Chief'];
+    const slotTargetDateStr = `${targetDate.getFullYear()}-${String(targetDate.getMonth() + 1).padStart(2, '0')}-${String(targetDate.getDate()).padStart(2, '0')}`;
+    const targetStamp = new Date(slotTargetDateStr).getTime();
+
     const rankedStaff = staffData
-        .filter(s => s.status !== 'archived')
+        .filter(s => {
+            if (s.status === 'archived') return false;
+            
+            // 🔥 REMOVE ADMIN ROLES FROM SELECTION LIST
+            if (s.roleHistory && Array.isArray(s.roleHistory)) {
+                const isExempt = s.roleHistory.some(r => {
+                    const startStamp = new Date(r.start).getTime();
+                    const endStamp = r.end ? new Date(r.end).setHours(23, 59, 59, 999) : Infinity;
+                    return exemptRoles.includes(r.role) && targetStamp >= startStamp && targetStamp <= endStamp;
+                });
+                if (isExempt) return false; 
+            }
+            return true;
+        })
         .map(s => {
-            const done = getDutiesDoneCount(s.email);
-            const target = calculateStaffTarget(s);
-            const pending = Math.max(0, target - done);
+
+            const slotDateStr = `${targetDate.getFullYear()}-${String(targetDate.getMonth() + 1).padStart(2, '0')}-${String(targetDate.getDate()).padStart(2, '0')}`;
+            let done = 0, target = 0, pending = 0;
+            
+                // FIX: Also check if targetDate falls inside the main vacation start/end period
+                if (isDateInVacation(targetDate) || (window.vacationDutyDates && window.vacationDutyDates.includes(slotDateStr))) {
+
+                done = getVacationDutiesDoneCount(s.email);
+                // FIX: Replaced window.vacationDefaultTarget with global vacationDutyTarget
+                target = vacationDutyTarget || 0; 
+                pending = Math.max(0, target - done);
+            } else {
+
+                done = getDutiesDoneCount(s.email);
+                target = calculateStaffTarget(s);
+                pending = Math.max(0, target - done);
+            }
+
             const ctx = staffContext[s.email] || { weekCount: 0, hasSameDay: false, hasAdjacent: false };
             let score = pending * 100;
             let badges = [];
@@ -6125,251 +6706,125 @@ window.openManualAllocationModal = function (key) {
             if (ctx.hasSameDay) { score -= 2000; badges.push("Same Day"); }
             if (ctx.hasAdjacent) { score -= 1000; badges.push("Adjacent"); }
             
-            // Dept Saturation
-            const assignedList = slot.assigned || [];
-            const myDeptCount = assignedList.filter(e => {
-                const m = staffData.find(st => st.email === e);
-                return m && m.dept === s.dept;
-            }).length;
-            const totalInDept = staffData.filter(st => st.dept === s.dept).length;
-            
-            if (totalInDept > 1 && ((myDeptCount + 1) / (assignedList.length + 1) > 0.5)) {
-                score -= 500;
-                badges.push("Dept Saturation");
+            const deptStaff = (slot.assigned || []).filter(e => staffData.find(st => st.email === e)?.dept === s.dept).length;
+            if (staffData.filter(st => st.dept === s.dept).length > 1 && ((deptStaff + 1) / ((slot.assigned || []).length + 1) > 0.5)) {
+                score -= 500; badges.push("Dept Sat");
             }
-
-            return { ...s, pending, score, badges };
+            return { ...s, pending, score, badges, weekCount: ctx.weekCount + ((slot.assigned || []).includes(s.email) ? 1 : 0) };
         })
         .sort((a, b) => b.score - a.score);
 
     if (typeof lastManualRanking !== 'undefined') lastManualRanking = rankedStaff;
 
-    // --- 6. RENDER LIST ---
-    const availList = document.getElementById('manual-available-list');
-    availList.innerHTML = '';
-
     const assignedSet = new Set(slot.assigned || []);
-    let currentSelectionCount = 0;
     
-    let preFilledCount = 0;
-    rankedStaff.forEach(s => { if(assignedSet.has(s.email)) preFilledCount++; });
-    let slotsToAutoFill = Math.max(0, requiredCount - preFilledCount);
-
+    // Only mark as checked if they are ALREADY in the saved assigned list
     rankedStaff.forEach(s => {
-        const isUnavailable = isUserUnavailable(slot, s.email, key);
-        const isAssigned = assignedSet.has(s.email);
-
-        if (isUnavailable && !isAssigned) return;
-
-        let isChecked = false;
-        if (isAssigned) isChecked = true;
-        else if (slotsToAutoFill > 0) { isChecked = true; slotsToAutoFill--; }
-
-        if (isChecked) currentSelectionCount++;
-
-        const checkState = isChecked ? 'checked' : '';
-        // DISABLE CHECKBOXES IF NOT ADMIN LOCKED
-        const disabledState = !isFullEditMode ? 'disabled' : '';
-        const rowClass = isChecked ? 'bg-indigo-50' : 'hover:bg-gray-50';
-        const pendingColor = s.pending > 0 ? 'text-red-600' : 'text-green-600';
-        const warningHtml = s.badges.map(b => `<span class="ml-1 text-[9px] bg-orange-100 text-orange-700 px-1 py-0.5 rounded border border-orange-200">${b}</span>`).join('');
-
-        // ⛔ Button is ALWAYS enabled (even if not locked)
-        const unavailBtn = `
-            <button onclick="adminMarkUnavailable('${key}', '${s.email}')" 
-                    class="ml-2 text-gray-400 hover:text-red-500 hover:bg-red-50 p-1 rounded transition" 
-                    title="Mark Unavailable">
-                ⛔
-            </button>`;
-
-        availList.innerHTML += `
-            <tr class="${rowClass} border-b last:border-0 transition text-xs">
-                <td class="px-1 py-2 md:px-3 text-center w-8 md:w-10">
-                    <input type="checkbox" class="manual-chk w-4 h-4 text-indigo-600 rounded disabled:opacity-50" value="${s.email}" ${checkState} ${disabledState} onchange="window.updateManualCounts()">
-                </td>
-                <td class="px-2 py-2 md:px-3">
-                    <div class="flex flex-col md:flex-row md:items-center">
-                        <div class="flex items-center">
-                            <span class="font-bold text-gray-800 mr-1.5 truncate text-xs md:text-sm">${s.name}</span>
-                            <div class="flex flex-wrap gap-0.5">${warningHtml}</div>
-                        </div>
-                        <div class="text-[10px] text-gray-500 leading-tight mt-0.5 md:mt-0 md:ml-1">
-                            <span class="md:hidden">• </span>${s.dept} <span class="hidden md:inline">| ${s.designation}</span>
-                        </div>
-                    </div>
-                </td>
-                <td class="px-2 py-2 md:px-3 text-center w-16 md:w-20">
-                     <div class="flex items-center justify-center gap-1">
-                        <span class="font-mono font-bold ${pendingColor} text-xs md:text-sm">${s.pending}</span>
-                        ${unavailBtn}
-                     </div>
-                </td>
-            </tr>`;
+        s.isChecked = assignedSet.has(s.email);
     });
 
-    if (availList.innerHTML === "") {
-        availList.innerHTML = `<tr><td colspan="3" class="text-center p-4 text-gray-500 italic">No available staff found.</td></tr>`;
-    }
 
-    // 7. Render Unavailable List
+    window.manualState = { rankedStaff, isFullEditMode, key, slotInfo: slot };
+    renderManualCards();
+
+    // Render Unavailable List manually at bottom right
     const unavList = document.getElementById('manual-unavailable-list');
     unavList.innerHTML = '';
     const allUnavailable = [];
     if (slot.unavailable) slot.unavailable.forEach(u => allUnavailable.push({...u, type: 'Session'}));
 
-    // Merge Advance
     const [dateStr, timeStr] = key.split(' | ');
     let session = "FN";
-    const t = timeStr ? timeStr.toUpperCase() : "";
-    if (t.includes("PM") || t.startsWith("12:") || t.startsWith("12.")) session = "AN";
+    if (timeStr && (timeStr.toUpperCase().includes("PM") || timeStr.startsWith("12:") || timeStr.startsWith("12."))) session = "AN";
 
     if (advanceUnavailability && advanceUnavailability[dateStr] && advanceUnavailability[dateStr][session]) {
         advanceUnavailability[dateStr][session].forEach(u => {
              const email = (typeof u === 'string') ? u : u.email;
              if (!allUnavailable.some(existing => (typeof existing.email === 'undefined' ? existing : existing.email) === email)) {
-                 const entry = (typeof u === 'string') ? { email: u, reason: "Advance Leave" } : u;
-                 allUnavailable.push({...entry, type: 'Advance'});
+                 allUnavailable.push({...((typeof u === 'string') ? { email: u, reason: "Advance Leave" } : u), type: 'Advance'});
              }
         });
     }
 
+    // --- START OF NEW CODE ---
+    // Check for active roles EXCL, Principal, CS, SAS
+   
+    staffData.forEach(s => {
+        if (s.roleHistory && Array.isArray(s.roleHistory)) {
+            s.roleHistory.forEach(r => {
+                // Check if they hold one of the targeted roles
+                                // FIX: Added full spelling of CS and SAS roles to catch them properly
+                if (['EXCL', 'Principal', 'Chief Superintendent', 'Chief Supt', 'CS', 'Senior Asst. Superintendent', 'Senior Assistant Superintendent', 'Senior Assistant Supt', 'SAS', 'Exam Chief'].includes(r.role)) {
+                    // FIX: Process mathematically as exact timestamps to destroy formatting bugs
+                    const targetStamp = new Date(slotTargetDateStr).getTime();
+                    const startStamp = new Date(r.start).getTime();
+                    const endStamp = r.end ? new Date(r.end).setHours(23, 59, 59, 999) : Infinity;
+
+                    if (targetStamp >= startStamp && targetStamp <= endStamp) {
+
+                        // Prevent duplicates if they were already marked unavailable
+                        if (!allUnavailable.some(existing => (typeof existing.email === 'undefined' ? existing : existing.email) === s.email)) {
+                            allUnavailable.push({
+                                email: s.email,
+                                reason: `Admin Role: ${r.role}`,
+                                type: 'Role',
+                                role: r.role
+                            });
+                        }
+                    }
+                }
+            });
+        }
+    });
+    // --- END OF NEW CODE ---
+
+
+
+    
     if (allUnavailable.length > 0) {
+                // --- REPLACE THE ORIGINAL FOREACH LOOP WITH THIS ONE ---
         allUnavailable.forEach(u => {
-            const email = (typeof u === 'string') ? u : u.email;
+            const email = typeof u === 'string' ? u : u.email;
             const reason = (typeof u === 'object' && u.reason) ? u.reason : "Marked Unavailable";
             const s = staffData.find(st => st.email === email) || { name: email };
-            const isAdvance = u.type === 'Advance';
-            const removeAction = `adminRemoveUnavailable('${key}', '${email}', ${isAdvance})`;
+            
+            // Determine the badge text based on the unavailability type
+            let badgeText = 'This Slot';
+            if (u.type === 'Advance') badgeText = 'Full Day';
+            if (u.type === 'Role') badgeText = u.role;
 
             unavList.innerHTML += `
-                <div class="bg-white p-2 rounded border border-red-100 text-[10px] md:text-xs shadow-sm mb-1 flex justify-between items-center">
-                    <div class="flex items-center gap-2">
-                         <span class="font-bold text-red-700 truncate">${s.name}</span>
-                         <span class="text-[9px] text-gray-400">(${isAdvance ? 'Gen' : 'Slot'})</span>
+                <div class="bg-white p-2.5 rounded-lg border border-red-200 shadow-sm flex flex-col gap-1">
+                    <div class="flex items-center justify-between">
+                        <span class="font-black text-red-800 text-[11px] truncate">${s.name}</span>
+                        <span class="text-[9px] bg-red-50 text-red-600 px-1 border border-red-100 rounded font-bold">${badgeText}</span>
                     </div>
-                    <div class="flex items-center gap-2">
-                        <span class="text-gray-500 bg-gray-50 px-1.5 py-0.5 rounded whitespace-nowrap">${reason}</span>
-                        <button onclick="${removeAction}" class="text-red-400 hover:text-red-600 hover:bg-red-50 rounded px-1 font-bold text-sm">×</button>
+                    <div class="flex items-center justify-between mt-1 pt-1 border-t border-red-50">
+                        <span class="text-[10px] text-gray-500 font-medium truncate">${reason}</span>
+                        ${u.type === 'Role' ? '' : `<button onclick="adminRemoveUnavailable('${key}', '${email}', ${u.type === 'Advance'})" class="text-red-500 hover:text-white hover:bg-red-500 border border-red-200 rounded px-2 py-0.5 font-bold text-[10px] transition shadow-sm">Remove</button>`}
                     </div>
                 </div>`;
         });
+        // --- END REPLACEMENT ---
     } else {
-        unavList.innerHTML = `<div class="text-center text-gray-400 text-xs py-4 italic">No requests.</div>`;
+        unavList.innerHTML = `<div class="col-span-full py-6 text-center text-red-400 text-xs font-bold italic">No requests.</div>`;
     }
 
-    document.getElementById('manual-sel-count').textContent = currentSelectionCount;
     window.openModal('manual-allocation-modal');
 }
 
-
-
 window.updateManualCounts = function () {
-    const count = document.querySelectorAll('.manual-chk:checked').length;
-    document.getElementById('manual-sel-count').textContent = count;
+    // Legacy function replaced by State Engine renderManualCards
 }
 
-window.saveManualAllocation = async function () {
-    const key = document.getElementById('manual-session-key').value;
-    
-    // --- SECURITY CHECK ---
-    if (!invigilationSlots[key].isAdminLocked) {
-        return alert("⚠️ Security Alert\n\nThis slot is currently OPEN. You must 'Lock (🛡️)' it before you can manually edit staff assignments.");
-    }
-
-    const selectedEmails = Array.from(document.querySelectorAll('.manual-chk:checked')).map(c => c.value);
-
-    if (invigilationSlots[key]) {
-        // ... (Existing Logic for Log Generation and Metadata) ...
-        const timestamp = new Date().toLocaleString('en-GB', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }).toUpperCase();
-        const adminName = currentUser ? currentUser.email : "Admin";
-
-        let logHtml = "";
-        if (typeof lastManualRanking !== 'undefined' && lastManualRanking.length > 0) {
-             // ... (Keep your existing log generation logic here) ...
-             // Re-paste the logic from previous turn if needed, or just wrap this check around existing function body
-             logHtml = `
-                <div class="mb-3 pb-2 border-b border-gray-200">
-                    <div class="font-bold text-gray-800">Assignment Logic Report</div>
-                    <div class="text-[10px] text-gray-500">${timestamp} by ${adminName}</div>
-                </div>
-                <div class="mb-3">
-                    <div class="text-xs font-bold text-green-700 uppercase mb-1">Assigned Staff (${selectedEmails.length})</div>`;
-             
-             selectedEmails.forEach((email, i) => {
-                const rankData = lastManualRanking.find(s => s.email === email);
-                if (rankData) {
-                    const warnings = rankData.badges.length > 0 ? `<span class="text-red-600 font-bold ml-1">[${rankData.badges.join(', ')}]</span>` : "";
-                    logHtml += `<div class="text-xs mb-1">${i + 1}. <b>${rankData.name}</b> <span class="text-gray-500">(Score: ${rankData.score})</span> ${warnings}</div>`;
-                } else {
-                    logHtml += `<div class="text-xs mb-1">${i + 1}. ${getNameFromEmail(email)} (Manually Added)</div>`;
-                }
-            });
-            logHtml += `</div>`;
-        } else {
-            logHtml = `<div class="text-gray-500 italic">Log not available (Session reloaded).</div>`;
-        }
-
-        const slot = invigilationSlots[key];
-        const oldAssigned = new Set(slot.assigned || []);
-
-        slot.allocationLog = logHtml;
-        slot.assigned = selectedEmails;
-
-        // GOD MODE UPDATE
-        selectedEmails.forEach(email => {
-            if (!oldAssigned.has(email) || !slot.assignmentMeta?.[email]) {
-                updateAssignmentMeta(slot, email, 'ADMIN');
-            }
-        });
-        
-        if (slot.assignmentMeta) {
-            Object.keys(slot.assignmentMeta).forEach(e => {
-                if (!selectedEmails.includes(e)) delete slot.assignmentMeta[e];
-            });
-        }
-
-        if (typeof logActivity === 'function') logActivity("Manual Assignment", `Assigned ${selectedEmails.length} staff to session ${key}`);
-
-        await syncSlotsToCloud();
-        window.closeModal('manual-allocation-modal');
-        renderSlotsGridAdmin();
-    }
-}
-
-
-
-window.switchAdminTab = function (tabName) {
-    const tabs = ['staff', 'slots', 'attendance'];
-
-    tabs.forEach(t => {
-        const content = document.getElementById(`tab-content-${t}`);
-        const btn = document.getElementById(`tab-btn-${t}`);
-
-        if (t === tabName) {
-            // --- ACTIVE STATE (White Card + Shadow) ---
-            if (content) content.classList.remove('hidden');
-            if (btn) {
-                btn.className = "flex-1 py-2 px-2 text-xs md:text-sm font-bold rounded-lg transition shadow bg-white text-indigo-600 text-center";
-            }
-        } else {
-            // --- INACTIVE STATE (Gray + No Shadow) ---
-            if (content) content.classList.add('hidden');
-            if (btn) {
-                btn.className = "flex-1 py-2 px-2 text-xs md:text-sm font-bold rounded-lg transition text-gray-500 hover:bg-gray-200 text-center";
-            }
-        }
-    });
-}
-
-// --- MANUAL ALLOCATION HELPER: Unselect All ---
 window.unselectAllManualStaff = function () {
-    const checkboxes = document.querySelectorAll('.manual-chk');
-    checkboxes.forEach(chk => {
-        chk.checked = false;
-    });
-    // Update the "Selected/Required" counter immediately
-    window.updateManualCounts();
+    if (!window.manualState.isFullEditMode) return;
+    window.manualState.rankedStaff.forEach(s => s.isChecked = false);
+    renderManualCards();
 }
+
+
+
 
 // --- BULK CANCEL FUNCTION ---
 window.cancelBulkSending = function () {
@@ -6434,11 +6889,22 @@ function setupSearchHandler(inputId, resultsId, hiddenId, excludeCurrentList) {
         } else {
             matches.forEach(s => {
                 const div = document.createElement('div');
+                
+               
                 div.className = "p-2 hover:bg-indigo-50 cursor-pointer border-b border-gray-100 last:border-0 transition flex justify-between items-center";
+                                // Start NEW code
+                const currentSessionKey = document.getElementById('manual-session-key').value;
+                const dynamicPending = getPendingCountForSession(s.email, currentSessionKey);
+                
                 div.innerHTML = `
                     <span class="font-bold text-gray-800 text-xs">${s.name}</span>
-                    <span class="text-[9px] text-gray-500 uppercase bg-gray-50 px-1 rounded">${s.dept}</span>
+                    <div class="flex items-center gap-2">
+                        <span class="text-[9px] text-gray-500 uppercase bg-gray-50 px-1 rounded">${s.dept}</span>
+                        <span class="text-[10px] font-bold ${dynamicPending > 0 ? 'text-red-500' : 'text-green-500'}">P: ${dynamicPending}</span>
+                    </div>
                 `;
+                // End NEW code
+
 
                 // --- CHANGED: ONCLICK LOGIC WITH AUTO-SWAP ---
                 div.onclick = () => {
@@ -6744,231 +7210,224 @@ function openRescheduleNotification(staffList, oldKey, newKey) {
 // 📄 DUTY NOTIFICATION PREVIEW (No Signature, No Blank Page)
 // ==========================================
 
+
 window.printDutyNotification = function (key) {
     const slot = invigilationSlots[key];
     if (!slot || slot.assigned.length === 0) return alert("No staff assigned to this session.");
 
-    // 1. DATA PREPARATION
     const [dateStr, timeStr] = key.split(' | ');
     const [d, m, y] = dateStr.split('.');
     const examDate = new Date(`${y}-${m}-${d}`);
-
     const excelBaseDate = new Date(1899, 11, 30);
     const dayDiff = Math.floor((examDate - excelBaseDate) / (1000 * 60 * 60 * 24));
-
     const isAN = (timeStr.includes("PM") || timeStr.startsWith("12:") || timeStr.startsWith("12."));
     const sessionCode = isAN ? "AN" : "FN";
     const reportTime = calculateReportTime(timeStr);
-    const logoUrl = "CollegeLogo.png";
 
-    // 2. LAYOUT LOGIC (Limit 20)
     const totalStaff = slot.assigned.length;
-    const useTwoColumns = totalStaff > 20;
+    let cols = totalStaff > 32 ? 3 : (totalStaff > 16 ? 2 : 1);
 
-    const generateRow = (email, idx) => {
-        const staff = staffData.find(s => s.email === email) || { name: getNameFromEmail(email), dept: "", phone: "" };
-        let phone = staff.phone || "-";
+    const staffListJson = JSON.stringify(slot.assigned.map((email, idx) => {
+        const staff = staffData.find(s => s.email === email) || { name: getNameFromEmail(email), dept: "", phone: "-" };
         let nameDisplay = staff.name.length > 28 ? staff.name.substring(0, 26) + ".." : staff.name;
+        return { no: idx + 1, name: nameDisplay, dept: staff.dept, phone: staff.phone || "-" };
+    }));
 
-        return `
-            <tr>
-                <td style="text-align: center;">${idx + 1}</td>
-                <td>
-                    <div style="font-weight: bold;">${nameDisplay}</div>
-                    <div style="font-size: 9pt; color: #444;">${staff.dept}</div>
-                </td>
-                <td style="text-align: center; font-size: 9pt;">${phone}</td>
-            </tr>
-        `;
-    };
-
-    let tableContentHtml = "";
-
-    if (useTwoColumns) {
-        // --- 2 COLUMN LAYOUT (No Signature) ---
-        const mid = Math.ceil(totalStaff / 2);
-        const leftList = slot.assigned.slice(0, mid);
-        const rightList = slot.assigned.slice(mid);
-
-        const renderMiniTable = (list, startIdx) => `
-            <table class="staff-table" style="width: 100%; font-size: 9pt;">
-                <thead>
-                    <tr>
-                        <th style="width: 25px;">No</th>
-                        <th>Name & Dept</th>
-                        <th style="width: 80px;">Mobile</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${list.map((email, i) => generateRow(email, startIdx + i)).join('')}
-                </tbody>
-            </table>
-        `;
-
-        tableContentHtml = `
-            <div style="display: flex; gap: 15px; align-items: flex-start;">
-                <div style="flex: 1;">
-                    ${renderMiniTable(leftList, 0)}
-                </div>
-                <div style="flex: 1;">
-                    ${renderMiniTable(rightList, mid)}
-                </div>
-            </div>
-        `;
-    } else {
-        // --- 1 COLUMN LAYOUT (No Signature) ---
-        tableContentHtml = `
-            <table class="staff-table" style="width: 100%; margin-top: 10px;">
-                <thead>
-                    <tr>
-                        <th style="width: 40px;">SL. NO</th>
-                        <th>Name and Department of the Invigilator</th>
-                        <th style="width: 120px;">Mobile</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${slot.assigned.map((email, i) => generateRow(email, i)).join('')}
-                </tbody>
-            </table>
-        `;
-    }
-
-    // 3. OPEN PREVIEW WINDOW
     const w = window.open('', '_blank');
     w.document.write(`
         <html>
         <head>
             <title>Notification_${dateStr}_${sessionCode}</title>
-            <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"><\/script>
+            <script src="jspdf.umd.min.js"><\/script>
+            <script src="jspdf.plugin.autotable.min.js"><\/script>
             <style>
-                @import url('https://fonts.googleapis.com/css2?family=Times+New+Roman&display=swap');
-                
-                body { font-family: 'Times New Roman', serif; background: #f3f4f6; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
-                
-                /* CONTROL BAR */
-                #controls {
-                    margin-bottom: 20px; background: white; padding: 10px 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-                }
-                .btn {
-                    padding: 10px 20px; font-weight: bold; border: none; border-radius: 4px; cursor: pointer; font-family: sans-serif; font-size: 14px; margin: 0 5px;
-                }
-                .btn-print { background-color: #374151; color: white; }
+                body { font-family: 'Times New Roman', serif; background: #f3f4f6; margin: 0; padding: 20px; text-align: center; }
+                #controls { margin-bottom: 20px; background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); display: inline-block; }
+                .btn { padding: 10px 20px; font-weight: bold; border: none; border-radius: 4px; cursor: pointer; font-size: 15px; margin: 0 5px; }
                 .btn-download { background-color: #2563eb; color: white; }
-                .btn:hover { opacity: 0.9; }
-
-                /* CONTENT CONTAINER */
-                .content-wrapper {
-                    width: 100%; 
-                    max-width: 200mm; /* Fits safely inside A4 */
-                    /* CHANGED FROM min-height: 297mm TO auto */
-                    height: auto; 
-                    min-height: 100mm; 
-                    background: white;
-                    padding: 10mm 15mm;
-                    box-sizing: border-box;
-                    box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+                p { color: #555; font-size: 14px; margin-top: 10px;}
+                
+                /* New Preview Styles */
+                .preview-page { 
+                    width: 210mm; min-height: 297mm; padding: 15mm; 
+                    margin: 20px auto; background: white; 
+                    box-shadow: 0 0 10px rgba(0,0,0,0.1); text-align: left; 
+                    color: #000; position: relative; font-size: 11pt;
                 }
-
-                .header { text-align: center; margin-bottom: 15px; }
-                .header img { height: 60px; width: auto; margin-bottom: 5px; }
-                .college-name { font-size: 14pt; font-weight: bold; text-transform: uppercase; line-height: 1.2; }
-                .address { font-size: 9pt; }
-                .meta { font-size: 9pt; font-weight: bold; margin-top: 4px; border-bottom: 1px solid #000; padding-bottom: 8px; }
-                
-                .title-section { margin: 12px 0; display: flex; justify-content: space-between; align-items: flex-end; }
-                .designation { font-weight: bold; font-size: 11pt; text-align: left; line-height: 1.2; }
-                .doc-number { font-weight: bold; font-size: 11pt; text-align: right; line-height: 1.2; }
-                
-                .body-text { font-size: 11pt; text-align: justify; margin-bottom: 12px; line-height: 1.3; }
-                
-                .highlight-box { 
-                    font-weight: bold; margin: 12px 0; font-size: 10pt; 
-                    border: 1px solid #000; padding: 6px; text-align: center; background: #f9f9f9; 
-                }
-                
-                /* TABLE */
-                .staff-table { width: 100%; border-collapse: collapse; margin-top: 5px; }
-                .staff-table th, .staff-table td { border: 1px solid black; padding: 5px; vertical-align: middle; }
-                .staff-table th { background-color: #f0f0f0; text-align: center; font-weight: bold; font-size: 10pt; }
-                
-                .footer { margin-top: 40px; text-align: right; font-weight: bold; font-size: 11pt; }
-                .signature-line { display: inline-block; text-align: center; }
-
-                /* PRINT HIDING */
-                @media print {
-                    body { background: white; padding: 0; }
-                    #controls { display: none !important; }
-                    .content-wrapper { box-shadow: none; width: 100%; margin: 0; padding: 0; }
-                    @page { margin: 15mm; }
-                }
+                .preview-header { text-align: center; border-bottom: 2px solid #000; padding-bottom: 5px; margin-bottom: 15px; position: relative; }
+                .preview-table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 9pt; }
+                .preview-table th, .preview-table td { border: 1px solid #000; padding: 4px; text-align: left; }
+                .preview-table th { background: #f0f0f0; }
+                .justified { text-align: justify; line-height: 1.5; margin: 15px 0; }
+                @media print { #controls { display: none; } body { background: white; padding: 0; margin: 0; } .preview-page { box-shadow: none; margin: 0; width: 100%; border: 0; } }
             </style>
+
         </head>
-        <body>
-            
+                <body>
             <div id="controls">
-                <button class="btn btn-print" onclick="window.print()">🖨️ Print</button>
-                <button class="btn btn-download" onclick="downloadPDF()">⬇️ Download PDF</button>
+                <h2>Native Vector PDF Ready</h2>
+                <button class="btn btn-download" onclick="downloadVectorPDF()">⬇️ Instantly Download PDF</button>
+                <p>Click the button to generate a crisp, selectable, single-page native PDF.</p>
             </div>
 
-            <div class="content-wrapper" id="pdf-content">
-                <div class="header">
-                    <img src="${logoUrl}" alt="Logo" onerror="this.style.display='none'"> 
-                    <div class="college-name">GOVERNMENT VICTORIA COLLEGE, PALAKKAD</div>
-                    <div class="address">Kerala, India, PIN 678001 | Affiliation: University of Calicut</div>
-                    <div class="meta">📞 0491 2576773 | ✉️ victoriapkd@gmail.com | 🌐 www.gvc.ac.in</div>
+            <div id="preview-page" class="preview-page">
+                <div class="preview-header">
+                    <img src="CollegeLogo.png" style="width: 50px; display: block; margin: 0 auto 5px;">
+                    <h1 style="font-size: 15pt; margin: 0;">GOVERNMENT VICTORIA COLLEGE, PALAKKAD</h1>
+                    <p style="font-size: 8pt; margin: 2px 0;">Kerala, India, PIN 678001 | Affiliation: University of Calicut</p>
+                    <p style="font-size: 8pt; margin: 2px 0;">Phone: 0491 2576773 | Email: victoriapkd@gmail.com</p>
                 </div>
 
-                <div class="title-section">
-                    <div class="designation">Chief Superintendent,<br>University Examinations</div>
-                    <div class="doc-number">No: EXAM/${dayDiff}${sessionCode}<br>Date: ${new Date().toLocaleDateString('en-GB')}</div>
+                <div style="display: flex; justify-content: space-between; font-weight: bold; font-size: 10pt; margin-bottom: 15px;">
+                    <div>Chief Superintendent</div>
+                    <div style="text-align: right;">No: EXAM/${dayDiff}${sessionCode}<br>Date: ${new Date().toLocaleDateString('en-GB')}</div>
                 </div>
 
-                <div class="body-text">
-                    The following teachers have been assigned invigilation duty for the upcoming Calicut University examinations. 
-                    Invigilators are requested to report to the Chief Superintendent's office <strong>30 minutes before</strong> the commencement of the exam.
-                    In case of any inconvenience, invigilators must arrange for a substitute and inform the office accordingly.
+                <div class="justified">
+                    The following teachers have been assigned invigilation duty for the upcoming Calicut University examinations. Invigilators are requested to report to the Chief Superintendent's office 30 minutes before the commencement of the exam. 
                 </div>
 
-                <div class="highlight-box">
-                    EXAM DATE: ${dateStr} &nbsp;|&nbsp; SESSION: ${sessionCode} (${timeStr}) &nbsp;|&nbsp; REPORT BY: ${reportTime}
+                <div style="background: #f5f5f5; border: 1px solid #ccc; padding: 8px; text-align: center; font-weight: bold; font-size: 9pt;">
+                    EXAM: ${dateStr}   |   SESSION: ${sessionCode}   |   REPORT BY: ${reportTime}
                 </div>
 
-                ${tableContentHtml}
+                <table class="preview-table">
+                    <thead>
+                        <tr><th>No</th><th>Name & Dept</th><th>Mobile</th></tr>
+                    </thead>
+                    <tbody id="preview-table-body"></tbody>
+                </table>
 
-                <div class="footer">
-                    <div class="signature-line">Chief Superintendent</div>
-                </div>
+                <div style="margin-top: 40px; text-align: right; font-weight: bold;">Chief Superintendent</div>
             </div>
 
             <script>
-                function downloadPDF() {
-                    const element = document.getElementById('pdf-content');
+
+                function downloadVectorPDF() {
                     const btn = document.querySelector('.btn-download');
-                    btn.textContent = "Generating...";
+                    btn.textContent = "Generating Vector PDF...";
                     btn.disabled = true;
 
-                    const opt = {
-                        margin: 10, 
-                        filename: 'Duty_Notification_${dateStr}.pdf',
-                        image: { type: 'jpeg', quality: 0.98 },
-                        html2canvas: { scale: 2, useCORS: true },
-                        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
-                    };
+                    setTimeout(() => {
+                        const { jsPDF } = window.jspdf;
+                        const doc = new jsPDF('p', 'mm', 'a4');
+                        const staffList = ${staffListJson};
+                        const cols = ${cols};
+                // Add College Logo (Relative to your root)
+                        try {
+                            // Positioning: x=12, y=8, w=15, h=15 (Adjust if needed)
+                            doc.addImage("CollegeLogo.png", "PNG", 97.5, 5, 15, 15);
+                        } catch (e) {
+                            console.warn("Logo failed to load:", e);
+                        }
 
-                    html2pdf().set(opt).from(element).save().then(() => {
-                        btn.textContent = "✅ Downloaded";
-                        setTimeout(() => { 
-                            btn.textContent = "⬇️ Download PDF"; 
-                            btn.disabled = false; 
-                        }, 2000);
-                    });
+                        doc.setFont("times", "bold");
+                        doc.setFontSize(14);
+    // Shifted down to accommodate the top-center logo
+    doc.text("GOVERNMENT VICTORIA COLLEGE, PALAKKAD", 105, 25, { align: "center" });
+    doc.setFontSize(8);
+    doc.text("Kerala, India, PIN 678001 | Affiliation: University of Calicut", 105, 29, { align: "center" });
+    doc.text("Phone: 0491 2576773 | Email: victoriapkd@gmail.com", 105, 33, { align: "center" });
+    doc.setLineWidth(0.3);
+    doc.line(10, 35, 200, 35); // Horizontal line moved down to y=35
+
+
+                    doc.setFontSize(10);
+                        doc.text("Chief Superintendent, University Examinations", 10, 42);
+                        doc.text("No: EXAM/${dayDiff}${sessionCode}", 200, 42, { align: "right" });
+                        doc.text("Date: ${new Date().toLocaleDateString('en-GB')}", 200, 46, { align: "right" });
+
+                        // Justified Letter Text
+                        doc.setFont("times", "normal");
+                        const letterText = "The following teachers have been assigned invigilation duty for the upcoming Calicut University examinations. Invigilators are requested to report to the Chief Superintendent's office 30 minutes before the commencement of the exam. In case of any inconvenience, invigilators must arrange for a substitute from the same department and inform the office accordingly.";
+                        
+                        const splitText = doc.splitTextToSize(letterText, 190);
+                        // 🔥 Shifted to y=52
+                        doc.text(splitText, 10, 52, { maxWidth: 190, align: "justify" });
+
+                        doc.setDrawColor(0);
+                        doc.setFillColor(245, 245, 245);
+                        // 🔥 Shifted to y=64
+                        doc.rect(10, 64, 190, 7, "FD");
+                        doc.setFont("times", "bold");
+                        doc.setFontSize(9);
+                        // 🔥 Shifted to y=68.5
+                        doc.text("EXAM: ${dateStr}   |   SESSION: ${sessionCode} (${timeStr})   |   REPORT BY: ${reportTime}", 105, 68.5, { align: "center" });
+
+
+                        let rowsPerCol = Math.ceil(staffList.length / cols);
+                        let headRow = [];
+                        let colConfig = {};
+
+                        
+                        for (let c = 0; c < cols; c++) {
+                            headRow.push("No", "Name & Dept", "Mobile");
+                            const offset = c * 3;
+                            colConfig[offset] = { halign: "center", cellWidth: 8 };
+                            colConfig[offset + 1] = { cellWidth: "auto" };
+                            colConfig[offset + 2] = { halign: "center", cellWidth: 18 };
+                        }
+
+                        let tableRows = [];
+                        for (let r = 0; r < rowsPerCol; r++) {
+                            let row = [];
+                            for (let c = 0; c < cols; c++) {
+                                let idx = c * rowsPerCol + r;
+                                if (idx < staffList.length) {
+                                    let s = staffList[idx];
+                                    row.push(s.no, s.name + "\\n" + s.dept, s.phone);
+                                } else {
+                                    row.push("", "", "");
+                                }
+                            }
+                            tableRows.push(row);
+                        }
+
+                        doc.autoTable({
+                            startY: 73,
+                            head: [headRow],
+                            body: tableRows,
+                            theme: "grid",
+                            headStyles: { fillColor: [230, 230, 230], textColor: [0, 0, 0], fontStyle: "bold", halign: "center" },
+                            styles: { fontSize: 8, font: "times", cellPadding: 1, valign: "middle", textColor: [20, 20, 20] },
+                            columnStyles: colConfig,
+                            margin: { left: 10, right: 10, bottom: 20 }
+                        });
+
+                        const finalY = doc.lastAutoTable.finalY || 200;
+                        doc.setFontSize(11);
+                        doc.setFont("times", "bold");
+                        doc.text("Chief Superintendent", 190, finalY + 15, { align: "right" });
+
+                        doc.save("Duty_Notification_${dateStr}_${sessionCode}.pdf");
+                        
+                        btn.textContent = "✅ File Saved!";
+                        setTimeout(() => { btn.textContent = "⬇️ Instantly Download PDF"; btn.disabled = false; }, 2000);
+                    }, 300);
                 }
+
+                // Populate HTML table on load
+                (function render() {
+                    const staff = ${staffListJson};
+                    const tbody = document.getElementById('preview-table-body');
+                    staff.forEach(s => {
+                        // 🔥 BOTH backticks must have a \ before them!
+                        tbody.innerHTML += \`<tr>
+                            <td style="text-align: center;">\${s.no}</td>
+                            <td><b>\${s.name}</b><br><small>\${s.dept}</small></td>
+                            <td style="text-align: center;">\${s.phone}</td>
+                        </tr>\`;
+;
+                    });
+                })();
             <\/script>
+
         </body>
         </html>
     `);
     w.document.close();
 }
+
 
 
 // Network Listeners
@@ -7568,30 +8027,66 @@ function isActionAllowed(dateInput) {
 // NOTE: 'vacationExtraHolidays', 'vacationStart', 'vacationEnd' are defined in Global State at top.
 
 window.openVacationReportModal = function() {
-    // 1. Set Inputs from Saved State (or defaults)
-    const today = new Date();
-    const year = today.getFullYear();
-    
-    // Use saved values if they exist, otherwise default to April-May
-    const startVal = vacationStart || `${year}-04-01`;
-    const endVal = vacationEnd || `${year}-05-31`;
+    try {
+        const today = new Date();
+        const year = today.getFullYear();
+        
+        const startVal = vacationStart || `${year}-04-01`;
+        const endVal = vacationEnd || `${year}-05-31`;
 
-    const startInput = document.getElementById('vac-start');
-    const endInput = document.getElementById('vac-end');
+        const startInput = document.getElementById('vac-start');
+        const endInput = document.getElementById('vac-end');
 
-    startInput.value = startVal;
-    endInput.value = endVal;
+        if (!startInput || !endInput) return alert("Missing vac-start or vac-end in HTML");
 
-    // 2. Attach Auto-Save Listeners
-    startInput.onchange = saveVacationConfig;
-    endInput.onchange = saveVacationConfig;
-    
-    // 3. Clear Input & Render
-    document.getElementById('vac-holiday-input').value = "";
-    renderVacationHolidays();
-    
-    window.openModal('vacation-report-modal');
+        startInput.value = startVal;
+        endInput.value = endVal;
+
+        startInput.onchange = saveVacationConfig;
+        endInput.onchange = saveVacationConfig;
+        
+        const holidayInput = document.getElementById('vac-holiday-input');
+        if (holidayInput) holidayInput.value = "";
+        
+        renderVacationHolidays();
+        
+        // --- THE FIX: Yank the modal to the body root and force visibility ---
+        const modal = document.getElementById('vacation-report-modal');
+        if (modal) {
+            // Move it out of any hidden containers
+            if (modal.parentElement !== document.body) {
+                document.body.appendChild(modal); 
+            }
+            modal.classList.remove('hidden');
+            // Force styles just in case Tailwind is overriding it
+            modal.style.display = 'flex';
+            modal.style.zIndex = '999999';
+            modal.style.visibility = 'visible';
+            modal.style.opacity = '1';
+        }
+
+    } catch (e) {
+        console.error("Crash inside openVacationReportModal:", e);
+        alert("Error: " + e.message);
+    }
 }
+
+
+// Add this anywhere in invigilation.js to ensure the Cancel button works
+const originalCloseModal = window.closeModal;
+window.closeModal = function(id) {
+    if (id === 'vacation-report-modal') {
+        const modal = document.getElementById(id);
+        if (modal) {
+            modal.style.display = 'none';
+            modal.classList.add('hidden');
+        }
+    } else {
+        originalCloseModal(id);
+    }
+}
+
+
 
 // --- CLOUD SAVING FUNCTION ---
 async function saveVacationConfig() {
@@ -8151,7 +8646,7 @@ window.showLiveStaffModal = function() {
         </div>
     `;
 
-    if(typeof UiModal !== 'undefined') UiModal.show("Live Status", html);
+    if(typeof UiModal !== 'undefined') UiModal.alert("Live Status", html);
     else alert(online.map(o => o.name).join('\n'));
 };
 // ==========================================
@@ -8468,12 +8963,72 @@ window.openGhostUnavailabilityModal = function(title, encodedList) {
     }
 };
 
-// Helper to close the specific ghost modal
+// Helper to close modals (updated for forced display)
 window.closeModal = function(id) {
     const m = document.getElementById(id);
-    if(m) m.classList.add('hidden');
+    if(m) {
+        m.classList.add('hidden');
+        if (id === 'vacation-report-modal') {
+            m.style.display = 'none'; // Re-hide the forced visibility
+        }
+    }
 };
 
+
+// --- EXTRA MATH DATES LOGIC ---
+window.addVacationMathDate = function() {
+    const input = document.getElementById('vacation-math-date-input');
+    const dateVal = input.value; // YYYY-MM-DD
+    
+    if (!dateVal) return;
+    if (!window.vacationDutyDates) window.vacationDutyDates = [];
+
+    if (window.vacationDutyDates.includes(dateVal)) {
+        alert("This date is already in the math list.");
+        return;
+    }
+
+    window.vacationDutyDates.push(dateVal);
+    renderVacationMathDates();
+    input.value = ""; // Clear input
+}
+
+window.removeVacationMathDate = function(dateStr) {
+    if (!window.vacationDutyDates) return;
+    // Remove it from the live array
+    window.vacationDutyDates = window.vacationDutyDates.filter(d => d !== dateStr);
+    renderVacationMathDates();
+}
+
+function renderVacationMathDates() {
+    const list = document.getElementById('vacation-math-date-list');
+    if (!list) return;
+    list.innerHTML = '';
+
+    if (!window.vacationDutyDates || window.vacationDutyDates.length === 0) {
+        list.innerHTML = '<span class="text-xs text-indigo-400 italic self-center pl-1">No extra dates added.</span>';
+        return;
+    }
+
+    const sortedDates = [...window.vacationDutyDates].sort();
+    
+    // Check if the add button is currently locked so we know if we can show the "X" button
+    const btn = document.getElementById('vacation-math-date-btn');
+    const isLocked = btn ? btn.disabled : true;
+
+    sortedDates.forEach(dateStr => {
+        const [y, m, d] = dateStr.split('-');
+        const displayDate = `${d}.${m}.${y}`;
+
+        const item = document.createElement('div');
+        item.className = "inline-flex items-center gap-2 bg-white border border-indigo-200 text-indigo-700 px-3 py-1 rounded-full shadow-sm text-xs font-bold";
+        
+        let closeBtn = isLocked ? "" : `<button onclick="removeVacationMathDate('${dateStr}')" class="text-indigo-400 hover:text-red-500 font-black leading-none transition text-sm focus:outline-none">&times;</button>`;
+        
+        item.innerHTML = `<span>${displayDate}</span> ${closeBtn}`;
+        list.appendChild(item);
+    });
+}
 
 
 
@@ -8546,16 +9101,29 @@ window.triggerBulkStaffEmail = function(monthStr, weekNum) {
         const bodyHTML = window.generateHtmlEmailBody(name, duties);
 
         // Add to Queue
+               // Build dutyKeys for alert tracking
+        const dutyKeys = duties.map(d => `${d.date} | ${d.time}`);
+        
+        // Check if already mailed
+        let isMailed = true;
+        dutyKeys.forEach(k => {
+            const as = invigilationSlots[k] && invigilationSlots[k].alertStatus && invigilationSlots[k].alertStatus[email];
+            if (!as || !as.email) isMailed = false;
+        });
+
         window.currentEmailQueue.push({
             id: index,
             email: email,
             name: name,
             subject: subject,
-            body: bodyHTML, // Send HTML to Apps Script
-            duties: duties,  // Keep raw data for WhatsApp generation
+            body: bodyHTML,
+            duties: duties,
             btnId: btnId,
-            status: 'pending'
+            status: 'pending',
+            dutyKeys: dutyKeys,
+            isNew: !isMailed
         });
+
     });
 
     // 3. Render List with Bulk Button
@@ -8568,10 +9136,15 @@ window.triggerBulkStaffEmail = function(monthStr, weekNum) {
             <span class="text-xs font-bold text-gray-500">${window.currentEmailQueue.length} Staff Members</span>
         </div>
         
-<button id="btn-bulk-send" onclick="processBulkQueue()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg shadow-md flex items-center justify-center gap-2 transition transform active:scale-95">
-    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 00-2-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
-    Send Emails to All (${window.currentEmailQueue.length})
-</button>
+<div class="flex gap-2">
+    <button onclick="processBulkQueue('new')" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg shadow-md flex items-center justify-center gap-2 transition text-sm">
+        Send to NEW Only
+    </button>
+    <button id="btn-bulk-send" onclick="processBulkQueue('all')" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg shadow-md flex items-center justify-center gap-2 transition text-sm">
+        Send to ALL
+    </button>
+</div>
+
         
         <div id="bulk-progress-container" class="hidden mt-2">
             <div class="w-full bg-gray-200 rounded-full h-2.5">
@@ -8605,11 +9178,23 @@ window.triggerBulkStaffEmail = function(monthStr, weekNum) {
 
         const emailBtnState = item.email ? "bg-white text-indigo-600 border border-indigo-200 hover:bg-indigo-50" : "bg-gray-100 text-gray-400 cursor-not-allowed";
 
+        // Compute alert badges
+        const wkIsMailed = !item.isNew;
+        let wkIsWA = true;
+        (item.dutyKeys || []).forEach(k => {
+            const as = invigilationSlots[k] && invigilationSlots[k].alertStatus && invigilationSlots[k].alertStatus[item.email];
+            if (!as || !as.wa) wkIsWA = false;
+        });
+        const wkMailedBadge = wkIsMailed ? '<span class="text-[9px] bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded">✉ Mailed</span>' : '';
+        const wkWABadge = wkIsWA ? '<span class="text-[9px] bg-green-100 text-green-800 px-1.5 py-0.5 rounded">✔ WA Sent</span>' : '';
+        const wkNewBadge = (!wkIsMailed && !wkIsWA) ? '<span class="text-[9px] bg-red-100 text-red-800 px-1.5 py-0.5 rounded">🔔 New</span>' : '';
+
+        
         html += `
         <div class="bg-white border border-gray-200 p-3 rounded-lg shadow-sm hover:shadow-md transition flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 group">
             <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2">
-                    <div class="font-bold text-gray-800 text-sm truncate">${item.name}</div>
+                    <div class="font-bold text-gray-800 text-sm truncate">${item.name} ${wkMailedBadge} ${wkWABadge} ${wkNewBadge}</div>
                     ${!phone ? '<span class="text-[9px] text-red-400 bg-red-50 px-1 rounded">No Phone</span>' : ''}
                 </div>
                 <div class="text-xs text-gray-500 mt-0.5">${item.duties.length} Session(s)</div>
@@ -8617,7 +9202,8 @@ window.triggerBulkStaffEmail = function(monthStr, weekNum) {
             </div>
             
             <div class="flex gap-2 w-full sm:w-auto">
-                <a href="${waLink}" target="_blank" class="${waClass} px-3 py-1.5 rounded text-xs font-bold shadow-sm flex items-center justify-center gap-1 flex-1 sm:flex-none transition border">
+            <a href="${waLink}" target="_blank" onclick="if(this.href !== '#') { markAsSent(this); window.markUserAlerted('${item.email}', ${JSON.stringify(item.dutyKeys || []).replace(/"/g, "'")}, 'wa'); }" class="${waClass} px-3 py-1.5 rounded text-xs font-bold shadow-sm flex items-center justify-center gap-1 flex-1 sm:flex-none transition border">
+                
                     <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.008-.57-.008-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></path></svg>
                     WhatsApp
                 </a>
@@ -8771,8 +9357,92 @@ window.triggerBulkDeptEmail = function(monthStr, weekNum) {
     list.innerHTML = html;
 };
 
+// --- REVISED: Trigger Completion Notification from Selected Session ---
+window.triggerDeptCompletionNotification = function() {
+    const sessionSelect = document.getElementById('dept-completion-session-select');
+    const sessionKey = sessionSelect ? sessionSelect.value : "";
+    
+    if (!sessionKey) return alert("Please select a completed session from the dropdown.");
+    
+    const slot = invigilationSlots[sessionKey];
+    const [dateStr, timeStr] = sessionKey.split(' | ');
 
+    const list = document.getElementById('notif-list-container');
+    const subtitle = document.getElementById('notif-modal-subtitle');
+    const title = document.getElementById('notif-modal-title');
 
+    if (title) title.textContent = "HOD Completion Report";
+    if (subtitle) subtitle.textContent = `Duty Completion: ${sessionKey}`;
+    
+    window.openModal('notification-modal');
+    list.innerHTML = '<div class="text-center py-8"><span class="animate-spin text-2xl">⏳</span></div>';
+
+    const rawDeptDuties = {}; 
+    window.currentDeptEmailQueue = []; 
+
+    if (slot.attendance && slot.attendance.length > 0) {
+        const isAN = (timeStr.includes("PM") || timeStr.startsWith("12:"));
+        const sessionLabel = isAN ? "AN" : "FN";
+
+        slot.attendance.forEach(email => {
+            const staff = staffData.find(s => s.email.toLowerCase() === email.toLowerCase());
+            const dept = staff ? (staff.dept || "Unassigned") : "Unassigned";
+            const name = staff ? staff.name : getNameFromEmail(email);
+            
+            if (!rawDeptDuties[dept]) rawDeptDuties[dept] = [];
+            rawDeptDuties[dept].push({ name, date: dateStr, session: sessionLabel, time: timeStr });
+        });
+    }
+
+    const depts = Object.keys(rawDeptDuties).sort();
+    depts.forEach((dept, index) => {
+        const entries = rawDeptDuties[dept];
+        const facultyMap = {};
+        entries.forEach(e => {
+            if (!facultyMap[e.name]) facultyMap[e.name] = { name: e.name, duties: [] };
+            facultyMap[e.name].duties.push({ session: e.session, time: e.time });
+        });
+
+        let hodEmail = "";
+        if (typeof departmentsConfig !== 'undefined') {
+            const deptCfg = departmentsConfig.find(d => (typeof d === 'object' ? d.name : d) === dept);
+            if (deptCfg && deptCfg.email) hodEmail = deptCfg.email;
+        }
+
+        const htmlBody = generateDepartmentCompletionEmail(dept, Object.values(facultyMap), dateStr);
+        window.currentDeptEmailQueue.push({
+            id: index, dept: dept, email: hodEmail, 
+            subject: `Invigilation Completion Report: ${dept} - ${dateStr}`,
+            body: htmlBody, count: Object.keys(facultyMap).length,
+            status: 'pending', btnId: `btn-dept-${index}`, statusId: `status-dept-${index}`
+        });
+    });
+
+    renderDeptNotificationList(); 
+}
+
+// Ensure the UI renderer is accessible (Optional: paste if not already there)
+function renderDeptNotificationList() {
+    const list = document.getElementById('notif-list-container');
+    if (!list) return;
+    let html = `<div class="flex flex-col gap-3 mb-4 sticky top-0 bg-white z-10 pt-2 pb-4 border-b">
+        <button id="btn-bulk-dept-send" onclick="sendBulkDeptEmails()" class="w-full bg-teal-600 hover:bg-teal-700 text-white font-bold py-3 px-4 rounded-lg shadow-md flex items-center justify-center gap-2 transition transform active:scale-95">
+            🚀 Send All Reports to HODs
+        </button>
+    </div><div class="space-y-3">`;
+
+    window.currentDeptEmailQueue.forEach((item) => {
+        html += `<div class="bg-white border p-3 rounded-lg shadow-sm flex justify-between items-center">
+            <div>
+                <div class="font-bold text-gray-800 text-sm">${item.dept}</div>
+                <div class="text-[10px] text-gray-500">${item.count} Faculty Completed</div>
+                <div class="text-[9px] ${!item.email ? 'text-red-500' : 'text-teal-600'}">${!item.email ? 'HOD Email Missing' : item.email}</div>
+            </div>
+            <button id="${item.btnId}" onclick="sendSingleDeptEmail(${item.id})" ${!item.email ? 'disabled' : ''} class="bg-teal-50 text-teal-700 border px-3 py-1.5 rounded text-xs font-bold transition">Send</button>
+        </div>`;
+    });
+    list.innerHTML = html + `</div>`;
+}
 
 
 // --- HELPER: Generate Weekly WhatsApp (Professional + Exchange Link) ---
@@ -8931,6 +9601,7 @@ window.sendBulkDeptEmails = async function() {
 
             successCount++;
             item.status = 'sent';
+            if (item.dutyKeys) window.markUserAlerted(item.email, item.dutyKeys, 'email');
             
             if(rowBtn) { 
                 rowBtn.innerHTML = "✅"; 
@@ -9015,13 +9686,15 @@ window.sendIndividualEmail = async function(index) {
 
     // With no-cors we assume success if no network error thrown
     item.status = 'sent';
+    if (item.dutyKeys) window.markUserAlerted(item.email, item.dutyKeys, 'email');  // <-- INSERT THIS LINE
     if (statusMsg) { statusMsg.textContent = "✅ Sent"; statusMsg.className = "text-[10px] text-green-600 mt-0.5 font-bold"; }
     if (btn) { btn.innerHTML = "Done"; btn.classList.add('opacity-50'); }
 };
 
 // --- LOGIC: Bulk Queue Processor ---
-window.processBulkQueue = async function() {
-    const pendingItems = window.currentEmailQueue.filter(i => i.status === 'pending' && i.email);
+window.processBulkQueue = async function(mode = 'all') {
+    let pendingItems = window.currentEmailQueue.filter(i => i.status === 'pending');
+    if (mode === 'new') pendingItems = pendingItems.filter(i => i.isNew);
     
     if (pendingItems.length === 0) return alert("No pending emails to send.");
     if (!confirm(`Start bulk sending to ${pendingItems.length} recipients?\n\nKeep this window open until finished.`)) return;
@@ -9055,6 +9728,7 @@ window.processBulkQueue = async function() {
 
         // Update Row Success
         item.status = 'sent';
+        if (item.dutyKeys) window.markUserAlerted(item.email, item.dutyKeys, 'email'); // <-- INSERT THIS LINE
         sentCount++;
         if(rowStatus) { rowStatus.textContent = "✅ Sent"; rowStatus.className = "text-[10px] text-green-600 mt-0.5 font-bold"; }
         if(rowBtn) { rowBtn.innerHTML = "Done"; rowBtn.classList.add('opacity-50'); }
@@ -9169,6 +9843,87 @@ window.adminMarkUnavailable = function(key, email) {
 };
 
 
+// --- ADMIN: God Access Unavailability Search (Quick Prompt) ---
+// --- ADMIN: God Access Unavailability Search (Professional Modal) ---
+window.directUnavailStaff = function(key) {
+    const slot = invigilationSlots[key];
+    if (!slot) return alert("Error: Slot data not found.");
+
+    // Initialize Modal State
+    document.getElementById('direct-unavail-slot-key').innerText = key;
+    document.getElementById('direct-unavail-search-input').value = "";
+    document.getElementById('direct-unavail-hidden-email').value = "";
+    document.getElementById('direct-unavail-dropdown').classList.add('hidden');
+    
+    // Save state globally for the modal
+    window.directUnavailState = {
+        slotKey: key,
+    };
+
+    window.openModal('direct-unavail-modal');
+};
+
+
+window.filterDirectUnavailStaff = function() {
+    const input = document.getElementById('direct-unavail-search-input');
+    const dropdown = document.getElementById('direct-unavail-dropdown');
+    const hidden = document.getElementById('direct-unavail-hidden-email');
+    const query = input.value.toLowerCase().trim();
+
+    if (query.length < 2) {
+        dropdown.classList.add('hidden');
+        return;
+    }
+
+    // Filter ALL staff (God access)
+    let matches = staffData.filter(s => 
+        (s.name.toLowerCase().includes(query) || s.dept.toLowerCase().includes(query)) &&
+        s.status !== 'archived'
+    ).slice(0, 10);
+
+    dropdown.innerHTML = '';
+    if (matches.length === 0) {
+       dropdown.innerHTML = `<div class="p-3 text-[10px] text-gray-400 italic text-center">No matching staff found.</div>`;
+    } else {
+       matches.forEach(s => {
+           dropdown.innerHTML += `
+               <div onclick="selectDirectUnavailStaff('${s.email}', '${s.name.replace(/'/g, "\\'")}')" class="p-2.5 hover:bg-red-50 border-b border-gray-50 cursor-pointer transition flex items-center justify-between group">
+                   <span class="font-bold text-gray-800 text-xs group-hover:text-red-700">${s.name}</span>
+                   <span class="text-[9px] uppercase font-bold text-gray-400 bg-gray-50 px-1.5 py-0.5 rounded">${s.dept}</span>
+               </div>`;
+       });
+
+    }
+    dropdown.classList.remove('hidden');
+};
+
+window.selectDirectUnavailStaff = function(email, name) {
+    document.getElementById('direct-unavail-search-input').value = name;
+    document.getElementById('direct-unavail-hidden-email').value = email;
+    document.getElementById('direct-unavail-dropdown').classList.add('hidden');
+};
+
+window.confirmDirectUnavail = function() {
+    const key = window.directUnavailState.slotKey;
+    const email = document.getElementById('direct-unavail-hidden-email').value;
+    const name = document.getElementById('direct-unavail-search-input').value;
+    
+    if (!key || !email) return alert("Please search and select a faculty member from the autocomplete list first.");
+
+    const slot = invigilationSlots[key];
+    if (slot && slot.assigned.includes(email)) {
+        if (!confirm("⚠️ " + name + " is CURRENTLY ASSIGNED to this session. Marking them unavailable will remove them from the roster. Proceed?")) {
+            return;
+        }
+    }
+
+    // Close search modal and trigger standard reason modal
+    window.closeModal('direct-unavail-modal');
+    window.adminMarkUnavailable(key, email);
+};
+
+
+
 
 // 1. Missing Generator for Department Emails
 window.generateDepartmentConsolidatedEmail = function(deptName, duties, title) {
@@ -9207,51 +9962,7 @@ window.generateDepartmentConsolidatedEmail = function(deptName, duties, title) {
     `;
 };
 
-// 2. Missing Bulk Sender for Departments
-window.sendBulkDeptEmails = async function () {
-    const pendingItems = window.currentDeptEmailQueue.filter(i => i.status === 'pending' && i.email);
-    if (pendingItems.length === 0) return alert("No valid pending emails to send.");
-    if (!confirm(`Start bulk sending to ${pendingItems.length} Departments?`)) return;
 
-    // UI Feedback
-    const btn = document.getElementById('btn-bulk-dept-send');
-    const bar = document.getElementById('dept-progress-bar');
-    const fill = document.getElementById('dept-progress-fill');
-    const txt = document.getElementById('dept-status-text');
-    
-    if (btn) btn.classList.add('hidden');
-    if (bar) bar.classList.remove('hidden');
-    if (txt) { txt.classList.remove('hidden'); txt.textContent = "Starting..."; }
-
-    let successCount = 0;
-    for (let i = 0; i < pendingItems.length; i++) {
-        const item = pendingItems[i];
-        if (txt) txt.textContent = `Sending to ${item.dept} (${i + 1}/${pendingItems.length})...`;
-        if (fill) fill.style.width = `${Math.round(((i + 1) / pendingItems.length) * 100)}%`;
-
-        try {
-            await fetch(googleScriptUrl, {
-                method: "POST",
-                mode: "no-cors",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ to: item.email, subject: item.subject, body: item.body })
-            });
-            item.status = 'sent';
-            successCount++;
-            
-            // Update individual row status if exists
-            const rStatus = document.getElementById(item.statusId);
-            if (rStatus) { rStatus.textContent = "Sent"; rStatus.classList.remove('hidden'); rStatus.classList.add('text-green-600'); }
-        } catch (e) { console.error(e); }
-        
-        await new Promise(r => setTimeout(r, 1000));
-    }
-    
-    if (txt) txt.textContent = "Completed.";
-    alert(`Batch Complete. Sent to ${successCount} departments.`);
-    if (btn) btn.classList.remove('hidden');
-    if (bar) bar.classList.add('hidden');
-};
 
 // --- ADMIN: Remove Unavailability (From Manual Modal) ---
 window.adminRemoveUnavailable = async function(key, email, isAdvance) {
@@ -9285,6 +9996,112 @@ window.adminRemoveUnavailable = async function(key, email, isAdvance) {
     // Since we are inside the manual modal, we should re-render it to show the change.
     window.openManualAllocationModal(key);
 };
+
+// ==========================================
+// 🔗 MERGE INVIGILATION SLOTS LOGIC
+// ==========================================
+
+window.openMergeSlotsModal = function() {
+    const srcSelect = document.getElementById('merge-source-slot');
+    const tgtSelect = document.getElementById('merge-target-slot');
+    
+    srcSelect.innerHTML = '<option value="">-- Select Source Slot --</option>';
+    tgtSelect.innerHTML = '<option value="">-- Select Target Slot --</option>';
+
+    // Populate dropdowns with perfectly sorted dates
+    const allKeys = Object.keys(invigilationSlots).sort((a, b) => {
+        const dA = parseDate(a); const dB = parseDate(b);
+        return dA - dB;
+    });
+
+    allKeys.forEach(key => {
+        srcSelect.add(new Option(key, key));
+        tgtSelect.add(new Option(key, key));
+    });
+
+    window.openModal('merge-slots-modal');
+};
+
+window.executeMergeSlots = async function() {
+    const srcKey = document.getElementById('merge-source-slot').value;
+    const tgtKey = document.getElementById('merge-target-slot').value;
+    const btn = document.getElementById('btn-execute-merge');
+
+    if (!srcKey || !tgtKey) return alert("Please select both a Source and Target slot.");
+    if (srcKey === tgtKey) return alert("Source and Target cannot be the exact same slot.");
+
+    const src = invigilationSlots[srcKey];
+    const tgt = invigilationSlots[tgtKey];
+
+    if (!src || !tgt) return alert("Invalid slot selection.");
+
+    const confirmMsg = `⚠️ CRITICAL WARNING: MERGING SLOTS ⚠️\n\nMoving Volunteers FROM: ${srcKey}\nINTO TARGET: ${tgtKey}\n\nAfter successfully merging, the source slot (${srcKey}) will be PERMANENTLY DELETED.\n\nType 'MERGE' to proceed:`;
+    const approval = prompt(confirmMsg);
+    
+    if (approval !== 'MERGE') return alert("Merge Cancelled.");
+
+    try {
+        btn.innerHTML = "Merging Data...";
+        btn.disabled = true;
+
+        // 1. Sensibly Combine Arrays avoiding duplicates
+        const mergeArrays = (arr1, arr2) => [...new Set([...(arr1 || []), ...(arr2 || [])])];
+
+        tgt.assigned = mergeArrays(tgt.assigned, src.assigned);
+        tgt.unavailable = mergeArrays(tgt.unavailable, src.unavailable);
+        tgt.attendance = mergeArrays(tgt.attendance, src.attendance);
+        tgt.exchangeRequests = mergeArrays(tgt.exchangeRequests, src.exchangeRequests);
+
+        // 2. Annihilate the Source Slot
+        delete invigilationSlots[srcKey];
+
+        // 3. Save Locally
+        localStorage.setItem('examInvigilationSlots', JSON.stringify(invigilationSlots));
+        
+        // 4. Update the User Interface instantly
+        window.closeModal('merge-slots-modal');
+        if (typeof renderSlotsGridAdmin === 'function') renderSlotsGridAdmin();
+        if (typeof updateAdminUI === 'function') updateAdminUI();
+
+        // 5. Fire off to Firebase (Silent Syncing)
+        // Ensure both the new data and the deletion register with the cloud
+        btn.innerHTML = "Syncing to Cloud...";
+        updateSyncStatus("Syncing Merge...", "neutral");
+        await syncSlotsToCloud();
+
+        
+        alert(`✅ Successfully merged ${srcKey} volunteers into ${tgtKey}!`);
+
+
+    } catch (e) {
+        console.error("Merge error:", e);
+        alert("An error occurred during merge: " + e.message);
+    } finally {
+        btn.innerHTML = "Merge Slots Now";
+        btn.disabled = false;
+        updateSyncStatus("Online & Merged", "success");
+    }
+};
+
+
+
+window.markUserAlerted = function(email, dutyKeys = [], channel = 'email') {
+    let changed = false;
+    dutyKeys.forEach(k => {
+        if (invigilationSlots[k]) {
+            if (!invigilationSlots[k].alertStatus) invigilationSlots[k].alertStatus = {};
+            if (!invigilationSlots[k].alertStatus[email]) invigilationSlots[k].alertStatus[email] = {};
+            if (!invigilationSlots[k].alertStatus[email][channel]) {
+                invigilationSlots[k].alertStatus[email][channel] = true;
+                changed = true;
+            }
+        }
+    });
+    if (changed && typeof syncSlotsToCloud === 'function') syncSlotsToCloud();
+};
+
+
+
 
 // --- ATTENDANCE REPORT - PRINTABLE/PDF ---
 window.printAttendanceReport = function () {
@@ -9342,3 +10159,400 @@ window.printAttendanceReport = function () {
     printWindow.document.write(html);
     printWindow.document.close();
 };
+
+// ==========================================
+// RESTORED: WEEKLY AUTO-ASSIGN & LOGS
+// ==========================================
+window.runWeeklyAutoAssign = async function (monthStr, weekNum) {
+    if (!confirm(`⚡ Run Auto-Assignment for ${monthStr}, Week ${weekNum}?\n\nIMPORTANT: This will only fill LOCKED slots (Admin Mode).\n\nRules Applied:\n1. Max 3 duties/week\n2. Avoid Same Day & Adjacent Days\n3. Dept Cap: Max 60% of a dept per session\n4. "Show Must Go On" - Rules break if necessary.`)) return;
+
+    const targetSlots = [];
+    Object.keys(invigilationSlots).forEach(key => {
+        const date = parseDate(key);
+        const mStr = date.toLocaleString('default', { month: 'long', year: 'numeric' });
+        const wNum = getWeekOfMonth(date);
+        const slot = invigilationSlots[key];
+        if (mStr === monthStr && wNum === weekNum && slot.isLocked) {
+            targetSlots.push({ key, date, slot });
+        }
+    });
+
+    if (targetSlots.length === 0) return alert(`⚠️ No LOCKED slots found in Week ${weekNum}.\n\nPlease click "🔒 Lock Week" first to enable Admin Auto-Assignment.`);
+
+    targetSlots.sort((a, b) => a.date - b.date);
+
+    const deptCounts = {};
+    let eligibleStaff = staffData.map(s => {
+        if (s.status !== 'archived') deptCounts[s.dept] = (deptCounts[s.dept] || 0) + 1;
+        return {
+            ...s,
+            pending: calculateStaffTarget(s) - getDutiesDoneCount(s.email),
+            weeklyLoad: {}
+        };
+    });
+
+    Object.keys(invigilationSlots).forEach(k => {
+        const d = parseDate(k);
+        const mStr = d.toLocaleString('default', { month: 'long', year: 'numeric' });
+        const wNum = getWeekOfMonth(d);
+        const weekKey = `${mStr}-${wNum}`;
+        invigilationSlots[k].assigned.forEach(email => {
+            const s = eligibleStaff.find(st => st.email === email);
+            if (s) {
+                if (!s.weeklyLoad[weekKey]) s.weeklyLoad[weekKey] = 0;
+                s.weeklyLoad[weekKey]++;
+            }
+        });
+    });
+
+    const logEntries = [];
+    let assignedCount = 0;
+    const timestamp = new Date().toLocaleString();
+
+    for (const target of targetSlots) {
+        const { key, date, slot } = target;
+        const needed = slot.required - slot.assigned.length;
+        if (needed <= 0) continue;
+
+        const mStr = date.toLocaleString('default', { month: 'long', year: 'numeric' });
+        const wNum = getWeekOfMonth(date);
+        const currentWeekKey = `${mStr}-${wNum}`;
+        const prevDate = new Date(date); prevDate.setDate(date.getDate() - 1);
+        const nextDate = new Date(date); nextDate.setDate(date.getDate() + 1);
+
+        const slotDeptCounts = {};
+        slot.assigned.forEach(email => {
+            const s = staffData.find(st => st.email === email);
+            if (s && s.dept) slotDeptCounts[s.dept] = (slotDeptCounts[s.dept] || 0) + 1;
+        });
+
+        for (let i = 0; i < needed; i++) {
+            const candidates = eligibleStaff.map(s => {
+                let score = s.pending * 100;
+                let warnings = [];
+
+                if (slot.assigned.includes(s.email) || isUserUnavailable(slot, s.email, key) || s.status === 'archived') return null;
+
+                const dutiesThisWeek = s.weeklyLoad[currentWeekKey] || 0;
+                if (dutiesThisWeek >= 3) { score -= 5000; warnings.push("Max 3/wk"); }
+
+                const sameDayKeys = targetSlots.filter(t => t.date.toDateString() === date.toDateString() && t.key !== key).map(t => t.key);
+                if (sameDayKeys.some(sdk => invigilationSlots[sdk].assigned.includes(s.email))) { score -= 2000; warnings.push("Same Day"); }
+
+                const dTotal = deptCounts[s.dept] || 0;
+                if (dTotal > 1 && (slotDeptCounts[s.dept] || 0) >= Math.ceil(dTotal * 0.6)) { score -= 4000; warnings.push("Dept Saturation"); }
+
+                let hasAdjacent = false;
+                targetSlots.forEach(t => {
+                    if ((t.date.toDateString() === prevDate.toDateString() || t.date.toDateString() === nextDate.toDateString()) && t.slot.assigned.includes(s.email)) {
+                        hasAdjacent = true;
+                    }
+                });
+                if (hasAdjacent) { score -= 1000; warnings.push("Adjacent"); }
+
+                return { staff: s, score, warnings };
+            }).filter(c => c !== null);
+
+            candidates.sort((a, b) => b.score - a.score);
+
+            if (candidates.length > 0) {
+                const choice = candidates[0];
+                slot.assigned.push(choice.staff.email);
+                choice.staff.pending--;
+                if (!choice.staff.weeklyLoad[currentWeekKey]) choice.staff.weeklyLoad[currentWeekKey] = 0;
+                choice.staff.weeklyLoad[currentWeekKey]++;
+                slotDeptCounts[choice.staff.dept] = (slotDeptCounts[choice.staff.dept] || 0) + 1;
+                assignedCount++;
+
+                let logEntry = `<div class="text-xs border-b border-gray-100 pb-1 mb-1"><span class="text-green-700 font-bold">Auto-Assigned:</span> <b>${choice.staff.name}</b> <span class="text-gray-500">(Score: ${choice.score})</span>${choice.warnings.length > 0 ? `<span class="text-red-500 ml-1">[${choice.warnings.join(', ')}]</span>` : ""}</div>`;
+                const skipped = candidates.slice(1, 4);
+                if (skipped.length > 0) logEntry += `<div class="text-[10px] text-gray-500 ml-2 mb-2">Skipped: ` + skipped.map(s => `${s.staff.name} (${s.score})`).join(', ') + `</div>`;
+
+                if (!slot.allocationLog) slot.allocationLog = `<div class="mb-2 pb-2 border-b"><div class="font-bold">Auto-Assign Run (${timestamp})</div></div>`;
+                slot.allocationLog += logEntry;
+
+                if (choice.warnings.length > 0) logEntries.push({ type: "WARN", msg: `Assigned ${choice.staff.name} to ${key}. Breached: ${choice.warnings.join(", ")}` });
+            }
+        }
+    }
+
+    if (logEntries.length > 0) {
+        const logRef = doc(db, "colleges", currentCollegeId);
+        const newLogs = logEntries.map(e => `[${timestamp}] ${e.type}: ${e.msg}`);
+        try { await updateDoc(logRef, { autoAssignLogs: arrayUnion(...newLogs) }); } catch (e) { }
+    }
+
+    if (typeof logActivity === 'function') logActivity("Auto-Assign Week", `Run for ${monthStr} Week ${weekNum}. Filled ${assignedCount} slots.`);
+    await syncSlotsToCloud();
+    renderSlotsGrid();
+
+    let alertMsg = `✅ Auto-Assign Complete!\nFilled ${assignedCount} positions.`;
+    if (logEntries.length > 0) alertMsg += `\n\n⚠️ ${logEntries.length} alerts generated. Check Logs.`;
+    alert(alertMsg);
+};
+
+window.viewAutoAssignLogs = async function () {
+    const ref = doc(db, "colleges", currentCollegeId);
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
+        const logs = snap.data().autoAssignLogs || [];
+        if (logs.length === 0) return alert("No logs found.");
+        const list = document.getElementById('inconvenience-list');
+        const title = document.getElementById('inconvenience-modal-subtitle');
+        document.querySelector('#inconvenience-modal h3').textContent = "📜 Auto-Assign Logs";
+        title.textContent = "History of automated decisions & overrides.";
+        list.innerHTML = logs.reverse().map(l => {
+            const isWarn = l.includes("WARN");
+            const isErr = l.includes("ERROR");
+            const color = isErr ? "text-red-600 bg-red-50" : (isWarn ? "text-orange-600 bg-orange-50" : "text-gray-600");
+            return `<div class="text-xs p-2 border-b border-gray-100 ${color} font-mono">${l}</div>`;
+        }).join('');
+        window.openModal('inconvenience-modal');
+    }
+};
+
+
+// ==========================================
+// RESTORED: SAVE MANUAL ALLOCATION 
+// ==========================================
+window.saveManualAllocation = async function () {
+    const state = window.manualState;
+    if (!state || !state.key) return;
+
+    const key = state.key;
+    const newAssigned = state.rankedStaff.filter(s => s.isChecked).map(s => s.email);
+
+    if (!invigilationSlots[key]) return;
+    invigilationSlots[key].assigned = newAssigned;
+
+    try {
+        await syncSlotsToCloud();
+        alert('✅ Assignments Saved successfully!');
+        window.closeModal('manual-allocation-modal');
+
+        if (window.currentUser && typeof window.logActivity === 'function') {
+            window.logActivity("Manual Update", `Updated assignments for ${key}. Count: ${newAssigned.length}`);
+        }
+        
+        if (typeof renderSlotsGridAdmin === 'function') renderSlotsGridAdmin();
+        else renderSlotsGrid();
+    } catch (e) {
+        console.error("Save failed:", e);
+        alert('Error saving. Check console.');
+    }
+};
+
+// --- EMERGENCY / ADMIN DIRECT ADD FUNCTION ---
+window.directAddStaff = async function(key) {
+    const slot = invigilationSlots[key];
+    if (!slot) return alert("Error: Slot data not found.");
+
+    // Prompt the admin for the Email ID or Name
+    const rawInput = prompt("Enter the exact Full Name or Email of the Invigilator to add:");
+    if (!rawInput) return; // Action Cancelled
+    
+    const query = rawInput.toLowerCase().trim();
+    
+    // Attempt to locate the exact staff member securely
+    let staff = staffData.find(s => s.email.toLowerCase() === query);
+    if (!staff) staff = staffData.find(s => s.name.toLowerCase() === query);
+    if (!staff) staff = staffData.find(s => s.name.toLowerCase().includes(query)); // Fallback to partial name
+    
+    if (!staff) {
+        return alert("❌ Could not find any staff member matching '" + rawInput + "'. Please check spelling or use their email ID.");
+    }
+    
+    if (slot.assigned.includes(staff.email)) {
+        return alert("⚠️ " + staff.name + " is already assigned to this duty.");
+    }
+    
+    // Add to slot assignment list
+    slot.assigned.push(staff.email);
+    
+    // Ensure the 'Admin' tracking tag is correctly appended
+    if (!slot.assignmentMeta) slot.assignmentMeta = {};
+    slot.assignmentMeta[staff.email] = {
+        source: 'Admin',
+        timestamp: new Date().toISOString()
+    };
+    
+    // Log the override if the activity log feature is present
+    if (typeof logActivity === 'function') {
+        logActivity("Admin Override Add", `Admin explicitly added ${staff.name} to slot ${key}.`);
+    }
+    
+    // Write changes to Firebase/Local and refresh UI
+    if (typeof syncSlotsToCloud === 'function') {
+        await syncSlotsToCloud();
+    }
+    
+    if (typeof renderSlotsGridAdmin === 'function') {
+        renderSlotsGridAdmin();
+    }
+    
+    alert(`✅ ${staff.name} has been successfully assigned to ${key} manually.`);
+};
+
+// --- EMERGENCY / ADMIN DIRECT ADD FUNCTIONS (Searchable) ---
+
+// Setup a mini-scope to hold the current session's safe faculty list
+window.directAddState = {
+    availableStaff: [],
+    slotKey: ""
+};
+
+window.directAddStaff = function(key) {
+    const slot = invigilationSlots[key];
+    if (!slot) return alert("Error: Slot data not found.");
+
+    document.getElementById('direct-add-slot-key').textContent = key;
+    window.directAddState.slotKey = key;
+
+    // Reset Form safely 
+    const searchInput = document.getElementById('direct-add-search-input');
+    const hiddenInput = document.getElementById('direct-add-hidden-email');
+    searchInput.value = '';
+    searchInput.dataset.selectedName = '';
+    hiddenInput.value = '';
+    document.getElementById('direct-add-dropdown').classList.add('hidden');
+
+    // Scope rules for this exact Day
+    const targetDateObj = parseDate(key);
+    const slotTargetDateStr = `${targetDateObj.getFullYear()}-${String(targetDateObj.getMonth() + 1).padStart(2, '0')}-${String(targetDateObj.getDate()).padStart(2, '0')}`;
+    
+    // Compile permitted invigilators cache quickly
+    window.directAddState.availableStaff = [...staffData]
+        .filter(s => {
+            if (s.status === 'archived') return false; 
+            if (slot.assigned && slot.assigned.includes(s.email)) return false; 
+            
+            // Check active EXCL roles
+                        // Check active administrative roles (EXCL, CS, SAS, Principal, etc.)
+            if (s.roleHistory && Array.isArray(s.roleHistory)) {
+                const exemptRoles = [
+                    'EXCL', 
+                    'Principal',  
+                    'Chief Superintendent', 
+                    'Chief Supt', 
+                    'CS', 
+                    'Senior Asst. Superintendent', 
+                    'Senior Assistant Supt', 
+                    'SAS', 
+                    'Exam Chief'
+                ];
+                const targetStamp = new Date(slotTargetDateStr).getTime();
+                if (s.roleHistory.some(r => {
+                    const startStamp = new Date(r.start).getTime();
+                    const endStamp = r.end ? new Date(r.end).setHours(23, 59, 59, 999) : Infinity;
+                    return exemptRoles.includes(r.role) && targetStamp >= startStamp && targetStamp <= endStamp;
+                })) {
+
+                    return false; // Skip rendering this user in the dropdown results
+                }
+            }
+
+            if (typeof isUserUnavailable === 'function' && isUserUnavailable(slot, s.email, key)) return false;
+
+            return true;
+        })
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+    // Reset Submit Button
+    const btn = document.getElementById('direct-add-confirm-btn');
+    if(btn) { btn.innerText = "Add Faculty"; btn.disabled = false; }
+
+    window.openModal('direct-add-modal');
+};
+
+window.filterDirectAddStaff = function() {
+    const input = document.getElementById('direct-add-search-input');
+    const dropdown = document.getElementById('direct-add-dropdown');
+    const hidden = document.getElementById('direct-add-hidden-email');
+    const query = input.value.toLowerCase().trim();
+
+    // If typing doesn't match the strictly clicked selection, revoke their selected email
+    if (query !== (input.dataset.selectedName || "").toLowerCase()) {
+        hidden.value = ''; 
+    }
+
+    if (query.length < 2) {
+        dropdown.classList.add('hidden');
+        return;
+    }
+
+    let matches = window.directAddState.availableStaff.filter(s => 
+        s.name.toLowerCase().includes(query) || s.dept.toLowerCase().includes(query)
+    );
+
+    dropdown.innerHTML = '';
+    if (matches.length === 0) {
+       dropdown.innerHTML = `<div class="p-3 text-xs text-gray-400 italic text-center">No matching staff available.</div>`;
+    } else {
+       matches.forEach(s => {
+           dropdown.innerHTML += `
+               <div onclick="selectDirectAddStaff('${s.email}', '${s.name.replace(/'/g, "\\'")}')" class="p-2.5 hover:bg-indigo-50 border-b border-gray-100 cursor-pointer transition flex items-center justify-between group">
+                   <span class="font-bold text-gray-800 text-xs group-hover:text-indigo-700">${s.name}</span>
+                   <span class="text-[9px] uppercase font-bold text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">${s.dept}</span>
+               </div>`;
+       });
+    }
+    dropdown.classList.remove('hidden');
+};
+
+window.selectDirectAddStaff = function(email, name) {
+    const input = document.getElementById('direct-add-search-input');
+    const hidden = document.getElementById('direct-add-hidden-email');
+    const dropdown = document.getElementById('direct-add-dropdown');
+
+    input.value = name;
+    input.dataset.selectedName = name; // Safety check
+    hidden.value = email;
+    dropdown.classList.add('hidden'); // Close results safely
+};
+
+// Global Listener: Automatically close the floating dropdown if clicked anywhere outside of it
+document.addEventListener('click', function(e) {
+    const container = document.getElementById('direct-add-search-input')?.parentElement;
+    const dropdown = document.getElementById('direct-add-dropdown');
+    if (container && dropdown && !container.contains(e.target)) {
+        dropdown.classList.add('hidden');
+    }
+});
+
+window.confirmDirectAdd = async function() {
+    const key = window.directAddState.slotKey;
+    const email = document.getElementById('direct-add-hidden-email').value;
+    
+    if (!key || !email) return alert("Please search and select a faculty member from the autocomplete list first.");
+
+    const slot = invigilationSlots[key];
+    const staff = staffData.find(s => s.email === email);
+    if (!slot || !staff) return;
+
+    // Loading State
+    const btn = document.getElementById('direct-add-confirm-btn');
+    if(btn) { btn.innerText = "Saving..."; btn.disabled = true; }
+
+    if(!slot.assigned) slot.assigned = [];
+    slot.assigned.push(staff.email);
+    
+    // Core Objective > Tag them securely 
+    if (!slot.assignmentMeta) slot.assignmentMeta = {};
+    slot.assignmentMeta[staff.email] = {
+        source: 'Admin',
+        timestamp: new Date().toISOString()
+    };
+    
+    if (typeof logActivity === 'function') {
+        logActivity("Admin Override Add", `Admin explicitly assigned ${staff.name} to ${key}.`);
+    }
+    
+    if (typeof syncSlotsToCloud === 'function') await syncSlotsToCloud();
+    if (typeof renderSlotsGridAdmin === 'function') renderSlotsGridAdmin();
+    
+    window.closeModal('direct-add-modal');
+    alert(`✅ ${staff.name} has been successfully assigned to ${key} manually.`);
+};
+
+
+
