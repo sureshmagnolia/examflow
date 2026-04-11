@@ -1048,7 +1048,8 @@ async function updateLocalSlotsFromStudents() {
         }
         updateLoaderProgress(50, "Connecting to Cloud Server...");
         updateSyncStatus("Connecting...", "neutral");
-        const { db, doc, onSnapshot, collection, getDocs, query, orderBy } = window.firebase;
+        const { db, doc, onSnapshot, collection, getDocs, query, orderBy, where } = window.firebase;
+
 
         // --- PASTE START ---
         const connectionTimeout = setTimeout(() => {
@@ -1179,12 +1180,16 @@ async function updateLocalSlotsFromStudents() {
                       // [NEW] Use onSnapshot for live global synchronization
                 if (sessionsUnsub) sessionsUnsub(); // Cleanup existing
                 
-                // Get timestamp for Today's Midnight
+            // Get timestamp for Today's Midnight
                 const todayMidnight = new Date();
                 todayMidnight.setHours(0, 0, 0, 0);
                 const midnightObj = todayMidnight.getTime();
 
+                // --> All sessions listener (heavy data protected by isTodayOrFuture guard below)
                 sessionsUnsub = onSnapshot(sessionsRef, async (sessionSnap) => {
+
+
+
                     if (!sessionSnap.empty) {
                         console.log(`📡 LIVE SYNC: Processing ${sessionSnap.size} session updates...`);
 
@@ -1226,13 +1231,13 @@ async function updateLocalSlotsFromStudents() {
                                 }
                             }
                             // Load ALL metadata continuously, regardless of date
+
                             if (s.roomAllotment) allAllotments[sessionKey] = s.roomAllotment;
                             if (s.qpCodes) allQPCodes[sessionKey] = s.qpCodes;
                             if (s.absentees) allAbsentees[sessionKey] = s.absentees;
                             if (s.scribeAllotment) allScribeAllotments[sessionKey] = s.scribeAllotment;
                             if (s.invigilatorMapping) allInvigMapping[sessionKey] = s.invigilatorMapping;
                         });
-                      // Store a lightweight registry of ALL known sessions for dropdowns
                         const allKnownKeys = Array.from(sessionSnap.docs.map(d => {
                             const sd = d.data(); return `${sd.date} | ${sd.time}`;
                         }));
@@ -1243,6 +1248,24 @@ async function updateLocalSlotsFromStudents() {
                         if (window.real_populate_room_allotment_session_dropdown) window.real_populate_room_allotment_session_dropdown();
 
 
+
+                            
+                        // --- HISTORICAL META STORE FOR BILLING ENGINE ---
+                        const allHistoricalMeta = {};
+                        sessionSnap.forEach(docSnap => {
+                            const sd = docSnap.data();
+                            const sk = `${sd.date} | ${sd.time}`;
+                            if (sd.meta) allHistoricalMeta[sk] = {
+                                studentCount: sd.meta.studentCount || 0,
+                                normalCount: sd.meta.normalCount || 0,
+                                scribeCount: sd.meta.scribeCount || 0,
+                                examTimestamp: sd.meta.examTimestamp || 0
+                            };
+                        });
+                        localStorage.setItem('examHistoricalMeta', JSON.stringify(allHistoricalMeta));
+                        // -------------------------------------------------
+
+                            
 
                         // Wait for any allowed pre-fetches to finish safely
                         if (missingStudentsPromises.length > 0) {
@@ -1334,10 +1357,13 @@ async function updateLocalSlotsFromStudents() {
                         if (typeof renderInvigilationPanel === 'function') {
                             renderInvigilationPanel();
                         }
+                    } else {
+                        // SAFETY NET: If the filter legitimately returns 0 items, clear the "Connecting..." banner anyway!
+                        updateSyncStatus("Synced (Live)", "success");
                     }
 
-
                 });
+
 
                 // Check for V1 Fallback if sessions collection doesn't exist
                 const sessionSnapCheck = await getDocs(sessionsRef);
@@ -1569,10 +1595,23 @@ async function deleteSessionFromCloud(sessionKey) {
             absentees: sessionAbsentees,
             scribeAllotment: sessionScribes,
             invigilatorMapping: sessionInvigMap, 
-            meta: { 
-                studentCount: students.length, 
-                lastUpdated: new Date().toISOString() 
+        meta: { 
+                studentCount: students.length,
+                normalCount: students.filter(s => {
+                    const scribeListRaw = JSON.parse(localStorage.getItem('examScribeList') || '[]');
+                    const scribeRegNos = new Set(scribeListRaw.map(x => x.regNo));
+                    return !scribeRegNos.has(s['Register Number']);
+                }).length,
+                scribeCount: students.filter(s => {
+                    const scribeListRaw = JSON.parse(localStorage.getItem('examScribeList') || '[]');
+                    const scribeRegNos = new Set(scribeListRaw.map(x => x.regNo));
+                    return scribeRegNos.has(s['Register Number']);
+                }).length,
+                lastUpdated: new Date().toISOString(),
+                examTimestamp: new Date(cleanDate.split('.').reverse().join('-')).getTime()
             }
+
+
         };
 
         // --- NEW: Heavy Array Sub-Collection ---
@@ -8327,44 +8366,55 @@ window.real_populate_session_dropdown = function () {
             });
             if(reportsSessionSelect) reportsSessionSelect.innerHTML = '<option value="all">All Sessions</option>';
 
-           // --- 🧠 SMART DEFAULT LOGIC (Today's Active vs Next Upcoming) ---
+                      // --- 🧠 SMART DEFAULT LOGIC (Today's Active vs Next Upcoming) ---
             const now = new Date();
-            const todayStr = now.toLocaleDateString('en-GB').replace(/\//g, '.'); // DD.MM.YYYY
-            const nowTime = now.getTime(); // Current timestamp
+            const todayStr = formatDateToCSV(now); // Reliable Helper (DD.MM.YYYY)
+            const nowTime = now.getTime();
             let activeTodaySession = null;
             let nextUpcomingSession = null;
-            let minDiff = Infinity; // For finding the nearest future session
+            let minDiff = Infinity;
+            let mostRecentPastSession = null;
+            let minPastDiff = Infinity;
+
+
             allStudentSessions.forEach(session => {
-                // Populate Options
                 const opt = `<option value="${session}">${session}</option>`;
-                sessionSelect.innerHTML += opt;
-                if(reportsSessionSelect) reportsSessionSelect.innerHTML += opt;
-                if(editSessionSelect) editSessionSelect.innerHTML += opt;
-                if(searchSessionSelect) searchSessionSelect.innerHTML += opt;
-                // 1. Parse Session Date & Time
+                [sessionSelect, reportsSessionSelect, editSessionSelect, searchSessionSelect].forEach(el => {
+                    if (el) el.innerHTML += opt;
+                });
+
                 const [datePart, timePart] = session.split('|').map(s => s.trim());
                 if (!datePart || !timePart) return;
-                // Parse Date (DD.MM.YYYY)
+
                 const [dd, mm, yyyy] = datePart.split('.');
-                const [timeStr, period] = timePart.split(' '); // "9:30 AM" -> ["9:30", "AM"]
+                const [timeStr, period] = timePart.split(' ');
                 let [hours, minutes] = timeStr.split(':').map(Number);
                 if (period && period.toUpperCase() === 'PM' && hours !== 12) hours += 12;
                 if (period && period.toUpperCase() === 'AM' && hours === 12) hours = 0;
+
                 const sessionStart = new Date(yyyy, mm - 1, dd, hours, minutes);
-                const sessionEndWindow = new Date(sessionStart.getTime() + (60 * 60 * 1000)); // Start + 1 Hr
-                // 2. Logic: Is this "Today's Active Session"? (Now < Start + 1 Hr)
+                // EXTENDED: Keep "Today" session active for 7 hours from start (covers full exam duration)
+                const sessionEndWindow = new Date(sessionStart.getTime() + (7 * 60 * 60 * 1000));
+
                 if (datePart === todayStr && nowTime < sessionEndWindow.getTime()) {
                      if (!activeTodaySession) activeTodaySession = session; 
                 }
-                // 3. Logic: Find "Next Upcoming Session" (Earliest Future Session)
+
                 const diff = sessionStart.getTime() - nowTime;
                 if (diff > 0 && diff < minDiff) { 
                     minDiff = diff;
                     nextUpcomingSession = session;
                 }
+                const pastDiff = nowTime - sessionStart.getTime();
+                if (pastDiff > 0 && pastDiff < minPastDiff) {
+                    minPastDiff = pastDiff;
+                    mostRecentPastSession = session;
+                }
+
             });
-            // PRIORITY: 1. Active Today -> 2. Next Upcoming -> 3. First in List
-            let defaultSession = activeTodaySession || nextUpcomingSession || allStudentSessions[0] || "";
+            let defaultSession = activeTodaySession || nextUpcomingSession || mostRecentPastSession || allStudentSessions[0] || "";
+
+
 
             
             const targetVal = (previousSelection && allStudentSessions.includes(previousSelection)) ? previousSelection : defaultSession;
@@ -8856,6 +8906,9 @@ window.real_populate_qp_code_session_dropdown = function () {
             let activeTodaySession = null;
             let nextUpcomingSession = null;
             let minDiff = Infinity;
+            let mostRecentPastSession = null;
+            let minPastDiff = Infinity;
+
             allStudentSessions.forEach(session => {
                 sessionSelectQP.innerHTML += `<option value="${session}">${session}</option>`;
                 // 1. Parse
@@ -8876,8 +8929,15 @@ window.real_populate_qp_code_session_dropdown = function () {
                     minDiff = diff;
                     nextUpcomingSession = session;
                 }
+                const pastDiff = nowTime - sessionStart.getTime();
+                if (pastDiff > 0 && pastDiff < minPastDiff) {
+                    minPastDiff = pastDiff;
+                    mostRecentPastSession = session;
+                }
+
             });
-            let defaultSession = activeTodaySession || nextUpcomingSession || allStudentSessions[0] || "";
+            let defaultSession = activeTodaySession || nextUpcomingSession || mostRecentPastSession || allStudentSessions[0] || "";
+
 
 
 
@@ -9572,11 +9632,31 @@ window.real_populate_qp_code_session_dropdown = function () {
                 return;
             }
 
-            masterDownloadBtn.textContent = "Gathering Data...";
+        masterDownloadBtn.textContent = "Gathering Data...";
             masterDownloadBtn.disabled = true;
+
+            // --- FETCH ALL HISTORICAL STUDENT DATA BEFORE EXPORTING ---
+            const historicalMeta = JSON.parse(localStorage.getItem('examHistoricalMeta') || '{}');
+            const allKnownSessions = Object.keys(historicalMeta);
+            let fetchCount = 0;
+
+            for (const sessionKey of allKnownSessions) {
+                const [d, t] = sessionKey.split(' | ');
+                const alreadyLoaded = allStudentData.some(s => s.Date === d.trim() && s.Time === t.trim());
+                if (!alreadyLoaded) {
+                    fetchCount++;
+                    masterDownloadBtn.textContent = `Fetching session ${fetchCount}/${allKnownSessions.length}...`;
+                    await window.fetchHeavyDataOnDemand(sessionKey);
+                    // Small breathing space to prevent network congestion
+                    await new Promise(r => setTimeout(r, 300));
+                }
+            }
+            masterDownloadBtn.textContent = "Building CSV...";
+            // ----------------------------------------------------------
 
             // Allow UI to update
             await new Promise(r => setTimeout(r, 50));
+
 
             try {
                 // 1. Load ALL Context Data
@@ -9788,6 +9868,9 @@ window.real_populate_qp_code_session_dropdown = function () {
             let activeTodaySession = null;
             let nextUpcomingSession = null;
             let minDiff = Infinity;
+            let mostRecentPastSession = null;
+            let minPastDiff = Infinity;
+
             allStudentSessions.forEach(session => {
                 allotmentSessionSelect.innerHTML += `<option value="${session}">${session}</option>`;
                 // 1. Parse
@@ -9808,8 +9891,15 @@ window.real_populate_qp_code_session_dropdown = function () {
                     minDiff = diff;
                     nextUpcomingSession = session;
                 }
+                const pastDiff = nowTime - sessionStart.getTime();
+                if (pastDiff > 0 && pastDiff < minPastDiff) {
+                    minPastDiff = pastDiff;
+                    mostRecentPastSession = session;
+                }
+
             });
-            let defaultSession = activeTodaySession || nextUpcomingSession || allStudentSessions[0] || "";
+            let defaultSession = activeTodaySession || nextUpcomingSession || mostRecentPastSession || allStudentSessions[0] || "";
+
             
             const targetVal = (previousSelection && allStudentSessions.includes(previousSelection)) ? previousSelection : defaultSession;
 
@@ -14173,7 +14263,8 @@ window.handlePythonExtraction = async function (jsonString) {
             nukeBtn.disabled = true;
 
             try {
-                const { db, doc, writeBatch, updateDoc, collection, getDocs } = window.firebase;
+                const { db, doc, writeBatch, updateDoc, collection, getDocs, deleteDoc } = window.firebase;
+
                 
                 // --- DEFINE TARGET LISTS FOR LOCAL STORAGE ---
                 // List 1: Student Data & Operations (Target of DATA mode)
@@ -14241,10 +14332,19 @@ window.handlePythonExtraction = async function (jsonString) {
                     // Update Main Document (Selective Erase)
                     batch.update(mainRef, updatePayload);
 
-                    // 3. Delete Data Chunks (Always wipe chunks in both modes)
-                    const dataColRef = collection(db, "colleges", currentCollegeId, "data");
-                    const chunkSnaps = await getDocs(dataColRef);
-                    chunkSnaps.forEach(chunk => batch.delete(chunk.ref));
+                    // --- 🔥 NEW: V2 DESTRUCTION LOGIC 🔥 ---
+                    updateSyncStatus("Vaporizing live session databases...", "neutral");
+                    const sessionsColRef = collection(db, "colleges", currentCollegeId, "sessions");
+                    const studentsColRef = collection(db, "colleges", currentCollegeId, "session_students");
+                    
+                    // Nuke all 59+ sessions (Outside the batch to prevent 500-limit errors)
+                    const sSnap = await getDocs(sessionsColRef);
+                    for (const sDoc of sSnap.docs) { await deleteDoc(sDoc.ref); }
+                    
+                    const stuSnap = await getDocs(studentsColRef);
+                    for (const stuDoc of stuSnap.docs) { await deleteDoc(stuDoc.ref); }
+                    // ----------------------------------------
+
 
                     await batch.commit();
                 }
@@ -14572,49 +14672,54 @@ async function loadInitialData() {
             const startDateInput = document.getElementById('bill-start-date').valueAsDate;
             const endDateInput = document.getElementById('bill-end-date').valueAsDate;
 
+                        // --- NEW: Build billGroups from lightweight metadata instead of heavy student arrays ---
+                        // --- FIX: Build billGroups from filteredData to properly segregate streams ---
+            const scribeListRaw = JSON.parse(localStorage.getItem('examScribeList') || '[]');
+            const scribeRegNos = new Set(scribeListRaw.map(s => s.regNo));
+
             filteredData.forEach(s => {
+                const sDateVal = s.Date ? s.Date.trim() : "";
+                const sTimeVal = s.Time ? s.Time.trim() : "";
+                const sessionKey = `${sDateVal} | ${sTimeVal}`;
+                
                 if (mode === 'period' && (startDateInput || endDateInput)) {
-                    const sDate = parseDate(s.Date);
+                    if (!sDateVal) return;
+                    const sDate = parseDate(sDateVal);
                     if (startDateInput && sDate < startDateInput) return;
                     if (endDateInput && sDate > endDateInput) return;
                 }
-
-                const sessionKey = `${s.Date} | ${s.Time}`;
+                
                 let groupKey = "Consolidated Bill";
-
-               if (mode === 'exam') {
-                        // Get the Exam Name
-                        // FIX: Check the student record ('s') for the updated name first!
-                        const foundName = s['Exam Name'] || getExamName(s.Date, s.Time, s.Stream) || "Unknown / Other Exams";
-
-                        // *** FILTER LOGIC ***
-                        if (selectedExamName && selectedExamName !== "" && foundName !== selectedExamName) {
-                            return; // Skip if it doesn't match selected exam
-                        }
-                        groupKey = foundName;
-                    } else {
+                if (mode === 'exam') {
+                    const foundName = getExamName(sDateVal, sTimeVal, selectedStream) || "Unknown / Other Exams";
+                    if (selectedExamName && selectedExamName !== "" && foundName !== selectedExamName) return;
+                    groupKey = foundName;
+                } else {
                     const sStr = document.getElementById('bill-start-date').value || "Start";
                     const eStr = document.getElementById('bill-end-date').value || "End";
                     groupKey = `Period: ${sStr} to ${eStr}`;
                 }
-
+                
                 if (!billGroups[groupKey]) billGroups[groupKey] = {};
-
+                
                 if (!billGroups[groupKey][sessionKey]) {
                     billGroups[groupKey][sessionKey] = {
-                        date: s.Date, time: s.Time, normalCount: 0, scribeCount: 0
+                        date: sDateVal,
+                        time: sTimeVal,
+                        normalCount: 0,
+                        scribeCount: 0
                     };
                 }
 
-                const scribeListRaw = JSON.parse(localStorage.getItem(SCRIBE_LIST_KEY) || '[]');
-                const scribeRegNos = new Set(scribeListRaw.map(s => s.regNo));
-
+                // Increment counts precisely for the matched students
                 if (scribeRegNos.has(s['Register Number'])) {
                     billGroups[groupKey][sessionKey].scribeCount++;
                 } else {
                     billGroups[groupKey][sessionKey].normalCount++;
                 }
             });
+
+
 
             // C. Process Groups
             const outputContainer = document.getElementById('remuneration-output');
@@ -18702,5 +18807,4 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 });
-
 

@@ -13,7 +13,7 @@
 
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-        import { getFirestore, doc, getDoc, collection, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+        import { getFirestore, doc, getDoc, collection, getDocs, query, where } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
         const firebaseConfig = {
             apiKey: "AIzaSyBu1CD5Kv55e0avayUUyAbDFC_ek4lEgJM",
@@ -27,7 +27,7 @@
 
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
-        window.firebase = { db, doc, getDoc, collection, getDocs }; 
+        window.firebase = { db, doc, getDoc, collection, getDocs, query, where }; 
 
         const urlParams = new URLSearchParams(window.location.search);
         let collegeId = urlParams.get('id');
@@ -54,13 +54,29 @@
                 // A. FETCH SETTINGS
                 const settingsRef = doc(db, "colleges", collegeId, "system_data", "settings");
                 
-                // B. FETCH SESSIONS (V2 Modular)
+                // --- FETCH NETWORK TIME FIRST ---
+                let offset = 0;
+                try {
+                    const tResp = await fetch('https://worldtimeapi.org/api/timezone/Asia/Kolkata');
+                    const tData = await tResp.json();
+                    offset = new Date(tData.datetime).getTime() - Date.now();
+                } catch(e) { console.warn("Network time failed, using device clock."); }
+                window.getExamsNow = () => new Date(Date.now() + offset);
+
+                // Build exactly today's date in 'DD.MM.YYYY' format
+                const now = window.getExamsNow();
+                const todayString = `${String(now.getDate()).padStart(2, '0')}.${String(now.getMonth() + 1).padStart(2, '0')}.${now.getFullYear()}`;
+
+                // B. FETCH SESSIONS (V2 Modular) - FILTERED FOR TODAY ONLY
                 const sessionsRef = collection(db, "colleges", collegeId, "sessions");
+                const todayQuery = query(sessionsRef, where("date", "==", todayString));
 
                 const [settingsSnap, sessionsSnap] = await Promise.all([
                     getDoc(settingsRef),
-                    getDocs(sessionsRef)
+                    getDocs(todayQuery) // Only fetches arrays matching today string!
                 ]);
+
+                
 
                 if (settingsSnap.exists()) {
                     const settings = settingsSnap.data();
@@ -135,15 +151,7 @@
                 let seatNumber = "-";
                 let isScribeRoom = false;
 
-                // 3. Check Scribe Allotment FIRST (lower priority)
-                if (session.scribeAllotment && session.scribeAllotment[regNo]) {
-                    studentRoom = session.scribeAllotment[regNo];
-                    isScribeRoom = true;
-                    seatNumber = "Scribe";
-                }
-
-                // 4. Check Regular Allotment — OVERRIDES scribe if student found here
-                // This ensures that if scribe status was removed, the regular seat wins.
+                // 3. Check Regular Allotment
                 if (session.roomAllotment) {
                     for (const room of session.roomAllotment) {
                         const index = room.students.findIndex(s =>
@@ -152,14 +160,20 @@
                         if (index !== -1) {
                             studentRoom = room.roomName;
                             seatNumber = index + 1;
-                            isScribeRoom = false; // Explicitly clear scribe flag
-                            // If student record not found above, get it from here
+                            // NEW: if student record not found above, get it from here
                             if (!studentRecord && typeof room.students[index] === 'object') {
                                 studentRecord = room.students[index];
                             }
                             break;
                         }
                     }
+                }
+
+                // 4. Check Scribe Allotment
+                if (session.scribeAllotment && session.scribeAllotment[regNo]) {
+                    studentRoom = session.scribeAllotment[regNo];
+                    isScribeRoom = true;
+                    seatNumber = "Scribe";
                 }
 
                 // 5. Save result only if student was found AND has a room
@@ -180,7 +194,8 @@
             if (myExams.length > 0) {
                 found = true;
                 localStorage.setItem('myExamRegNo', regNo);
-                const now = new Date();
+                const now = window.getExamsNow ? window.getExamsNow() : new Date();
+
 
                 myExams.forEach(exam => {
                     // --- TIME LOCK LOGIC (45 Mins Before) ---

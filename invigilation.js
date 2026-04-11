@@ -398,11 +398,19 @@ if (adminView && !adminView.classList.contains('hidden')) {
             }
         });
     }
-    // --- 4. SESSION DATA LISTENER (Live Updates) ---
+       // --- 4. SESSION DATA LISTENER (Live Updates) ---
     const sessionsRef = collection(db, "colleges", collegeId, "sessions");
-    if (sessionsUnsubscribe) sessionsUnsubscribe(); 
-    
-    sessionsUnsubscribe = onSnapshot(sessionsRef, (snap) => {
+    if (sessionsUnsubscribe) sessionsUnsubscribe();
+
+    const { query, where } = window.firebase;
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - 30);
+    const q = query(sessionsRef, where("meta.examTimestamp", ">=", cutoffDate.getTime()));
+
+    sessionsUnsubscribe = onSnapshot(q, (snap) => {
+
+
+
         if (!snap.empty) {
             console.log("📡 Staff Portal: Session Data Updated Live.");
 
@@ -550,8 +558,10 @@ function getVacationDutiesDoneCount(email) {
         const slot = invigilationSlots[key];
         const dateObj = parseDate(key);
         
-        // Count if in standard vacation range OR manually marked as an Extra Date
-        const isExtraDutyDate = window.vacationDutyDates && window.vacationDutyDates.includes(key);
+        // Clean format conversion to catch manually added extra dates
+        const isoDate = `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}-${String(dateObj.getDate()).padStart(2, '0')}`;
+        const isExtraDutyDate = window.vacationDutyDates && window.vacationDutyDates.includes(isoDate);
+
         if (isDateInVacation(dateObj) || isExtraDutyDate) {
 
             // Check if attended (or assigned if no attendance data yet)
@@ -1916,14 +1926,25 @@ window.openDayDetail = function (dateStr, email) {
             let staffListHtml = '';
             if (slot.assigned.length > 0) {
                 const listItems = slot.assigned.map(st => {
-                    const s = staffData.find(sd => sd.email === st);
-                    if (!s) return '';
-                    const isExchanging = slot.exchangeRequests && slot.exchangeRequests.includes(st);
-                    const statusIcon = isExchanging ? "⏳" : "✅";
-                    
-                    // Fixed: Removed Reference to reserveBadge
-                    return `<div class="flex justify-between items-center text-xs bg-white p-1.5 rounded border border-gray-100 mb-1"><span class="font-bold text-gray-700 flex items-center">${statusIcon} <span class="ml-1">${s.name}</span></span></div>`;
-                }).join('');
+    const s = staffData.find(sd => sd.email === st);
+    if (!s) return '';
+    const isExchanging = slot.exchangeRequests && slot.exchangeRequests.includes(st);
+    const statusIcon = isExchanging ? "⏳" : "✅";
+    const phone = s.phone ? s.phone.replace(/\D/g, '') : '';
+      const contactBtns = (phone && st !== email) ? `
+          <div class="flex items-center gap-1 shrink-0">
+              <a href="tel:${phone}" class="flex items-center gap-1 text-[9px] font-bold text-green-700 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded hover:bg-green-100 transition" title="Call ${s.name}">📞 Call</a>
+              <a href="https://wa.me/91${phone}" target="_blank" class="flex items-center gap-1 text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded hover:bg-emerald-100 transition" title="WhatsApp ${s.name}">
+                  <svg class="w-2.5 h-2.5 fill-current" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.438 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg> 
+                  Chat
+              </a>
+
+          
+          </div>` : '';
+      return `<div class="flex justify-between items-center text-xs bg-white p-1.5 rounded border border-gray-100 mb-1"><span class="font-bold text-gray-700 flex items-center">${statusIcon} <span class="ml-1">${s.name}</span></span>${contactBtns}</div>`;
+
+}).join('');
+
                 
                 staffListHtml = `<div class="mt-3 pt-2 border-t border-gray-200"><div class="flex justify-between items-center mb-1.5"><div class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Assigned Staff</div></div><div class="space-y-0.5 max-h-24 overflow-y-auto custom-scroll">${listItems}</div></div>`;
             }
@@ -8513,13 +8534,13 @@ window.initLivePresence = function(myEmail, myName, isAdmin) {
         }, { merge: true });
     };
 
+
     sendHeartbeat('online');
-    setInterval(() => {
-        if (document.visibilityState === 'visible') sendHeartbeat('online');
-    }, 5 * 60 * 1000); 
+    // Removed setInterval to prevent endless background Firestore writes
 
     window.addEventListener('beforeunload', () => sendHeartbeat('offline'));
     document.addEventListener('visibilitychange', () => {
+
         if (document.visibilityState === 'hidden') sendHeartbeat('idle');
         else sendHeartbeat('online');
     });
@@ -10186,10 +10207,12 @@ window.runWeeklyAutoAssign = async function (monthStr, weekNum) {
         if (s.status !== 'archived') deptCounts[s.dept] = (deptCounts[s.dept] || 0) + 1;
         return {
             ...s,
-            pending: calculateStaffTarget(s) - getDutiesDoneCount(s.email),
+            regularPending: calculateStaffTarget(s) - getDutiesDoneCount(s.email),
+            vacationPending: (vacationDutyTarget || 0) - getVacationDutiesDoneCount(s.email),
             weeklyLoad: {}
         };
     });
+
 
     Object.keys(invigilationSlots).forEach(k => {
         const d = parseDate(k);
@@ -10226,10 +10249,16 @@ window.runWeeklyAutoAssign = async function (monthStr, weekNum) {
             if (s && s.dept) slotDeptCounts[s.dept] = (slotDeptCounts[s.dept] || 0) + 1;
         });
 
+        // Check if this specific slot is considered a Vacation duty
+        const slotIso = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+        const isVacDate = isDateInVacation(date) || (window.vacationDutyDates && window.vacationDutyDates.includes(slotIso));
+
         for (let i = 0; i < needed; i++) {
             const candidates = eligibleStaff.map(s => {
-                let score = s.pending * 100;
+                let activePending = isVacDate ? s.vacationPending : s.regularPending;
+                let score = Math.max(0, activePending) * 100;
                 let warnings = [];
+
 
                 if (slot.assigned.includes(s.email) || isUserUnavailable(slot, s.email, key) || s.status === 'archived') return null;
 
@@ -10258,7 +10287,9 @@ window.runWeeklyAutoAssign = async function (monthStr, weekNum) {
             if (candidates.length > 0) {
                 const choice = candidates[0];
                 slot.assigned.push(choice.staff.email);
-                choice.staff.pending--;
+                if (isVacDate) choice.staff.vacationPending--;
+                else choice.staff.regularPending--;
+
                 if (!choice.staff.weeklyLoad[currentWeekKey]) choice.staff.weeklyLoad[currentWeekKey] = 0;
                 choice.staff.weeklyLoad[currentWeekKey]++;
                 slotDeptCounts[choice.staff.dept] = (slotDeptCounts[choice.staff.dept] || 0) + 1;
@@ -10319,11 +10350,26 @@ window.saveManualAllocation = async function () {
     const state = window.manualState;
     if (!state || !state.key) return;
 
-    const key = state.key;
+        const key = state.key;
     const newAssigned = state.rankedStaff.filter(s => s.isChecked).map(s => s.email);
 
     if (!invigilationSlots[key]) return;
+
+    // --- BUG FIX: Clean up exchange requests for removed invigilators ---
+    const oldAssigned = invigilationSlots[key].assigned || [];
+    const removedEmails = oldAssigned.filter(e => !newAssigned.includes(e));
+
+    if (removedEmails.length > 0 && invigilationSlots[key].exchangeRequests) {
+        invigilationSlots[key].exchangeRequests = invigilationSlots[key].exchangeRequests
+            .filter(e => !removedEmails.includes(e));
+        if (removedEmails.length > 0) {
+            logActivity("Admin Removed (Exchange Cleared)", `Exchange request(s) auto-cleared for ${removedEmails.map(e => getNameFromEmail(e)).join(', ')} in slot ${key}.`);
+        }
+    }
+    // -----------------------------------------------------------------
+
     invigilationSlots[key].assigned = newAssigned;
+
 
     try {
         await syncSlotsToCloud();
