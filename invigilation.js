@@ -1430,11 +1430,12 @@ function renderStaffRankList(myEmail, targetDate = new Date()) {
         })
         .map(s => {
 
-        const target = calculateStaffTarget(s);
+            const target = calculateStaffTarget(s);
             const done = getDutiesDoneCount(s.email);
             const pending = target - done;
-            return { ...s, done, pending, target }; // Included 'target' for UI Badge
+            return { ...s, done, pending, target }; // ADDED: target for UI Badge
         })
+
 
         .sort((a, b) => {
             if (b.pending !== a.pending) return b.pending - a.pending;
@@ -3420,12 +3421,16 @@ window.saveRoleConfig = async function () {
         invigGuestTarget: guestGlobalTarget, // <--- SAVED HERE
         invigVacationTarget: vacationDutyTarget,
         invigVacationDutyDates: newExtraDates,
-
-
-        invigGoogleScriptUrl: googleScriptUrl
+        invigGoogleScriptUrl: googleScriptUrl,
+        // 🛡️ SAVE TO PROTECTED CONFIG BLOCK
+        protected_config: {
+            googleScriptUrl: googleScriptUrl,
+            lastUpdated: new Date().toISOString()
+        }
     });
 
     window.closeModal('role-config-modal');
+
     updateAdminUI();
 }
 
