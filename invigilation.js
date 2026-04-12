@@ -1433,10 +1433,8 @@ function renderStaffRankList(myEmail, targetDate = new Date()) {
             const target = calculateStaffTarget(s);
             const done = getDutiesDoneCount(s.email);
             const pending = target - done;
-            return { ...s, done, pending, target }; // ADDED: target for UI Badge
+            return { ...s, done, pending };
         })
-
-
         .sort((a, b) => {
             if (b.pending !== a.pending) return b.pending - a.pending;
             return a.name.localeCompare(b.name);
@@ -1475,7 +1473,6 @@ function renderStaffRankList(myEmail, targetDate = new Date()) {
                         <div class="flex items-center gap-1">
                             <span class="truncate ${textClass}">${s.name}</span>
                             ${roleBadge}
-                            ${s.target !== globalDutyTarget ? `<span title="Target adjusted for joining date or vacation" class="text-[8px] bg-amber-100 text-amber-700 px-1 rounded font-bold border border-amber-200">Target: ${s.target}</span>` : ''}
                         </div>
                         <span class="text-[9px] text-gray-400 truncate">${s.dept}</span>
                     </div>
@@ -3421,16 +3418,12 @@ window.saveRoleConfig = async function () {
         invigGuestTarget: guestGlobalTarget, // <--- SAVED HERE
         invigVacationTarget: vacationDutyTarget,
         invigVacationDutyDates: newExtraDates,
-        invigGoogleScriptUrl: googleScriptUrl,
-        // 🛡️ SAVE TO PROTECTED CONFIG BLOCK
-        protected_config: {
-            googleScriptUrl: googleScriptUrl,
-            lastUpdated: new Date().toISOString()
-        }
+
+
+        invigGoogleScriptUrl: googleScriptUrl
     });
 
     window.closeModal('role-config-modal');
-
     updateAdminUI();
 }
 
@@ -6225,16 +6218,9 @@ window.handleMasterRestore = function (input) {
                 designationsConfig = d.designationsConfig || {};
                 departmentsConfig = d.departmentsConfig || [];
                 globalDutyTarget = d.globalDutyTarget || 2;
-                
-                // 🛡️ LOAD PROTECTED CONFIG IF IT EXISTS
-                if (d.protected_config && d.protected_config.googleScriptUrl) {
-                    googleScriptUrl = d.protected_config.googleScriptUrl;
-                } else {
-                    googleScriptUrl = d.googleScriptUrl || ""; // Fallback
-                }
+                googleScriptUrl = d.googleScriptUrl || "";
 
                 // Prepare Full Payload
-
                 updatePayload = {
                     examStaffData: JSON.stringify(staffData),
                     examInvigilationSlots: JSON.stringify(invigilationSlots),
@@ -10613,6 +10599,5 @@ window.confirmDirectAdd = async function() {
     window.closeModal('direct-add-modal');
     alert(`✅ ${staff.name} has been successfully assigned to ${key} manually.`);
 };
-
 
 
