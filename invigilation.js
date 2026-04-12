@@ -1430,11 +1430,12 @@ function renderStaffRankList(myEmail, targetDate = new Date()) {
         })
         .map(s => {
 
-            const target = calculateStaffTarget(s);
+        const target = calculateStaffTarget(s);
             const done = getDutiesDoneCount(s.email);
             const pending = target - done;
-            return { ...s, done, pending };
+            return { ...s, done, pending, target }; // Included 'target' for UI Badge
         })
+
         .sort((a, b) => {
             if (b.pending !== a.pending) return b.pending - a.pending;
             return a.name.localeCompare(b.name);
@@ -1473,6 +1474,7 @@ function renderStaffRankList(myEmail, targetDate = new Date()) {
                         <div class="flex items-center gap-1">
                             <span class="truncate ${textClass}">${s.name}</span>
                             ${roleBadge}
+                            ${s.target !== globalDutyTarget ? `<span title="Target adjusted for joining date or vacation" class="text-[8px] bg-amber-100 text-amber-700 px-1 rounded font-bold border border-amber-200">Target: ${s.target}</span>` : ''}
                         </div>
                         <span class="text-[9px] text-gray-400 truncate">${s.dept}</span>
                     </div>
@@ -6218,9 +6220,16 @@ window.handleMasterRestore = function (input) {
                 designationsConfig = d.designationsConfig || {};
                 departmentsConfig = d.departmentsConfig || [];
                 globalDutyTarget = d.globalDutyTarget || 2;
-                googleScriptUrl = d.googleScriptUrl || "";
+                
+                // 🛡️ LOAD PROTECTED CONFIG IF IT EXISTS
+                if (d.protected_config && d.protected_config.googleScriptUrl) {
+                    googleScriptUrl = d.protected_config.googleScriptUrl;
+                } else {
+                    googleScriptUrl = d.googleScriptUrl || ""; // Fallback
+                }
 
                 // Prepare Full Payload
+
                 updatePayload = {
                     examStaffData: JSON.stringify(staffData),
                     examInvigilationSlots: JSON.stringify(invigilationSlots),
