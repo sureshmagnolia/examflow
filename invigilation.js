@@ -27,7 +27,7 @@ if (hostname === "localhost" || hostname === "127.0.0.1" || hostname.includes("1
 // 2. START APP CHECK
 const appCheck = initializeAppCheck(app, {
     // Your public Site Key
-    provider: new ReCaptchaV3Provider('6LcMiSQsAAAAABfK5nXqVJ_vo6GwU4DFfBN7-u5K'),
+        provider: new ReCaptchaV3Provider('6LdD78MsAAAAABesH03GhDS38SaGyS4zOecvYPve'),
 
     // Automatically refresh the token in the background
     isTokenAutoRefreshEnabled: true 
@@ -491,11 +491,24 @@ function initAdminDashboard() {
 
 
 function isDateInVacation(dateObj) {
+    // 1. Check Specific Extra Holidays List First
+    const yyyy = dateObj.getFullYear();
+    const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
+    const dd = String(dateObj.getDate()).padStart(2, '0');
+    const dateString = `${yyyy}-${mm}-${dd}`;
+    if (vacationExtraHolidays && vacationExtraHolidays.has(dateString)) return true;
+
+    // 2. Check General Vacation Range
     if (!vacationStart || !vacationEnd) return false;
     const start = new Date(vacationStart);
     const end = new Date(vacationEnd);
-    return dateObj >= start && dateObj <= end;
+    // Normalize to midnight for fair comparison
+    const d = new Date(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate());
+    const s = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+    const e = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+    return d >= s && d <= e;
 }
+
 
 
 
@@ -762,6 +775,11 @@ function isUserUnavailable(slot, email, key) {
             // *** LOGIC FIX: Only check days if Guest Lecturer ***
             // Regular staff are assumed available Mon-Sat (1-6) regardless of saved preference
             if (staff.designation === "Guest Lecturer") {
+                // 🛡️ VACATION EXCLUSION: Guest Faculty are excluded during vacation periods
+                if (isDateInVacation(date)) {
+                    return true; 
+                }
+
                 const allowedDays = staff.preferredDays || [1, 2, 3, 4, 5, 6];
                 if (!allowedDays.includes(dayOfWeek)) {
                     return true; // Unavailable on this day
@@ -4831,21 +4849,26 @@ window.viewActivityLogs = function () {
     // This query is much faster and safer than downloading the whole file
     const q = query(logsColRef, orderBy("t", "desc"), limit(100)); 
 
-    activityLogUnsubscribe = onSnapshot(q, (snapshot) => {
-        const logs = [];
-        snapshot.forEach(doc => {
-            logs.push(doc.data());
-        });
-        
-        // Cache data for search filtering
-        window.cachedLogs = logs; 
-        filterDisplayedLogs(""); // Render all initially
-        
-    }, (error) => {
-        console.error("Log Read Error:", error);
-        list.innerHTML = '<div class="text-center py-6 text-red-400 italic text-xs">Access Denied or Connection Lost.</div>';
-    });
+    // 3. COST SAVER: Poll Logs Every 60s
+    const fetchLogs = async () => {
+        try {
+            const snapshot = await getDocs(q);
+            const logs = [];
+            snapshot.forEach(doc => logs.push(doc.data()));
+            window.cachedLogs = logs; 
+            filterDisplayedLogs(document.getElementById('act-search')?.value || ""); 
+        } catch (error) {
+            console.error("Log Read Error:", error);
+            list.innerHTML = '<div class="text-center py-6 text-red-400 italic text-xs">Access Denied or Connection Lost.</div>';
+        }
+    };
+    
+    fetchLogs(); // Initial explicit fetch
+    // 🚫 FIXED COST LEAK: Removed 60s polling interval. Logs will now only fetch on load.
+    activityLogUnsubscribe = () => {};
+
 };
+
 
 // Helper to render the logs (Paste this below viewActivityLogs)
 function filterDisplayedLogs(query) {
@@ -8561,6 +8584,8 @@ window.initLivePresence = function(myEmail, myName, isAdmin) {
 
         if (presenceUnsubscribe) presenceUnsubscribe();
         
+        // 🚫 FIXED COST LEAK: Replaced expensive 60s polling with efficient onSnapshot.
+        // onSnapshot only downloads data when someone's status ACTUALLY changes.
         presenceUnsubscribe = onSnapshot(q, (snapshot) => {
             const now = Date.now();
             globalLiveUsers = {}; 
@@ -8594,7 +8619,7 @@ window.initLivePresence = function(myEmail, myName, isAdmin) {
                 if (typeof renderSlotsGridAdmin === 'function') renderSlotsGridAdmin();
                 if (typeof renderStaffTable === 'function') renderStaffTable(); 
             }, 500);
-        });
+        }); // Close onSnapshot listener
 
     } else {
         console.log("🟢 Live Presence: Staff Mode (Broadcasting only)");
@@ -10599,5 +10624,6 @@ window.confirmDirectAdd = async function() {
     window.closeModal('direct-add-modal');
     alert(`✅ ${staff.name} has been successfully assigned to ${key} manually.`);
 };
+
 
 

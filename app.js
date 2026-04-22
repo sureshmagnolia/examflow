@@ -1,10 +1,16 @@
-// --- FUNCTIONS FOR PYTHON  BRIDGE ---
+//- --- FUNCTIONS FOR PYTHON  BRIDGE ---
 // These 11 functions MUST be outside the DOMContentLoaded listener
 // to be available when Python loads.
 
 const BASE_DATA_KEY = 'examBaseData';
+let syncQueue = { active: false, sections: new Set() }; // New Sync Manager
+
+// 🚫 DELETED: HYBRID_GAS_URL (Returning to Pure Firebase Architecture)
+
+
 
 // Fail-safe constants (Avoids conflict with drive_sync.js)
+
 if (typeof IDB_NAME === 'undefined') {
     window.IDB_NAME = 'AntigravityDB';
     window.IDB_STORE = 'examStore';
@@ -190,7 +196,15 @@ window.disable_edit_data_tab = disable_edit_data_tab;
 async function autoCleanPastGhostData() {
     console.log("🚀 [System] Checking for expired exam data...");
     
+    // 🛡️ UNIFIED PARSER: Safely reads any Date string and converts 2-digit years automatically
+    const parseSessionDate = (dStr) => {
+        if (!dStr.includes('.')) return new Date(dStr);
+        const [d, m, y] = dStr.split('.');
+        return new Date(`${y.length === 2 ? '20' + y : y}-${m}-${d}`);
+    };
+
     const today = new Date();
+
     today.setHours(0, 0, 0, 0);
 
     // 🛡️ SAFETY BUFFER: Keep data for 30 days after the exam date
@@ -207,13 +221,8 @@ async function autoCleanPastGhostData() {
     Object.keys(slots).forEach(slotId => {
         const dateStr = slotId.split('_')[0]; 
         // Handle "DD.MM.YYYY" or "YYYY-MM-DD"
-        let slotDate;
-        if (dateStr.includes('.')) {
-            const [d, m, y] = dateStr.split('.');
-            slotDate = new Date(`${y}-${m}-${d}`);
-        } else {
-            slotDate = new Date(dateStr);
-        }
+        let slotDate = parseSessionDate(dateStr);
+
         slotDate.setHours(0, 0, 0, 0);
 
         // ONLY delete if the exam is strictly older than 30 days
@@ -227,13 +236,8 @@ async function autoCleanPastGhostData() {
 
     // 2. Scan Availability
     Object.keys(availability).forEach(dateStr => {
-        let availDate;
-        if (dateStr.includes('.')) {
-            const [d, m, y] = dateStr.split('.');
-            availDate = new Date(`${y}-${m}-${d}`);
-        } else {
-            availDate = new Date(dateStr);
-        }
+        let availDate = parseSessionDate(dateStr);
+
         availDate.setHours(0, 0, 0, 0);
 
         if (availDate < cutoffDate) {
@@ -247,13 +251,131 @@ async function autoCleanPastGhostData() {
         localStorage.setItem('examInvigilationSlots', JSON.stringify(slots));
         localStorage.setItem('invigAdvanceUnavailability', JSON.stringify(availability));
         
-        if (typeof syncDataToCloud === 'function') {
+         if (typeof syncDataToCloud === 'function') {
             await syncDataToCloud('slots');
         }
-        console.log(`🧹 Maintenance: Cleaned up ${deletedCount} records older than 30 days.`);
+        console.log(`🧹 Maintenance: Cleaned up ${deletedCount} local records older than 30 days.`);
     } else {
+        console.log("✅ [System] Local Data is clean.");
+    }
 
-        console.log("✅ [System] Data is clean. No old records found.");
+    // 4. ☁️ TRUE CLOUD PURGE: Destroy 30-day old Seating & Sessions from Firebase
+    if (window.firebase && window.currentCollegeId && navigator.onLine) {
+        try {
+            const { db, doc, getDoc, setDoc, deleteDoc } = window.firebase;
+            const indexRef = doc(db, 'public_seating', window.currentCollegeId);
+            const indexSnap = await getDoc(indexRef);
+            
+            if (indexSnap.exists()) {
+                const data = indexSnap.data();
+                const sessions = data.sessions || {};
+                let indexModified = false;
+                let cloudPurgeCount = 0;
+
+                for (const [sessionKey, sInfo] of Object.entries(sessions)) {
+                    const dateStr = sessionKey.split(' | ')[0].trim();
+                    let sessionDate = parseSessionDate(dateStr);
+                    sessionDate.setHours(0, 0, 0, 0);
+
+                    // Public Seating Only: If the exam happened before today (i.e. yesterday or older)
+                    if (sessionDate < today) {
+                        console.log(`🔥 Auto-Incinerating Expired Public Seating: ${sessionKey}`);
+
+                    // 1. Delete the heavy public seating chunk ONLY
+                        if (sInfo.docId) {
+                            await deleteDoc(doc(db, 'public_seating', sInfo.docId));
+                        }
+                    
+
+                        // 3. Remove from public index tracker
+                        delete sessions[sessionKey];
+                        indexModified = true;
+                        cloudPurgeCount++;
+                    }
+                }
+
+                if (indexModified) {
+                    await setDoc(indexRef, data); // Resave the cleaned index
+                    console.log(`🧹 Cloud Maintenance: Permanently deleted ${cloudPurgeCount} expired sessions from Firebase to save costs.`);
+                }
+            }
+               } catch (e) {
+            console.error("Cloud purge error during maintenance:", e);
+        }
+    }
+
+    // 5. ☁️ AUTO-ARCHIVE: Move past Firestore session_students → Firebase Storage
+    if (window.firebase && window.currentCollegeId && navigator.onLine) {
+        try {
+            const { db, doc, collection, getDocs, getDoc, deleteDoc, storage, ref, uploadString, getDownloadURL } = window.firebase;
+            const sessionsRef = collection(db, 'colleges', window.currentCollegeId, 'sessions');
+            const sessionSnap = await getDocs(sessionsRef);
+
+            for (const docSnap of sessionSnap.docs) {
+                const s = docSnap.data();
+                if (!s.date) continue;
+
+                // Parse the exam date
+                const dateStr = s.date.trim();
+                let examDate;
+                if (dateStr.includes('.')) {
+                    const [d, m, y] = dateStr.split('.');
+                    examDate = new Date(`${y}-${m}-${d}`);
+                } else {
+                    examDate = new Date(dateStr);
+                }
+                examDate.setHours(0, 0, 0, 0);
+
+                // Only archive PAST sessions (before today)
+                if (examDate >= today) continue;
+
+                const sessionKey = `${s.date} | ${s.time}`;
+                const sessionIdStr = docSnap.id;
+                const storageRef = ref(storage, `historical_sessions/${window.currentCollegeId}/${dateStr}.json`);
+
+                // Check if already archived in Storage — skip if yes
+                let alreadyArchived = false;
+                try {
+                    await getDownloadURL(storageRef);
+                    alreadyArchived = true;
+                } catch (e) { /* Not archived yet */ }
+
+                if (alreadyArchived) continue;
+
+                // Fetch heavy student data from Firestore
+                const studentDoc = await getDoc(doc(db, 'colleges', window.currentCollegeId, 'session_students', sessionIdStr));
+                if (!studentDoc.exists()) continue;
+
+                const data = studentDoc.data();
+                let students = [];
+                if (data.isChunked) {
+                    let fullPayload = "";
+                    for (let i = 0; i < data.totalChunks; i++) {
+                        const chunkSnap = await getDoc(doc(db, 'colleges', window.currentCollegeId, 'session_students', `${sessionIdStr}_chunk_${i}`));
+                        if (chunkSnap.exists()) fullPayload += chunkSnap.data().payload;
+                    }
+                    const combined = JSON.parse(fullPayload);
+                    students = combined.students || [];
+                } else {
+                    students = data.students || [];
+                }
+
+                if (students.length === 0) continue;
+
+                // Build archive package (same format as manual migration)
+                const datePackage = { students, date: dateStr, archivedAt: new Date().toISOString() };
+
+                // Upload to Firebase Storage
+                await uploadString(storageRef, JSON.stringify(datePackage), 'raw', { contentType: 'application/json' });
+                console.log(`📦 Auto-Archived: ${sessionKey} → historical_sessions Storage`);
+
+                // Delete heavy Firestore doc to save costs
+                await deleteDoc(doc(db, 'colleges', window.currentCollegeId, 'session_students', sessionIdStr));
+                console.log(`🗑️ Freed Firestore: Deleted session_students for ${sessionKey}`);
+            }
+        } catch (e) {
+            console.error("Auto-archive error during maintenance:", e);
+        }
     }
 }
 
@@ -264,13 +386,14 @@ async function autoCleanPastGhostData() {
 document.addEventListener('DOMContentLoaded', () => {
     // Check every 500ms for app readiness
     const initCheck = setInterval(() => {
-        // We wait for a signal that the app is ready (e.g., syncDataToCloud exists)
-        if (typeof syncDataToCloud === 'function' && window.firebase) {
+        // 🔒 WAIT FOR COLLEGE ID: Ensure Auth is finished before cleaning Firebase
+        if (typeof syncDataToCloud === 'function' && window.firebase && window.currentCollegeId) {
             clearInterval(initCheck);
             autoCleanPastGhostData();
         }
     }, 500);
 });
+
 // ==========================================
 
 
@@ -1071,10 +1194,36 @@ async function updateLocalSlotsFromStudents() {
         if (sessionsUnsub) sessionsUnsub();
         const syncLocal = (dataObj) => {
             if (!dataObj) return;
+            const now = Date.now();
             Object.keys(dataObj).forEach(key => {
-                if (dataObj[key]) localStorage.setItem(key, dataObj[key]);
+                const incoming = dataObj[key];
+                if (!incoming) return;
+
+                // GUARD: If we saved this key locally in the last 10 seconds, ignore stale updates
+                const lastLocalSave = localSyncPriority[key] || 0;
+                if (now - lastLocalSave < 10000) return;
+
+                // --- SMART MERGE LOGIC for Mapping Data ---
+                if (key === 'examInvigilatorMapping' || key === 'examRoomAllotment' || key === 'examAbsenteeList' || key === 'examScribeAllotment') {
+                    try {
+                        const localRaw = localStorage.getItem(key) || '{}';
+                        const local = JSON.parse(localRaw);
+                        const cloud = typeof incoming === 'string' ? JSON.parse(incoming) : incoming;
+                        
+                        // Deep Merge: Combine both, preference for non-empty values
+                        const merged = { ...cloud, ...local };
+                        localStorage.setItem(key, JSON.stringify(merged));
+                        return;
+                    } catch (e) {
+                         console.error("Merge error for " + key, e);
+                    }
+                }
+
+                // Default: Direct sync for settings/simple strings
+                localStorage.setItem(key, typeof incoming === 'string' ? incoming : JSON.stringify(incoming));
             });
         };
+
 
         // 1. METADATA (Root Doc)
         cloudSyncUnsubscribe = onSnapshot(doc(db, "colleges", collegeId), (snap) => {
@@ -1118,13 +1267,12 @@ async function updateLocalSlotsFromStudents() {
             if (snap.exists()) syncLocal(snap.data());
         });
 
-        // 4. ALLOCATIONS (Scribes - V1 Listener)
-        allocUnsub = onSnapshot(doc(db, "colleges", collegeId, "system_data", "allocation"), (snap) => {
-            if (snap.exists()) {
-                syncLocal(snap.data());
-                if (typeof loadGlobalScribeList === 'function') loadGlobalScribeList();
-            }
-        });
+        // 4. ALLOCATIONS (Scribes)
+        // 🛡️ ARCHITECTURAL UNIFICATION: Removed legacy Global Listener.
+        // Scribe allotments are now managed solely by the Sessions collection (Line 1378).
+        // This prevents the legacy global document from wiping modular session data.
+        if (typeof loadGlobalScribeList === 'function') loadGlobalScribeList();
+
 
         // 5. STAFF
         staffUnsub = onSnapshot(doc(db, "colleges", collegeId, "system_data", "staff"), (snap) => {
@@ -1137,8 +1285,47 @@ async function updateLocalSlotsFromStudents() {
         });
 
         // 7. FETCH HEAVY DATA (HYBRID V2/V1 STRATEGY)
-        const fetchHeavyData = async () => {
+                const fetchHeavyData = async () => {
             console.log("☁️ Fetching Data (Hybrid Mode)...");
+
+            // --- 🏠 SCR5 PATTERN: LOAD LOCAL DATA IMMEDIATELY ---
+            const localStudents = await loadExamDataIDB() || [];
+            if (localStudents.length > 0) {
+                allStudentData = localStudents;
+                console.log(`🏠 Local Students found: ${allStudentData.length}. Initializing UI...`);
+                // Force unlock tabs so user can see data while cloud connects
+                if (typeof disable_edit_data_tab === 'function') disable_edit_data_tab(false);
+                if (typeof disable_room_allotment_tab === 'function') disable_room_allotment_tab(false);
+                if (typeof populateAllExamDropdowns === 'function') populateAllExamDropdowns();
+            }
+
+                    // --- ☁️ STORAGE MODE (New Stabilization) ---
+            try {
+                const { storage, ref, getDownloadURL } = window.firebase;
+                updateSyncStatus("Checking Firebase Storage...", "neutral");
+                const storageRef = ref(storage, `colleges/${collegeId}/data/examBaseData.json`);
+                const url = await getDownloadURL(storageRef);
+                const response = await fetch(url);
+                const students = await response.json();
+                
+                if (students && students.length > 0) {
+                    allStudentData = students;
+                    await saveExamDataIDB(students, true); // ⚡ BUG FIX: TRUE prevents it from uselessly uploading back to the cloud
+                    updateSyncStatus("Synced (Storage)", "success");
+                    
+                    // Rebuild Metadata Registry for Dropdowns
+                    const sessions = new Set(students.map(s => `${s.Date} | ${s.Time}`));
+                    localStorage.setItem('examAllKnownSessions', JSON.stringify(Array.from(sessions)));
+                    
+                    // Bootstrap UI (Prevents timeout and populates dropdowns)
+                    loadInitialData();
+                    if (typeof finalizeAppLoad === 'function') finalizeAppLoad();
+
+                    return; 
+                }
+            } catch (e) { console.warn("⚠️ Storage empty, proceeding to Cloud Listener..."); }
+
+
             
             // 🚨 FLAG CHECK: Push local data to Cloud BEFORE Cloud overwrites it!
             if (localStorage.getItem('pendingDriveRestoreSync') === 'true') {
@@ -1178,28 +1365,30 @@ async function updateLocalSlotsFromStudents() {
                 const sessionsRef = collection(db, "colleges", collegeId, "sessions");
                 
                       // [NEW] Use onSnapshot for live global synchronization
-                if (sessionsUnsub) sessionsUnsub(); // Cleanup existing
+                if (sessionsUnsub) { sessionsUnsub(); sessionsUnsub = null; } 
                 
             // Get timestamp for Today's Midnight
                 const todayMidnight = new Date();
                 todayMidnight.setHours(0, 0, 0, 0);
                 const midnightObj = todayMidnight.getTime();
 
-                // --> All sessions listener (heavy data protected by isTodayOrFuture guard below)
-                sessionsUnsub = onSnapshot(sessionsRef, async (sessionSnap) => {
+                // --- 📡 COST SAVER: Modular Session Fetch (One-Time Execution) ---
+                (async () => {
+                    const sessionSnap = await getDocs(sessionsRef);
 
-
+                    let cloudMetaFound = false;
+                    
+                    let allAllotments = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+                    let allQPCodes = JSON.parse(localStorage.getItem('examQPCodes') || '{}');
+                    let allAbsentees = JSON.parse(localStorage.getItem('examAbsenteeList') || '{}');
+                    let allScribeAllotments = JSON.parse(localStorage.getItem('examScribeAllotment') || '{}');
+                    let allInvigMapping = JSON.parse(localStorage.getItem('examInvigilatorMapping') || '{}');
+                    let allStudents = [];
 
                     if (!sessionSnap.empty) {
+                        cloudMetaFound = true;
                         console.log(`📡 LIVE SYNC: Processing ${sessionSnap.size} session updates...`);
-
-                        let allStudents = [];
-                        let allAllotments = {};
-                        let allQPCodes = {};
-                        let allAbsentees = {};
-                        let allScribeAllotments = {};
-                        let allInvigMapping = {}; 
-
+                        
                         const { getDoc } = window.firebase;
                         let missingStudentsPromises = [];
                         const localDB = await loadExamDataIDB() || [];
@@ -1207,50 +1396,53 @@ async function updateLocalSlotsFromStudents() {
                         sessionSnap.forEach(docSnap => {
                             const s = docSnap.data();
                             const sessionKey = `${s.date} | ${s.time}`;
-
-                            // Check if this exam is happening Today or in the Future
                             const examTimestamp = (s.meta && s.meta.timestamp) ? s.meta.timestamp : new Date(s.date.split('.').reverse().join('-')).getTime();
                             const isTodayOrFuture = examTimestamp >= midnightObj;
 
-                            if (s.students) {
-                                allStudents.push(...s.students); // Support for old legacy DB states
-                            } else if (s.meta && s.meta.studentCount > 0 && isTodayOrFuture) {
-                                // AUTO-FETCH heavy data ONLY IF Today or Future
+                            // 1. Load Metadata (Lightweight Icons/Calendar)
+                            if (s.roomAllotment) allAllotments[sessionKey] = s.roomAllotment;
+                            if (s.qpCodes) allQPCodes[sessionKey] = s.qpCodes;
+                            if (s.absentees) allAbsentees[sessionKey] = s.absentees;
+                           
+                            // 🛡️ SMART MERGE SHIELD: Only overwrite if cloud data has MORE or EQUAL records
+                            const cloudScribes = s.scribeAllotment || {};
+                            const localScribes = allScribeAllotments[sessionKey] || {};
+                            if (Object.keys(cloudScribes).length >= Object.keys(localScribes).length) {
+                                allScribeAllotments[sessionKey] = cloudScribes;
+                            }
+
+                            if (s.invigilatorMapping) allInvigMapping[sessionKey] = s.invigilatorMapping;
+
+                            // 2. Auto-fetch Heavy Students (SCR5 Hybrid Strategy)
+                            if (s.meta && s.meta.studentCount > 0 && isTodayOrFuture) {
                                 const localCount = localDB.filter(stu => stu.Date === s.date && stu.Time === s.time).length;
                                 if (localCount !== s.meta.studentCount) {
-                                    console.log(`🔄 CSV Update Detected! Downloading fresh master student list for ${sessionKey}...`);
-                                    updateSyncStatus(`Syncing Student Data...`, "neutral"); // <-- NEW RIBBON ALERT
                                     const fetchPromise = getDoc(doc(db, 'colleges', currentCollegeId, 'session_students', docSnap.id))
-
-                                        .then(studentDoc => {
-                                            if (studentDoc.exists() && studentDoc.data().students) {
-                                                allStudents.push(...studentDoc.data().students);
+                                        .then(async studentDoc => {
+                                            if (studentDoc.exists()) {
+                                                const data = studentDoc.data();
+                                                if (data.isChunked) {
+                                                    let fullPayload = "";
+                                                    for (let i = 0; i < data.totalChunks; i++) {
+                                                        const chunkSnap = await getDoc(doc(db, 'colleges', currentCollegeId, 'session_students', `${docSnap.id}_chunk_${i}`));
+                                                        if (chunkSnap.exists()) fullPayload += chunkSnap.data().payload;
+                                                    }
+                                                    const combined = JSON.parse(fullPayload);
+                                                    if (combined.students) allStudents.push(...combined.students);
+                                                } else if (data.students) { allStudents.push(...data.students); }
                                             }
                                         });
                                     missingStudentsPromises.push(fetchPromise);
                                 }
                             }
-                            // Load ALL metadata continuously, regardless of date
-
-                            if (s.roomAllotment) allAllotments[sessionKey] = s.roomAllotment;
-                            if (s.qpCodes) allQPCodes[sessionKey] = s.qpCodes;
-                            if (s.absentees) allAbsentees[sessionKey] = s.absentees;
-                            if (s.scribeAllotment) allScribeAllotments[sessionKey] = s.scribeAllotment;
-                            if (s.invigilatorMapping) allInvigMapping[sessionKey] = s.invigilatorMapping;
                         });
+
                         const allKnownKeys = Array.from(sessionSnap.docs.map(d => {
                             const sd = d.data(); return `${sd.date} | ${sd.time}`;
                         }));
                         localStorage.setItem('examAllKnownSessions', JSON.stringify(allKnownKeys));
-                        // Immediately push session list to all dropdowns from metadata
-                        if (window.real_populate_session_dropdown) window.real_populate_session_dropdown();
-                        if (window.real_populate_qp_code_session_dropdown) window.real_populate_qp_code_session_dropdown();
-                        if (window.real_populate_room_allotment_session_dropdown) window.real_populate_room_allotment_session_dropdown();
 
-
-
-                            
-                        // --- HISTORICAL META STORE FOR BILLING ENGINE ---
+                        // --- HISTORICAL META STORE (Enables past date dropdown) ---
                         const allHistoricalMeta = {};
                         sessionSnap.forEach(docSnap => {
                             const sd = docSnap.data();
@@ -1263,106 +1455,92 @@ async function updateLocalSlotsFromStudents() {
                             };
                         });
                         localStorage.setItem('examHistoricalMeta', JSON.stringify(allHistoricalMeta));
-                        // -------------------------------------------------
+                        // ----------------------------------------------------------
 
-                            
+                        if (missingStudentsPromises.length > 0) await Promise.all(missingStudentsPromises);
 
-                        // Wait for any allowed pre-fetches to finish safely
-                        if (missingStudentsPromises.length > 0) {
-                            await Promise.all(missingStudentsPromises);
-                        }
-
-                              // 📡 1. START MERGE
-                        let mergedStudents = [...localDB];
                         
-                        // --- 🧬 INTERNAL HELPER: Normalizes Session Keys (e.g. 10:00 AM matches FN) ---
-                        const getSmartSessionKey = (d, t) => {
-                            const dNorm = (d || "").replace(/[./-]/g, '');
-                            const tUpper = (t || "").toUpperCase();
-                            const isAN = tUpper.includes("PM") || tUpper.includes("AN") || 
-                                         tUpper.startsWith("12:") || tUpper.startsWith("13:") || 
-                                         tUpper.startsWith("14:") || tUpper.startsWith("15:") ||
-                                         tUpper.startsWith("16:");
-                            return `${dNorm}_${isAN ? 'AFTERNOON' : 'MORNING'}`;
-                        };
-
+                        // Merge Students to IDB
                         if (allStudents.length > 0) {
-                            // Identify sessions freshly downloaded
-                            const freshSessions = new Set(allStudents.map(s => getSmartSessionKey(s.Date, s.Time)));
-                            
-                            // Purge existing local copies for those sessions
-                            mergedStudents = localDB.filter(existing => !freshSessions.has(getSmartSessionKey(existing.Date, existing.Time)));
-                            
-                            // Add the fresh downloads
-                            mergedStudents.push(...allStudents);
-                        }
-
-                        // 📋 2. SORTING
-                        mergedStudents.sort((a, b) => {
-                            const d1 = a.Date.split('.').reverse().join('');
-                            const d2 = b.Date.split('.').reverse().join('');
-                            if (d1 !== d2) return d1.localeCompare(d2);
-                            return a.Time.localeCompare(b.Time);
-                        });
-
-                        // 🛡️ 3. GLOBAL DEDUPLICATION (Safety Net for 1917+ records)
-                        const uniqueMap = new Map();
-                        mergedStudents.forEach(s => {
-                            const regNo = (s['Register Number'] || s['Reg No'] || s['RegNo'] || "").toString().trim();
-                            const uKey = `${regNo}_${getSmartSessionKey(s.Date, s.Time)}`;
-                            
-                            if (regNo && !uniqueMap.has(uKey)) {
-                                uniqueMap.set(uKey, s);
-                            }
-                        });
-                        mergedStudents = Array.from(uniqueMap.values());
-
-                        // 💾 4. UPDATE GLOBAL STORE
-                        allStudentData = mergedStudents;
-                        await saveExamDataIDB(mergedStudents);
-
-                        // 🔄 5. REFRESH STATUS
-                        if (missingStudentsPromises.length > 0) {
-                            updateSyncStatus("Student List Updated Live!", "success");
-                        }
-                        
-                        localStorage.setItem('examRoomAllotment', JSON.stringify(allAllotments));
-                        localStorage.setItem('examQPCodes', JSON.stringify(allQPCodes));
-                        localStorage.setItem('examAbsenteeList', JSON.stringify(allAbsentees));
-                        localStorage.setItem('examScribeAllotment', JSON.stringify(allScribeAllotments));
-                        localStorage.setItem('examInvigilatorMapping', JSON.stringify(allInvigMapping));
-
-                        updateSyncStatus("Synced (Live)", "success");
-
-                        
-                        // --- 🔓 UNLOCK TABS ON FIRST DATA LOAD ---
-                        if (allStudentData && allStudentData.length > 0) {
-                            if (typeof disable_edit_data_tab === 'function') disable_edit_data_tab(false);
-                            if (typeof disable_absentee_tab === 'function') disable_absentee_tab(false);
-                            if (typeof disable_qpcode_tab === 'function') disable_qpcode_tab(false);
-                            if (typeof disable_room_allotment_tab === 'function') disable_room_allotment_tab(false);
-                            if (typeof disable_all_report_buttons === 'function') disable_all_report_buttons(false);
-                        }
-
-                        // Refresh UI Components
-                        if (typeof updateDashboard === 'function') updateDashboard();
-                        if (typeof populateAllExamDropdowns === 'function') populateAllExamDropdowns();
-                        if (typeof populate_session_dropdown === 'function') populate_session_dropdown();
-
-                        
-                        // 🔄 REAL-TIME UI REFRESH (Rooms & Invigilators)
-                        if (typeof updateAllotmentDisplay === 'function') {
-                            updateAllotmentDisplay(); 
-                        }
-                        if (typeof renderInvigilationPanel === 'function') {
-                            renderInvigilationPanel();
+                            const merged = [...localDB, ...allStudents];
+                            allStudentData = merged; 
+                            await saveExamDataIDB(merged, true); // ⚡ BUG FIX: Stop Infinite Cloud Bounce
                         }
                     } else {
-                        // SAFETY NET: If the filter legitimately returns 0 items, clear the "Connecting..." banner anyway!
-                        updateSyncStatus("Synced (Live)", "success");
+                        console.log("⚠️ Cloud sessions clean. Checking for local metadata fallback...");
                     }
 
-                });
+                    // --- 🏠 UI REFRESH (Works even if cloud is empty) ---
+                    const hasMetadata = cloudMetaFound || Object.keys(allAllotments).length > 0 || (allStudentData && allStudentData.length > 0);
+                    
+                    if (hasMetadata) {
+                        // 1. Unlock Tabs
+                        if (typeof disable_edit_data_tab === 'function') disable_edit_data_tab(false);
+                        if (typeof disable_room_allotment_tab === 'function') disable_room_allotment_tab(false);
+                        if (typeof disable_all_report_buttons === 'function') disable_all_report_buttons(false);
+
+                        // 2. Store Metadata (Safe Sets)
+                        if (cloudMetaFound) {
+                            safeSetItem('examRoomAllotment', JSON.stringify(allAllotments));
+                            safeSetItem('examQPCodes', JSON.stringify(allQPCodes));
+                            safeSetItem('examAbsenteeList', JSON.stringify(allAbsentees));
+                            
+                            // FIX: Persistent Protection Logic (Merged across Refreshes)
+                            // 🧬 SCR5-ACCURATE MERGE: Final data protection
+                            // We already initialized allScribeAllotments with local data (Line 1383), 
+                            // and the loop updated it with cloud data. No extra wipe-logic needed!
+                            
+                            // 🧬 SCR5-STABLE: Unlocked Modular Persistence
+                            // Standardize storage using the SCRIBE_ALLOTMENT_KEY constant
+                            if (typeof SCRIBE_ALLOTMENT_KEY !== 'undefined') {
+                                safeSetItem(SCRIBE_ALLOTMENT_KEY, JSON.stringify(allScribeAllotments));
+                            } else {
+                                safeSetItem('examScribeAllotment', JSON.stringify(allScribeAllotments));
+                            }
+                            // Also unify Invigilator mapping to prevent similar conflicts
+                            safeSetItem('examInvigilatorMapping', JSON.stringify(allInvigMapping));
+                            
+                            // 🚀 GLOBAL REFRESH: Signal that data is ready
+                            hasUnsavedScribes = false; 
+
+
+
+                        } else {
+                            // Local Fallback: Identify sessions from allStudentData if cloud is empty
+                            const sessions = new Set(allStudentData.map(s => `${s.Date} | ${s.Time}`));
+                            if (sessions.size > 0 && !localStorage.getItem('examAllKnownSessions')) {
+                                localStorage.setItem('examAllKnownSessions', JSON.stringify(Array.from(sessions)));
+                            }
+                        }
+
+                        // 3. Refresh Components
+                        if (typeof populateAllExamDropdowns === 'function') populateAllExamDropdowns();
+                        if (typeof updateDashboard === 'function') updateDashboard();
+                        
+                        // ✅ SYNC COMPLETE: Reset unsaved flag
+                        hasUnsavedScribes = false;
+
+                        if (typeof updateAllotmentDisplay === 'function') updateAllotmentDisplay();
+                        if (typeof renderInvigilationPanel === 'function') renderInvigilationPanel();
+                        
+                        // ✅ ROBUST UI WAKE-UP: Force visibility for Scribes and Invigilators
+                        if (typeof loadScribeAllotment === 'function') {
+                            const activeSession = (typeof allotmentSessionSelect !== 'undefined') ? allotmentSessionSelect.value : null;
+                            if (activeSession) {
+                                loadScribeAllotment(activeSession);
+                            } else {
+                                // Fallback: load based on current session global if dropdown isn't ready
+                                if (window.currentSessionKey) loadScribeAllotment(window.currentSessionKey);
+                            }
+                        }
+
+                    }
+
+                    updateSyncStatus("Synced (Live)", "success");
+                    
+                    // 🚀 LOADER DISMISSAL: Ensure the app finishes loading even on the first sync
+                    if (typeof finalizeAppLoad === 'function') finalizeAppLoad();
+                })();
 
 
                 // Check for V1 Fallback if sessions collection doesn't exist
@@ -1382,8 +1560,14 @@ async function updateLocalSlotsFromStudents() {
                     if (fullPayload) {
                         const bulkData = JSON.parse(fullPayload);
                         if (bulkData['examRoomAllotment']) localStorage.setItem('examRoomAllotment', bulkData['examRoomAllotment']);
-                        if (bulkData['examBaseData']) await saveExamDataIDB(JSON.parse(bulkData['examBaseData']
-                    ));
+                        if (bulkData['examBaseData']) {
+                            const parsedStudents = JSON.parse(bulkData['examBaseData']);
+                            allStudentData = parsedStudents; // <-- Hydrate Memory
+                            await saveExamDataIDB(parsedStudents, true); // ⚡ BUG FIX: Stop Infinite Cloud Bounce                            
+                            // <-- 
+                            const sessions = new Set(parsedStudents.map(s => `${s.Date} | ${s.Time}`));
+                            localStorage.setItem('examAllKnownSessions', JSON.stringify(Array.from(sessions)));
+                        }
 
                         updateSyncStatus("Synced (V1)", "success");
                     } else {
@@ -1402,8 +1586,43 @@ if (typeof finalizeAppLoad === 'function') finalizeAppLoad();
 };
 
 
-        fetchHeavyData();
-    }
+       (async () => {
+        await fetchHeavyData();
+        
+          // --- NEW: Automatic Cloud Healing (Full V2 Reconstruction) ---
+        if (window.currentCollegeId && navigator.onLine) {
+            const students = await loadExamDataIDB() || [];
+            const needsRestoreSync = localStorage.getItem('pendingDriveRestoreSync') === 'true';
+
+            if (students.length > 0 && needsRestoreSync) {
+                console.log("🚀 Automatic Full Sync Triggered: Rebuilding Firebase Modular Sessions...");
+                
+                (async () => {
+                    // 1. Push Master Students
+                    await syncDataToCloud('baseData');
+                    
+                    // 2. Identify and Push All Restored Sessions
+                    const sessionKeys = new Set(students.map(s => `${s.Date} | ${s.Time}`));
+                    console.log(`🔄 Rebuilding ${sessionKeys.size} sessions in modular format...`);
+                    
+                    let i = 0;
+                    for (const skey of sessionKeys) {
+                        i++;
+                        updateSyncStatus(`Syncing Session ${i}/${sessionKeys.size}...`, "neutral");
+                        await syncSessionToCloud(skey);
+                    }
+                    
+                    localStorage.setItem('lastBaseDataSync', new Date().toISOString());
+                    localStorage.removeItem('pendingDriveRestoreSync');
+                    updateSyncStatus("Cloud Rebuild Complete!", "success");
+                    console.log("✅ Firebase is now fully synchronized with Restored Data.");
+                })();
+            }
+        }
+
+    })();
+}
+
 
 
 // ⚡ ON-DEMAND PAST EXAM FETCH ENGINE
@@ -1461,9 +1680,48 @@ window.fetchHeavyDataOnDemand = async function(sessionKey) {
             // Each tab's change handler is responsible for rendering after this returns.
             updateSyncStatus("Past Exam Ready!", "success");
 
-        } else {
-             updateSyncStatus("Error: No Master Data Found", "error");
+                   } else {
+             // 🛡️ SMART FALLBACK: Search older Firebase locations before giving up
+             console.log("⚠️ V2 Session Students empty. Checking original session document...");
+             updateSyncStatus("Checking Session Archive...", "neutral");
+             
+             const { getDoc, doc, db } = window.firebase;
+             const baseDoc = await getDoc(doc(db, 'colleges', currentCollegeId, 'sessions', sessionIdStr));
+             
+             if (baseDoc.exists() && baseDoc.data().students) {
+                 const students = baseDoc.data().students;
+                 allStudentData = [...allStudentData, ...students];
+                 await saveExamDataIDB(allStudentData);
+                 updateSyncStatus("Restored from Legacy V2!", "success");
+                 return;
+             }
+
+             // LAST STAND: Check V1 Chunks
+             console.log("⚠️ Still empty. Checking V1 Chunks...");
+             const chunksRef = collection(db, "colleges", currentCollegeId, "data");
+             const q = query(chunksRef, orderBy("index"));
+             const chunkSnap = await getDocs(q);
+             
+             if (!chunkSnap.empty) {
+                 let fullPayload = "";
+                 chunkSnap.forEach(d => { if(d.id.startsWith("chunk_")) fullPayload += d.data().payload; });
+                 if (fullPayload) {
+                     const bulkData = JSON.parse(fullPayload);
+                     if (bulkData.examBaseData) {
+                         const students = JSON.parse(bulkData.examBaseData);
+                         allStudentData = [...allStudentData, ...students];
+                         await saveExamDataIDB(allStudentData);
+                         updateSyncStatus("Restored from V1 Archive!", "success");
+                         return;
+                     }
+                 }
+             }
+
+             updateSyncStatus("No Master Data Found in Firebase", "error");
         }
+
+
+
     } catch (e) {
         console.error("Fetch past exam heavy data error:", e);
     }
@@ -1473,32 +1731,12 @@ window.fetchHeavyDataOnDemand = async function(sessionKey) {
 
 // --- PHASE 4: MODULAR WRITE HELPERS ---
 
-     function generateSessionId(sessionKey) {
-        try {
-            const parts = sessionKey.split('|');
-            if (parts.length < 2) return "UNKNOWN_SESSION";
-            
-            // Normalize Date: remove . / - and extract D, M, Y
-            const dateStr = parts[0].trim();
-            const dateParts = dateStr.split(/[./-]/);
-            if (dateParts.length < 3) return "ERROR_ID";
-            const [d, m, y] = dateParts;
-            const isoDate = `${y}-${m}-${d}`;
-
-            // Normalize Time: Detect AN/FN
-            const t = parts[1].trim().toUpperCase();
-            let sessionType = "FN";
-            if (t.includes("PM") || t.includes("AN") || 
-                t.startsWith("12:") || t.startsWith("13:") || 
-                t.startsWith("14:") || t.startsWith("15:") || t.startsWith("16:")) {
-                sessionType = "AN";
-            }
-            return `${isoDate}_${sessionType}`;
-        } catch (e) {
-            console.error("ID Gen Error:", e);
-            return "ERROR";
-        }
+    function generateSessionId(sessionKey) {
+        // Reverted to Exact Time format: "DD.MM.YYYY | HH:MM AM"
+        // This ensures compatibility with Google Drive Backups and prevents AN/FN duplicates
+        return sessionKey;
     }
+
 
     // --- NEW: Universal Student Matcher (Handles all date/time formats) ---
     window.getStudentsForSession = function(allData, targetDate, targetTime) {
@@ -1528,24 +1766,57 @@ window.fetchHeavyDataOnDemand = async function(sessionKey) {
         });
     };
 
-
-    
-
 async function deleteSessionFromCloud(sessionKey) {
     if (!currentCollegeId || !navigator.onLine) return;
     
     updateSyncStatus(`Deleting ${sessionKey}...`, "neutral");
-    const { db, doc, deleteDoc } = window.firebase;
+    // Added getDoc and setDoc to interface with the index document
+    const { db, doc, deleteDoc, getDoc, setDoc } = window.firebase;
     const sessionId = generateSessionId(sessionKey);
     
     try {
+        // 1. Delete main session from private admin area
         await deleteDoc(doc(db, 'colleges', currentCollegeId, 'sessions', sessionId));
+        
+        // --- 2. NEW: Delete from public seating index and chunk ---
+        const chunkId = `${currentCollegeId}_${sessionId}`;
+        await deleteDoc(doc(db, 'public_seating', chunkId)); // Deletes the heavy student list
+        
+        const indexRef = doc(db, 'public_seating', currentCollegeId);
+        const indexSnap = await getDoc(indexRef);
+        if (indexSnap.exists()) {
+            const data = indexSnap.data();
+            if (data.sessions && data.sessions[sessionKey]) {
+                delete data.sessions[sessionKey];
+                await setDoc(indexRef, data); // Resave the cleaned index
+            }
+        }
+        // ---------------------------------------------------------
+
+        // --- 3. NEW: Delete from Firebase Storage historical_sessions ---
+        try {
+            const { storage, ref, deleteObject, getDownloadURL } = window.firebase;
+            const dateStr = sessionKey.split(' | ')[0].trim();
+            const storageRef = ref(storage, `historical_sessions/${currentCollegeId}/${dateStr}.json`);
+            // Only delete if it actually exists (avoids error for sessions not yet archived)
+            await getDownloadURL(storageRef); // throws if missing
+            await deleteObject(storageRef);
+            console.log(`🗑️ Deleted historical_sessions Storage file: ${dateStr}.json`);
+        } catch (storageErr) {
+            // File didn't exist in Storage — that's fine, nothing to delete
+        }
+        // ---------------------------------------------------------------
+        
         updateSyncStatus("Deleted from Cloud", "success");
+
     } catch (e) {
         console.error("Session Delete Error:", e);
         updateSyncStatus("Delete Failed", "error");
     }
 }
+
+    
+
 
 
     
@@ -1589,7 +1860,7 @@ async function deleteSessionFromCloud(sessionKey) {
             id: sessionId,
             date: cleanDate,
             time: cleanTime,
-            // students: students, // REMOVED TO SAVE EGRESS COSTS
+            // 🚫 FIXED COST LEAK: Actually removed students to prevent duplicate heavy bandwidth
             roomAllotment: sessionAllotment,
             qpCodes: sessionQPs,
             absentees: sessionAbsentees,
@@ -1620,15 +1891,35 @@ async function deleteSessionFromCloud(sessionKey) {
             lastUpdated: new Date().toISOString() 
         };
 
-        // 3. Write to Firestore (Modular Write)
+             // 3. Write to Web App API
         try {
-            updateSyncStatus("Saving Metadata...", "neutral"); // <-- NEW RIBBON ALERT
+            updateSyncStatus("Generating Session File...", "neutral"); 
+            
+     // --- NEW WEB APP HYBRID SYNC ---
             await setDoc(doc(db, 'colleges', currentCollegeId, 'sessions', sessionId), sessionDoc);
             
-            updateSyncStatus("Uploading Master Student List...", "neutral"); // <-- NEW RIBBON ALERT
-            await setDoc(doc(db, 'colleges', currentCollegeId, 'session_students', sessionId), sessionStudentsDoc);
+        // --- PLAN A: Primary Student Record (Chunked to handle 800+ students) ---
+            const jsonPayload = JSON.stringify(sessionStudentsDoc);
+            const chunkSize = 1024 * 1024; // 1MB
+            if (jsonPayload.length > chunkSize) {
+                const totalChunks = Math.ceil(jsonPayload.length / chunkSize);
+                for (let i = 0; i < totalChunks; i++) {
+                    const chunk = jsonPayload.slice(i * chunkSize, (i + 1) * chunkSize);
+                    await setDoc(doc(db, 'colleges', currentCollegeId, 'session_students', `${sessionId}_chunk_${i}`), { payload: chunk });
+                }
+                // Write a meta doc to tell the loader how many chunks to expect
+                await setDoc(doc(db, 'colleges', currentCollegeId, 'session_students', sessionId), { isChunked: true, totalChunks });
+            } else {
+                await setDoc(doc(db, 'colleges', currentCollegeId, 'session_students', sessionId), sessionStudentsDoc);
+            }
 
-            updateSyncStatus("All Data Synced!", "success"); // <-- UPDATED SUCCESS MESSAGE
+
+                     // 🚫 DELETED: Shadow Mirror to GAS
+
+
+
+            updateSyncStatus("All Data Synced!", "success"); 
+
 
             
             // Recalculate Invigilation Slots
@@ -1646,17 +1937,87 @@ async function deleteSessionFromCloud(sessionKey) {
     }
 
 
+    // --- PUBLIC SEATING PORTAL PUBLISHER ---
+    async function publishSeatingToPublic(sessionKey, roomAllotment, scribeAllotment) {
+        try {
+            const { db, doc, setDoc, getDoc } = window.firebase;
+            const cid = currentCollegeId;
+
+            // Build flat map using Sticky Seats and Rich Location data
+            const studentMap = {};
+            const roomSerialMap = typeof getRoomSerialMap === 'function' ? getRoomSerialMap(sessionKey) : {};
+            const roomConfig = JSON.parse(localStorage.getItem('examRoomConfig') || '{}');
+
+            (roomAllotment || []).forEach(room => {
+                const serial = roomSerialMap[room.roomName] || '';
+                const roomInfo = roomConfig[room.roomName] || {};
+                const loc = (roomInfo.location && roomInfo.location.trim()) ? ` (${roomInfo.location})` : '';
+                const roomString = serial ? `Hall #${serial} - ${room.roomName}${loc}` : `${room.roomName}${loc}`;
+
+                (room.students || []).forEach((s) => {
+                    const reg = (typeof s === 'object' ? (s['Register Number'] || s.RegisterNo) : s);
+                    if (reg) {
+                        studentMap[reg] = {
+                            room: roomString,
+                            seat: s.seat || '?', // Read sticky seat
+                            name: (typeof s === 'object' ? s['Name'] : '') || '',
+                            course: (typeof s === 'object' ? (s['Course'] || s.Course) : '') || '',
+                        };
+                    }
+                });
+            });
+
+            // Add scribe allotments
+            Object.entries(scribeAllotment || {}).forEach(([reg, scribeRoom]) => {
+                if (studentMap[reg]) studentMap[reg].room = scribeRoom;
+                else studentMap[reg] = { room: scribeRoom, seat: 'Scribe', name: '', course: '' };
+            });
+
+            const docId = `${cid}_${generateSessionId(sessionKey)}`;
+
+            // Write session seating doc to public_seating
+            await setDoc(doc(db, 'public_seating', docId), { students: studentMap });
+
+            // Update index doc so student.html can discover this session
+            const indexRef = doc(db, 'public_seating', cid);
+            const existingSnap = await getDoc(indexRef);
+            const existingData = existingSnap.exists() ? existingSnap.data() : {};
+            const existingSessions = existingData.sessions || {};
+            existingSessions[sessionKey] = { docId, lastUpdated: Date.now() }; // ⏰ Add modification stamp
+
+            await setDoc(indexRef, {
+
+                collegeName: localStorage.getItem('examCollegeName') || 'My College',
+                sessions: existingSessions
+            });
+
+            console.log(`✅ Public seating published for ${sessionKey}`);
+        } catch (e) {
+            console.error('Public Seating Publish Error:', e);
+        }
+    }
+
     // 4. CLOUD UPLOAD FUNCTION (Pure V2)
     // Removed 'heavy' default. Now requires explicit target.
     async function syncDataToCloud(targetSection) {
         if (!targetSection) return; // Safety check
         if (targetSection === 'heavy') {
-            console.warn("🚫 Ignored V1 'heavy' sync call. System is V2.");
+            console.warn("⚠️ Ignored V1 'heavy' sync call. System is V2.");
             return;
         }
 
-        if (!currentUser || !currentCollegeId || isSyncing) return;
+        if (!currentUser || !currentCollegeId) return;
+
+        // --- SMART QUEUE: If already syncing, add this section to the "Dirty" list to sync next ---
+        if (isSyncing) {
+            console.log(`⏳ Sync Busy. Queueing ${targetSection}...`);
+            syncQueue.sections.add(targetSection);
+            return;
+        }
+
+
         if (!navigator.onLine) return updateSyncStatus("Offline", "error");
+
 
         isSyncing = true;
         updateSyncStatus(`Saving ${targetSection}...`, "neutral");
@@ -1668,7 +2029,7 @@ async function deleteSessionFromCloud(sessionKey) {
         try {
             const get = (k) => localStorage.getItem(k);
 
-            // 1. SETTINGS (Global Config)
+        // 1. SETTINGS (Global Config)
             if (targetSection === 'settings') {
                 const data = {
                     examCollegeName: get('examCollegeName'),
@@ -1677,10 +2038,19 @@ async function deleteSessionFromCloud(sessionKey) {
                     examSessionNames: get('examSessionNames'),
                     examRulesConfig: get('examRulesConfig'),
                     examRemunerationConfig: get('examRemunerationConfig'),
+                    examAllKnownSessions: get('examAllKnownSessions'),
                     lastUpdated: timestamp
                 };
+
+                
                 await setDoc(doc(db, "colleges", cid, "system_data", "settings"), data, { merge: true });
+
+              
+                // 🚫 DELETED: Shadow Mirror to GAS
+
+
             }
+
 
             // 2. OPERATIONS (Global Lists)
             else if (targetSection === 'ops') {
@@ -1689,16 +2059,23 @@ async function deleteSessionFromCloud(sessionKey) {
                     examQPCodes: get('examQPCodes')
                 };
                 await setDoc(doc(db, "colleges", cid, "system_data", "operations"), data, { merge: true });
+                // 🚫 DELETED: Shadow Mirror to GAS
             }
 
-            // 3. ALLOCATION (Scribes)
+
+            // 3. ALLOCATION (Scribes + Room Allotments)
             else if (targetSection === 'allocation') {
                 const data = {
                     examScribeList: get('examScribeList'),
-                    examScribeAllotment: get('examScribeAllotment')
+                    examScribeAllotment: get('examScribeAllotment'),
+                    examScribeAllotmentV2: get('examScribeAllotmentV2'),
+                    examAllotmentData: get('examAllotmentData')
                 };
                 await setDoc(doc(db, "colleges", cid, "system_data", "allocation"), data, { merge: true });
+
+                         // 🚫 DELETED: Shadow Mirror to GAS
             }
+
 
             // 4. STAFF (Invigilators)
             else if (targetSection === 'staff') {
@@ -1718,29 +2095,40 @@ async function deleteSessionFromCloud(sessionKey) {
                 await setDoc(doc(db, "colleges", cid, "system_data", "slots"), data, { merge: true });
             }
 
-            // Add this as case #6 inside syncDataToCloud(targetSection)
+                 // 6. MASTER DATA (Firebase Storage Mode - SCR5 logic for stability)
             else if (targetSection === 'baseData') {
                 const students = await loadExamDataIDB();
                 if (students && students.length > 0) {
                     const { storage, ref, uploadString } = window.firebase;
                     const storageRef = ref(storage, `colleges/${cid}/data/examBaseData.json`);
+                    
+                    updateSyncStatus("Uploading Master File...", "neutral");
                     await uploadString(storageRef, JSON.stringify(students), 'raw', {
-                contentType: 'application/json'
+                        contentType: 'application/json'
                     });
-                console.log("📁 Heavy Data (examBaseData) synced to Firebase Storage.");
-                    }
+                    console.log("📁 Master Data synced to Firebase Storage.");
                 }
+            }
 
-            
 
+            // 🚫 DELETED: Shadow Mirror to GAS (Now Pure Firebase Chunks)
             updateSyncStatus("Saved", "success");
 
         } catch (e) {
+
             console.error("Sync Failed:", e);
             updateSyncStatus("Save Error", "error");
-        } finally {
+    } finally {
             isSyncing = false;
+            // CHECK THE QUEUE: If something was queued while we were busy, process it now.
+            if (syncQueue.sections.size > 0) {
+                const nextTarget = Array.from(syncQueue.sections)[0];
+                syncQueue.sections.delete(nextTarget);
+                console.log(`🔄 Processing Queued Sync: ${nextTarget}`);
+                syncDataToCloud(nextTarget);
+            }
         }
+
     }
    
     // --- 3. ADMIN / TEAM MANAGEMENT LOGIC ---
@@ -1850,8 +2238,61 @@ async function deleteSessionFromCloud(sessionKey) {
         const hh = String(h).padStart(2, '0');
         return `${hh}:${m} ${ampm}`;
     }
+    // 🛡️ MEMORY SHIELD: Surgically deletes one session's local metadata
+    window.freeUpStorage = function(sessionKey) {
+        if(!confirm(`Clear local metadata for: ${sessionKey}?`)) return;
+        ['examRoomAllotment', 'examQPCodes', 'examAbsenteeList', 'examScribeAllotment', 'examInvigilatorMapping'].forEach(globalKey => {
+            try {
+                let dataBlock = JSON.parse(localStorage.getItem(globalKey) || '{}');
+                if (dataBlock[sessionKey]) {
+                    delete dataBlock[sessionKey];
+                    localStorage.setItem(globalKey, JSON.stringify(dataBlock));
+                }
+            } catch(e) {}
+        });
+        let known = JSON.parse(localStorage.getItem('examAllKnownSessions') || '[]');
+        known = known.filter(k => k !== sessionKey);
+        try { localStorage.setItem('examAllKnownSessions', JSON.stringify(known)); } catch(e) {}
+        alert(`Cleared "${sessionKey}". Try saving again.`);
+        document.getElementById('quota-exceeded-modal').classList.add('hidden');
+    };
+
+    // 🛡️ MEMORY SHIELD: Safe wrapper for localStorage writes
+    function safeSetItem(key, dataString) {
+        try {
+            localStorage.setItem(key, dataString);
+        } catch (e) {
+            if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22) {
+                console.error('CRITICAL: LocalStorage Quota Exceeded!');
+                const modal = document.getElementById('quota-exceeded-modal');
+                if (modal) {
+                    modal.classList.remove('hidden');
+                    const listEl = document.getElementById('quota-session-list');
+                    let knownSessions = JSON.parse(localStorage.getItem('examAllKnownSessions') || '[]');
+                    // Sort: oldest sessions last, present them first for deletion
+                    knownSessions.sort((a, b) => {
+                        const d1 = new Date(a.split(' | ')[0].split('.').reverse().join('-'));
+                        const d2 = new Date(b.split(' | ')[0].split('.').reverse().join('-'));
+                        return d1 - d2; // ascending = oldest first
+                    });
+                    const oldest = knownSessions.slice(0, 7); // show oldest 7
+                    listEl.innerHTML = oldest.length > 0 ? oldest.map(sk => `
+                        <div class="flex justify-between items-center p-2 bg-white rounded border border-gray-200">
+                            <span class="text-sm font-semibold text-gray-700">${sk}</span>
+                            <button onclick="window.freeUpStorage('${sk.replace(/'/g, "\\'")}')" class="text-xs bg-red-100 hover:bg-red-200 text-red-700 font-bold px-3 py-1 rounded border border-red-200 transition">Delete</button>
+                        </div>`).join('') 
+                        : '<p class="text-sm text-gray-500 p-2">No sessions found. Please use the system reset option.</p>';
+                }
+            } else {
+                console.error('Storage Error:', e);
+            }
+        }
+    }
+
     // Helper for status UI (Updates Desktop & Mobile)
     function updateSyncStatus(status, type) {
+
+    
         // 1. Desktop Status (Text)
         const syncStatusDisplay = document.getElementById('sync-status');
         if (syncStatusDisplay) {
@@ -1882,10 +2323,17 @@ async function deleteSessionFromCloud(sessionKey) {
 
     // --- (V56) Global var for absentee data ---
     let allStudentData = []; // Holds all students from PDF/CSV
+    window.getMyAllStudentData = () => allStudentData;
+    window.getMyRoomConfig = () => currentRoomConfig;
+    window.allStudentDataList = () => allStudentData; // 📦 Expose for Exporter
+    window.getMyRoomSerialMap = (key) => (typeof getRoomSerialMap === 'function') ? getRoomSerialMap(key) : {};
+    window.getMySessionSort = () => (typeof compareSessionStrings === 'function') ? compareSessionStrings : null;
+    window.getMyExamName = (d, t, s) => (typeof getExamName === 'function') ? getExamName(d, t, s) : '';
+    window.getMyQPCodes = () => qpCodeMap || {}; // 🛡️ EXPOSE LIVE QP CODES TO EXPORTER
     let allStudentSessions = []; // Holds unique sessions
     let currentAbsenteeList = [];
     let selectedStudent = null;
-
+    const localSyncPriority = {}; // Track timestamps for "Local-First" data protection
     // --- (V58) Global var for QP Code data ---
     let qpCodeMap = {};
     // --- NEW GLOBAL VARIABLE ---
@@ -2536,7 +2984,37 @@ function generateDayWisePDF() {
         // --- 4. PREPARE DATA ---
         const reportType = 'day-wise';
         const rawData = getFilteredReportData(reportType); 
-        const dataWithRooms = performOriginalAllocation(rawData);
+        // 🛡️ UNIFIED PIPELINE (V12): Direct database source
+        const allAllotments = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+        
+        // FIX: Extract the session key securely from the UI select element!
+        const sessionKey = reportsSessionSelect ? reportsSessionSelect.value : "";
+        const sessionAllotment = allAllotments[sessionKey] || [];
+
+        
+        const studentToRoomMap = {};
+        sessionAllotment.forEach(room => {
+            (room.students || []).forEach(s => {
+                const reg = (typeof s === 'object') ? (s['Register Number'] || s.RegisterNo) : s;
+                studentToRoomMap[reg] = { room: room.roomName, seat: s.seat || '?' };
+            });
+        });
+
+        // 🛠️ UNIFIED PIPELINE (V13): Restore QP Code Mapping
+        const sessionQPCodes = JSON.parse(localStorage.getItem('examQPCodes') || '{}')[reportsSessionSelect.value] || {};
+        
+        const dataWithRooms = rawData.map(s => {
+            const assignment = studentToRoomMap[s['Register Number']] || { room: 'Unallotted', seat: '?' };
+            const courseKey = window.getQpKey(s.Course, s.Stream || 'Regular');
+            return { 
+                ...s, 
+                'Room No': assignment.room, 
+                seatNumber: assignment.seat,
+                qpCode: sessionQPCodes[courseKey] || '' 
+            };
+        });
+
+
         const scribeRegNos = new Set((globalScribeList || []).map(s => s.regNo));
 
         const sessionsMap = {};
@@ -2751,19 +3229,54 @@ function generateDayWisePDF() {
 
                     const rowCenterY = y + (rowH / 2);
 
-                    // LOC: Merged Drawing
+                    // LOC: Merged Drawing (With Dynamic Rotation)
                     if (!mergeMap[i].skip) {
                         const span = mergeMap[i].span;
                         const totalMergeH = span * rowH;
                         const mergeCenterY = y + (totalMergeH / 2);
                         
-                        drawSmartText(row.loc, xLoc, mergeCenterY, W_LOC, totalMergeH, "center", false, 7);
+                        if (span > 4) {
+                            // Rotate 90 degrees (Bottom-to-Top) for spans > 4
+                            pdf.setFont("helvetica", "bold");
+                            let locFontSize = 8;
+                            pdf.setFontSize(locFontSize);
+                            let rotatedText = String(row.loc);
+                            
+                            // 1. DYNAMIC FONT: Shrink the font first before truncating
+                            while(pdf.getTextWidth(rotatedText) > (totalMergeH - 4) && locFontSize > 4.5) {
+                                locFontSize -= 0.5;
+                                pdf.setFontSize(locFontSize);
+                            }
+                            
+                            // 2. TRUNCATE: Only chop characters if it's STILL too long at the smallest font
+                            while(pdf.getTextWidth(rotatedText) > (totalMergeH - 4) && rotatedText.length > 2) {
+                                rotatedText = rotatedText.substring(0, rotatedText.length - 1);
+                            }
+                            if (rotatedText !== row.loc) rotatedText = rotatedText.substring(0, rotatedText.length-2) + '..';
+
+                            pdf.setTextColor(0);
+                            
+                            // jsPDF Math: Manually center rotated text because 'align: center' breaks with angles
+                            const txtWidth = pdf.getTextWidth(rotatedText);
+                            // Font height estimation (1 pt = ~0.35mm)
+                            const fontHeightMm = (locFontSize * 0.35); 
+                            
+                            // Anchor coordinates for 90-deg CCW rotation (reads bottom to top)
+                            const startX = xLoc + (W_LOC / 2) + (fontHeightMm / 2.5);
+                            const startY = mergeCenterY + (txtWidth / 2);
+                            
+                            // Draw raw text using strict coordinates and strict angle flag
+                            pdf.text(rotatedText, startX, startY, { angle: 90 });
+                        } else {
+                            drawSmartText(row.loc, xLoc, mergeCenterY, W_LOC, totalMergeH, "center", false, 7);
+                    }
                         
                         const blockBottomY = y + totalMergeH;
                         pdf.line(xBase, blockBottomY, xBase + W_LOC, blockBottomY); 
                         pdf.line(xBase + W_LOC, y, xBase + W_LOC, blockBottomY); 
                         pdf.line(xBase, y, xBase, blockBottomY); 
                     }
+
 
                     drawSmartText(String(row.reg), xReg + 1, rowCenterY, W_REG - 2, rowH, "left", true, 8);
                     drawSmartText(row.name, xName + 1, rowCenterY, W_NAME, rowH, "left", row.isScribe, 8);
@@ -3477,7 +3990,33 @@ function generateQuestionPaperReportPDF() {
         
         if (!rawData || rawData.length === 0) throw new Error("No data found.");
 
-        const dataWithRooms = performOriginalAllocation(rawData);
+        // 🛡️ UNIFIED PIPELINE (V12): Direct database source
+        const allAllotments = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+        const sessionAllotment = allAllotments[`${reportsSessionSelect.value}`] || [];
+        
+        const studentToRoomMap = {};
+        sessionAllotment.forEach(room => {
+            (room.students || []).forEach(s => {
+                const reg = (typeof s === 'object') ? (s['Register Number'] || s.RegisterNo) : s;
+                studentToRoomMap[reg] = { room: room.roomName, seat: s.seat || '?' };
+            });
+        });
+
+        // 🛡️ UNIFIED PIPELINE (V13): Restore QP Code Mapping
+        const sessionQPCodes = JSON.parse(localStorage.getItem('examQPCodes') || '{}')[reportsSessionSelect.value] || {};
+        
+        const dataWithRooms = rawData.map(s => {
+            const assignment = studentToRoomMap[s['Register Number']] || { room: 'Unallotted', seat: '?' };
+            const courseKey = window.getQpKey(s.Course, s.Stream || 'Regular');
+            return { 
+                ...s, 
+                'Room No': assignment.room, 
+                seatNumber: assignment.seat,
+                qpCode: sessionQPCodes[courseKey] || '' 
+            };
+        });
+
+
 
         // Group by Room -> QP Code
         const roomMap = {};
@@ -4284,6 +4823,8 @@ function getExamName(date, time, stream) {
         // Create a unique key combining both
         return btoa(unescape(encodeURIComponent(`${courseName}|${s}`)));
     }
+    window.getQpKey = getQpKey; // Expose globally for archive generator
+
     // --- Helper function to numerically sort room keys ---
     function getNumericSortKey(key) {
         const parts = key.split('_'); // Date_Time_Room 1
@@ -4456,20 +4997,16 @@ function getExamName(date, time, stream) {
         // 1. Group Regular/Distance Rooms
         // The 'stream' property is now saved in 'currentSessionAllotment'
 
-        // Sort by Stream Priority (Index in config) then Room Name
+        // Sort by Stream Priority only — preserve insertion order within stream (shuffle visible)
         currentSessionAllotment.sort((a, b) => {
             const s1 = a.stream || "Regular";
             const s2 = b.stream || "Regular";
             const idx1 = currentStreamConfig.indexOf(s1);
             const idx2 = currentStreamConfig.indexOf(s2);
-
-            if (idx1 !== idx2) return idx1 - idx2;
-
-            // If same stream, numeric sort of room name
-            const numA = parseInt(a.roomName.replace(/\D/g, ''), 10) || 0;
-            const numB = parseInt(b.roomName.replace(/\D/g, ''), 10) || 0;
-            return numA - numB;
+            return idx1 - idx2;
+            // NOTE: No room-name sort — insertion order preserved so auto-allot shuffle is visible
         });
+
 
         const usedRegularRooms = new Set();
 
@@ -4640,11 +5177,16 @@ function getExamName(date, time, stream) {
             }
         }
 
-        // --- 4. POPULATE SMART DATE DROPDOWN ---
-        const uniqueDaysSet = new Set(allStudentData.map(s => s.Date));
+          // --- 4. POPULATE SMART DATE DROPDOWN ---
+        // Clean out undefined/null dates to prevent sorting crashes!
+        const validLocalDates = allStudentData.map(s => s.Date).filter(d => Boolean(d));
+        const historicalMeta = JSON.parse(localStorage.getItem('examHistoricalMeta') || '{}');
+        const historicalDates = Object.keys(historicalMeta).map(key => key.split(' | ')[0].trim()).filter(d => Boolean(d));
+        const uniqueDaysSet = new Set([...validLocalDates, ...historicalDates]);
+
         const uniqueDays = Array.from(uniqueDaysSet).sort((a, b) => {
-            const d1 = a.split('.').reverse().join('');
-            const d2 = b.split('.').reverse().join('');
+            const d1 = String(a).split('.').reverse().join('');
+            const d2 = String(b).split('.').reverse().join('');
             return d1.localeCompare(d2);
         });
 
@@ -4658,6 +5200,66 @@ function getExamName(date, time, stream) {
                 dateSelect.appendChild(option);
             });
             if (currentVal) dateSelect.value = currentVal;
+
+                       // --- 📡 ASYNC CLOUD STORAGE SCANNER (Bypasses Firestore Metadata) ---
+            if (window.firebase && window.currentCollegeId && navigator.onLine) {
+                if (window.storageScannerRan) return; // ⚡ COST FIX: Prevents the scanner from running twice on boot
+                window.storageScannerRan = true;
+                console.log("🔍 [Storage Scanner] Running for college:", window.currentCollegeId);
+                const { storage, ref, listAll } = window.firebase;
+                const storageFolderRef = ref(storage, `historical_sessions/${window.currentCollegeId}/`);
+                
+                listAll(storageFolderRef).then(fileList => {
+                    let newDatesAdded = false;
+                    console.log(`🔍 [Storage Scanner] Found ${fileList.items.length} files.`);
+                    
+                    fileList.items.forEach(itemRef => {
+                        const fileName = itemRef.name;
+                        if (fileName && fileName.endsWith('.json')) {
+                            const dateStr = fileName.replace('.json', '');
+                            
+                            // If this date isn't already in the local set, verify the dropdown element itself!
+                            if (!uniqueDaysSet.has(dateStr)) {
+                                uniqueDaysSet.add(dateStr);
+                                const dropdownAlreadyHasIt = Array.from(dateSelect.options).some(o => o.value === dateStr);
+                                if (!dropdownAlreadyHasIt) {
+                                    const option = document.createElement('option');
+                                    option.value = dateStr;
+                                    option.textContent = dateStr + " (Archived)";
+                                    dateSelect.appendChild(option);
+                                    newDatesAdded = true;
+                                }
+                            } else {
+
+                                // If it ALREADY exists natively in local DB, alter text to show it's in cloud too!
+                                const existingMatch = Array.from(dateSelect.options).find(o => o.value === dateStr);
+                                if (existingMatch && !existingMatch.textContent.includes('(Archived)')) {
+                                     existingMatch.textContent = dateStr + " (Local & Archived)";
+                                }
+                            }
+                        }
+                    });
+                    
+                    // Re-sort the dropdown alphabetically if new dates were injected
+                    if (newDatesAdded) {
+                        const allOptions = Array.from(dateSelect.options).slice(1);
+                        allOptions.sort((a,b) => {
+                           const d1 = a.value.split('.').reverse().join('');
+                           const d2 = b.value.split('.').reverse().join('');
+                           return d1.localeCompare(d2);
+                        });
+                        dateSelect.innerHTML = '<option value="">-- Select a Date --</option>';
+                        allOptions.forEach(opt => dateSelect.appendChild(opt));
+                        if(currentVal) dateSelect.value = currentVal;
+                    }
+                    console.log("🔍 [Storage Scanner] Finished DOM updates.");
+                }).catch(e => console.warn("Cloud archive scan missing or empty:", e));
+            } else {
+                console.warn("🔍 [Storage Scanner] Blocked initially. College ID missing?", !window.currentCollegeId);
+            }
+
+            // -------------------------------------------------------------------
+
                         dateSelect.onchange = async (e) => {
                 const selectedDate = e.target.value;
                 if (!selectedDate) {
@@ -4680,8 +5282,50 @@ function getExamName(date, time, stream) {
                 const existingNotice = document.getElementById('historical-context-notice');
                 if (existingNotice) existingNotice.remove();
 
+                if (histCtx) {
+                    // 🔥 GLOBALLY INJECT THE HISTORICAL DATA SO ALL TABS SEE IT 🔥
+                    if (histCtx.roomAllotment) {
+                        const existingAllotments = JSON.parse(localStorage.getItem('examAllotmentData') || '{}');
+                        Object.assign(existingAllotments, histCtx.roomAllotment);
+                        localStorage.setItem('examAllotmentData', JSON.stringify(existingAllotments));
+                    }
+                    if (histCtx.invigilatorMapping) {
+                        const existingInvigs = JSON.parse(localStorage.getItem('examInvigilatorMapping') || '{}');
+                        Object.assign(existingInvigs, histCtx.invigilatorMapping);
+                        localStorage.setItem('examInvigilatorMapping', JSON.stringify(existingInvigs));
+                    }
+                    if (histCtx.scribeAllotment) {
+                        const existingScribes = JSON.parse(localStorage.getItem('examScribeAllotmentV2') || '{}');
+                        Object.assign(existingScribes, histCtx.scribeAllotment);
+                        localStorage.setItem('examScribeAllotmentV2', JSON.stringify(existingScribes));
+                    }
+                    if (histCtx.qpCodes) {
+                        const existingQPs = JSON.parse(localStorage.getItem('examQPCodes') || '{}');
+                        Object.assign(existingQPs, histCtx.qpCodes);
+                        localStorage.setItem('examQPCodes', JSON.stringify(existingQPs));
+                    }
+                    if (histCtx.absentees) {
+                        const existingAbs = JSON.parse(localStorage.getItem('examAbsenteeList') || '{}');
+                        Object.assign(existingAbs, histCtx.absentees);
+                        localStorage.setItem('examAbsenteeList', JSON.stringify(existingAbs));
+                    }
+                }
+
+                // 🔄 REFRESH ALL SYSTEM DROPDOWNS UNCONDITIONALLY 🔄
+
+                // We must do this even if histCtx is empty so the base student data appears!
+                setTimeout(() => {
+                    if (typeof populateAllExamDropdowns === 'function') populateAllExamDropdowns();
+                    if (typeof populate_session_dropdown === 'function') populate_session_dropdown();
+                    if (typeof window.real_populate_room_allotment_session_dropdown === 'function') window.real_populate_room_allotment_session_dropdown();
+                    if (typeof renderDashboardInvigilation === 'function') renderDashboardInvigilation();
+                    console.log("✅ Successfully broadcasted thawed historical data to all modules.");
+                }, 150);
+
                 if (histCtx && (Object.keys(histCtx.roomAllotment || {}).length > 0 || Object.keys(histCtx.invigilatorMapping || {}).length > 0)) {
                     const notice = document.createElement('div');
+
+
                     notice.id = 'historical-context-notice';
                     notice.className = 'mt-3 p-3 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-800 font-medium';
                     const rCount = Object.keys(histCtx.roomAllotment || {}).length;
@@ -5209,7 +5853,7 @@ function getExamName(date, time, stream) {
     // V68: Helper function to filter data based on selected report filter
     // Helper function to filter data based on selected report filter
     function getFilteredReportData(reportType) {
-        const data = JSON.parse(jsonDataStore.innerHTML || '[]');
+        const data = allStudentData || [];
         if (data.length === 0) return [];
 
         let filteredData = data;
@@ -5306,28 +5950,42 @@ function getExamName(date, time, stream) {
             getRoomCapacitiesFromStorage();
             loadQPCodes();
 
-            const data = getFilteredReportData('room-wise');
-            if (data.length === 0) { alert("No data found."); return; }
-
-            const processed_rows_with_rooms = performOriginalAllocation(data);
-            const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
-            const final_student_list_for_report = [];
-
-            for (const student of processed_rows_with_rooms) {
-                if (student.isScribe) {
-                    const sessionKeyPipe = `${student.Date} | ${student.Time}`;
-                    const sessionScribeAllotment = allScribeAllotments[sessionKeyPipe] || {};
-                    const scribeRoom = sessionScribeAllotment[student['Register Number']] || 'N/A';
-                    final_student_list_for_report.push({ ...student, Name: student.Name, remark: `${scribeRoom}`, isPlaceholder: true });
-                } else {
-                    final_student_list_for_report.push(student);
-                }
+            // 🛡️ UNIFIED PIPELINE (V8): Read actual database, don't simulate!
+            const allAllotments = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+            const sessionAllotment = allAllotments[sessionKey] || [];
+            
+            if (sessionAllotment.length === 0) { 
+                alert("Please allot rooms before generating the Room-wise report."); 
+                generateReportButton.disabled = false;
+                generateReportButton.textContent = "Generate Room-wise Seating Report";
+                return; 
             }
 
-            lastGeneratedRoomData = processed_rows_with_rooms;
-            lastGeneratedReportType = "Roomwise_Seating_Report";
+            const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
+            
+            // 🛡️ SCRIBE DETECTION: Load the official scribe list
+            const scribeListRaw = JSON.parse(localStorage.getItem(typeof SCRIBE_LIST_KEY !== 'undefined' ? SCRIBE_LIST_KEY : 'examScribeList') || '[]');
+            const scribeRegNos = new Set(scribeListRaw.map(s => s.regNo));
+            
+            const final_student_list_for_report = [];
+
+
+            // Flatten saved allotment into student rows
+            sessionAllotment.forEach(room => {
+                (room.students || []).forEach(s => {
+                    const isOfficialScribe = scribeRegNos.has(s['Register Number']);
+                    final_student_list_for_report.push({
+                        ...s,                      // Original Student Keys
+                        'Room No': room.roomName, // Physical Room
+                        seatNumber: s.seat || '?', // The STICKY SEAT
+                        isScribeChecked: isOfficialScribe, // FLAG FOR HIGHLIGHTING
+                        Stream: room.stream || 'Regular'
+                    });
+            });
+        });
 
             const sessions = {};
+
             loadQPCodes();
 
             final_student_list_for_report.forEach(student => {
@@ -5363,6 +6021,7 @@ function getExamName(date, time, stream) {
                 @media print {
                     .print-page-room, .print-page { padding: 10mm !important; box-shadow: none !important; border: none !important; }
                 }
+                .scribe-row-highlight { background-color: #374151 !important; color: white !important; -webkit-print-color-adjust: exact; font-weight: bold; }
             </style>
         `;
 
@@ -5390,11 +6049,23 @@ function getExamName(date, time, stream) {
             });
 
             function getSmartCourseName(fullName) {
+                // Extract syllabus info before cleaning (looks for 4 digits inside brackets)
+                const syllabusMatch = fullName.match(/\[(.*?\d{4}.*?)\]/i);
+                
                 let cleanName = fullName.replace(/\[.*?\]/g, '').trim();
                 cleanName = cleanName.replace(/\s-\s$/, '').trim();
+                
                 const words = cleanName.split(/\s+/);
-                if (words.length <= 4) return cleanName;
-                return `${words.slice(0, 3).join(' ')} ... ${words[words.length - 1]}`;
+                let resultName = cleanName;
+                if (words.length > 4) {
+                    resultName = `${words.slice(0, 3).join(' ')} ... ${words[words.length - 1]}`;
+                }
+                
+                // Re-append the syllabus year if found
+                if (syllabusMatch) {
+                    resultName += ` [${syllabusMatch[1].trim()}]`;
+                }
+                return resultName;
             }
 
             sortedSessionKeys.forEach(key => {
@@ -5513,7 +6184,9 @@ function getExamName(date, time, stream) {
 
                 // --- 2. Table Row Generator ---
                 let previousCourseName = ""; let previousRegNoPrefix = "";
-                const regNoRegex = /^([A-Z]+)(\d+)$/;
+                // 🛡️ UNIVERSAL ID SPLITTER: Handles Alphanumeric, Hyphenated, or Pure Number IDs safely
+                const regNoRegex = /^([a-zA-Z\-_]*)(\d+)$/;
+
 
                 function generateTableRows(studentList) {
                     let rowsHtml = '';
@@ -5549,8 +6222,13 @@ function getExamName(date, time, stream) {
                         let displayCourseName = (tableCourseName === previousCourseName) ? '"' : tableCourseName;
                         if (tableCourseName !== previousCourseName) previousCourseName = tableCourseName;
 
-                        const rowClass = student.isPlaceholder ? 'class="scribe-row-highlight"' : '';
-                        const remarkText = student.remark || '';
+                        // 🛡️ SCRIBE HIGHLIGHT: Apply grey background and auto-mark remarks
+                        const rowClass = (student.isScribeChecked || student.isPlaceholder) ? 'class="scribe-row-highlight"' : '';
+                        let remarkText = student.remark || '';
+                        if (student.isScribeChecked) {
+                            remarkText = (remarkText ? remarkText + ', ' : '') + 'SCRIBE';
+                        }
+
 
                         rowsHtml += `
                         <tr ${rowClass} class="room-report-row">
@@ -5681,11 +6359,30 @@ function getExamName(date, time, stream) {
         await new Promise(resolve => setTimeout(resolve, 50));
 
         try {
-            currentCollegeName = localStorage.getItem(COLLEGE_NAME_KEY) || "University of Calicut";
+                       currentCollegeName = localStorage.getItem(COLLEGE_NAME_KEY) || "University of Calicut";
             getRoomCapacitiesFromStorage();
 
-            const baseData = getFilteredReportData('day-wise');
-            if (baseData.length === 0) { alert("No data found."); return; }
+            // 🛡️ UNIFIED PIPELINE (V9): Direct database source
+            const allAllotments = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+            const sessionAllotment = allAllotments[sessionKey] || [];
+            if (sessionAllotment.length === 0) { 
+                alert("Please allot rooms before generating this report."); 
+                generateDaywiseReportButton.disabled = false;
+                generateDaywiseReportButton.textContent = "Generate Day-wise Student List";
+                return; 
+            }
+
+            const baseData = [];
+            sessionAllotment.forEach(room => {
+                (room.students || []).forEach(s => {
+                    baseData.push({
+                        ...s,
+                        'Room No': room.roomName,
+                        seatNumber: s.seat || '?',
+                        Stream: room.stream || 'Regular'
+                    });
+                });
+            });
 
             // 1. Split Data by Stream
             const dataByStream = {};
@@ -5786,28 +6483,38 @@ function getExamName(date, time, stream) {
 
                     if (!row.skipLocation) {
                         const rowspanAttr = row.span > 1 ? `rowspan="${row.span}"` : '';
-                        // Center vertically if merged, Top if single (to save space)
-                        const valign = row.span > 1 ? 'vertical-align: middle;' : 'vertical-align: top;';
+                        
+                        // --- DYNAMIC FONT & ROTATION LOGIC (Synced with Export HTML) ---
+                        let dynFontSize = 9;
+                        let tdStyles = '';
+                        const charLen = (row.displayRoom || '').length;
 
-                        // --- NEW: DYNAMIC FONT SIZE LOGIC ---
-                        // Scales font based on how many rows (students) are in the room
-                        let locFontSize = '0.8em'; // Default small (for single/double rows)
+                        if (row.span > 4) {
+                            // Rotate 90 degrees for long spans
+                            const maxChars = row.span * 4;
+                            if (charLen > maxChars + 8) dynFontSize = 6.5;
+                            else if (charLen > maxChars) dynFontSize = 7.5;
+                            
+                            tdStyles = 'writing-mode:vertical-rl; transform:rotate(180deg); text-align:center; padding:4px; max-height:100%; line-height:1.1; white-space:nowrap; margin:auto;';
+                        } else {
+                            // Keep horizontal for short spans
+                            if (charLen > 25) dynFontSize = 6.5;
+                            else if (charLen > 15) dynFontSize = 7.5;
+                            
+                            tdStyles = 'text-align:center; padding:1px; white-space:normal; word-wrap:break-word; line-height:1.1; margin:auto;';
+                        }
 
-                        if (row.span > 15) locFontSize = '1.4em';       // Very Large for big halls
-                        else if (row.span > 10) locFontSize = '1.2em';  // Large
-                        else if (row.span > 5) locFontSize = '1.0em';   // Medium
-                        else if (row.span > 2) locFontSize = '0.9em';   // Slightly larger than base
-
-                        // Applied styles: Bold, Centered, Dynamic Size
-                        rowsHtml += `<td ${rowspanAttr} style="padding: 2px; font-size:${locFontSize}; font-weight:bold; background-color: #fff; ${valign} text-align: center; line-height: 1.1; border: 1px solid #000;">
-                        ${row.displayRoom}
+                        // FIXED: TD borders are intact. Rotating a DIV inside the TD prevents collapse bugs.
+                        rowsHtml += `<td ${rowspanAttr} style="background-color:#fff; border:1px solid #000; vertical-align:middle; padding:0; overflow:hidden;">
+                        <div style="${tdStyles} font-size:${dynFontSize}pt; font-weight:bold;">${row.displayRoom}</div>
                     </td>`;
                     }
 
+                    // TIGHT PADDING: Guaranteed Register Numbers won't word-wrap and bloat the rows
                     rowsHtml += `
-                        <td style="padding: 1px 4px; font-weight: 600; font-size: 0.9em; border: 1px solid #000;">${row.student['Register Number']}</td>
+                        <td style="padding: 1px 4px; font-weight: 700; font-size: 8.5pt; border: 1px solid #000; white-space: nowrap; overflow: hidden;">${row.student['Register Number']}</td>
                         
-                        <td style="padding: 1px 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 0; border: 1px solid #000;">
+                        <td style="padding: 1px 4px; font-size: 7.5pt; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 0; border: 1px solid #000;">
                             ${row.student.Name}
                         </td>
                         
@@ -5819,7 +6526,8 @@ function getExamName(date, time, stream) {
                 return `
                 <table class="daywise-report-table" style="width:100%; border-collapse:collapse; font-size:9pt; table-layout: fixed;">
                     <colgroup>
-                        <col style="width: 22%;"> <col style="width: 30%;"> <col style="width: 38%;"> <col style="width: 10%;"> </colgroup>
+                        <col style="width: 45px;"> <col style="width: 85px;"> <col style="width: auto;"> <col style="width: 32px;"> </colgroup>
+
                     <thead>
                         <tr>
                             <th style="border: 1px solid #000;">Location</th>
@@ -5833,12 +6541,33 @@ function getExamName(date, time, stream) {
             `;
             }
 
-            // Main Loop
+            // Build a Set of scribe Reg Nos for fast lookup
+            const globalScribeList = JSON.parse(localStorage.getItem(SCRIBE_LIST_KEY) || '[]');
+            const scribeRegSet = new Set(globalScribeList.map(s => s.regNo));
+
             for (const streamName of sortedStreamNames) {
-                const streamData = dataByStream[streamName];
-                const processed_rows = performOriginalAllocation(streamData);
+                // Flatten the saved database for this stream
+                let processed_rows = [];
+                sessionAllotment.forEach(room => {
+                    const roomStream = room.stream || "Regular";
+                    if (roomStream === streamName) {
+                        (room.students || []).forEach(s => {
+                            const reg = s['Register Number'] || s.RegisterNo || '';
+                            processed_rows.push({
+                                ...s,
+                                'Room No': room.roomName,
+                                seatNumber: s.seat || '?',
+                                Stream: roomStream,
+                                // FIX: Stamp isScribe flag from the global scribe list
+                                isScribe: scribeRegSet.has(reg)
+                            });
+                        });
+                    }
+                });
+
 
                 const daySessions = {};
+
                 processed_rows.forEach(student => {
                     const key = `${student.Date}_${student.Time}`;
                     if (!daySessions[key]) daySessions[key] = { Date: student.Date, Time: student.Time, students: [] };
@@ -5898,11 +6627,14 @@ function getExamName(date, time, stream) {
                 `;
                     }
 
-                    // Generate Separate Scribe Page
+                    // Generate Dedicated Scribe Assistance Summary Page (A4 Large Font)
                     const sessionScribes = session.students.filter(s => s.isScribe);
                     if (sessionScribes.length > 0 && typeof renderScribeSummaryPage === 'function') {
+                        // FIX: Restore call to the dedicated page generator (renderScribeSummaryPage)
                         allPagesHtml += renderScribeSummaryPage(sessionScribes, streamName, session, allScribeAllotments);
                     }
+
+
                 });
             }
 
@@ -6929,10 +7661,29 @@ function getExamName(date, time, stream) {
                 getRoomCapacitiesFromStorage();
                 loadQPCodes();
 
-                const data = getFilteredReportData('qp-distribution');
-                if (data.length === 0) { alert("No data found."); return; }
+            // 🛡️ UNIFIED PIPELINE (V8): Use actual database for Room-wise
+            const allAllotments = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+            const sessionAllotment = allAllotments[sessionKey] || [];
+            
+            if (sessionAllotment.length === 0) { 
+                alert("Please allot rooms before generating the Room-wise report."); 
+                generateReportButton.disabled = false;
+                generateReportButton.textContent = "Generate Room-wise Seating Report";
+                return; 
+            }
 
-                const processed_rows_with_rooms = performOriginalAllocation(data);
+            const processed_rows_with_rooms = [];
+            sessionAllotment.forEach(room => {
+                (room.students || []).forEach(s => {
+                    processed_rows_with_rooms.push({
+                        ...s,
+                        'Room No': room.roomName,
+                        seatNumber: s.seat || '?',
+                        Stream: room.stream || 'Regular'
+                    });
+                });
+            });
+
                 const sessions = {};
 
                 // 1. Grouping Logic
@@ -7118,7 +7869,7 @@ function getExamName(date, time, stream) {
         if (!regNos || regNos.length === 0) return 'None'; // Changed from <em>None</em> to plain text
 
         const outputStrings = [];
-        const regEx = /^([A-Z]+)(\d+)$/;
+         const regNoRegex = /^([a-zA-Z\-_]*)(\d+)$/;
 
         regNos.sort();
 
@@ -7445,13 +8196,24 @@ function getExamName(date, time, stream) {
             const allScribeStudents = data.filter(s => scribeRegNos.has(s['Register Number']));
             if (allScribeStudents.length === 0) { alert("No scribe students found."); return; }
 
-            const allDataRaw = JSON.parse(jsonDataStore.innerHTML || '[]');
-            const originalAllotments = performOriginalAllocation(allDataRaw);
-            const originalRoomMap = originalAllotments.reduce((map, s) => {
-                const key = `${s.Date}|${s.Time}|${s['Register Number']}`;
-                map[key] = { room: s['Room No'], seat: s.seatNumber };
-                return map;
-            }, {});
+            // 🛡️ UNIFIED PIPELINE (V7): Map the actual database rooms/seats
+            const allAllotments = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+            const sessionAllotment = allAllotments[sessionKey] || [];
+            const originalRoomMap = {};
+            
+            sessionAllotment.forEach(room => {
+                const roomSerialMap = getRoomSerialMap(sessionKey);
+                const serial = roomSerialMap[room.roomName] || '-';
+                (room.students || []).forEach(s => {
+                    const reg = s['Register Number'] || s.RegisterNo;
+                    if (reg) {
+                        originalRoomMap[`${s.Date}|${s.Time}|${reg}`] = { 
+                            room: room.roomName, 
+                            seat: s.seat || '?' 
+                        };
+                    }
+                });
+            });
 
             const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
             loadQPCodes();
@@ -7598,16 +8360,45 @@ function getExamName(date, time, stream) {
             const allScribeStudents = data.filter(s => scribeRegNos.has(s['Register Number']));
             if (allScribeStudents.length === 0) throw new Error("No scribe students found in the selected session.");
 
-            const originalAllotments = performOriginalAllocation(data);
-            const originalRoomMap = originalAllotments.reduce((map, s) => {
-                map[s['Register Number']] = { room: s['Room No'], seat: s.seatNumber };
-                return map;
-            }, {});
+            // 🛡️ UNIFIED PIPELINE (V12): Use actual database for Original Rooms
+            const allAllotments = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+            // FIX: Derive sessionKey from the UI dropdown (was undefined before the for-loop)
+            const sessionKey = reportsSessionSelect.value;
+            const sessionAllotment = allAllotments[sessionKey] || [];
+            
+            const originalRoomMap = {};
+            sessionAllotment.forEach(room => {
+                (room.students || []).forEach(s => {
+                    const reg = (typeof s === 'object') ? (s['Register Number'] || s.RegisterNo) : s;
+                    originalRoomMap[reg] = { room: room.roomName, seat: s.seat || '?' };
+                });
+            });
+
+            // 🛡️ SCR1, SCR2 SEQUENTIAL MAPPING
+            // 1. Identify all unique rooms used for scribes in this session
+            const currentSessionScribeRooms = allScribeAllotments[sessionKey] || {};
+            const uniqueScribeRoomsInSession = [...new Set(Object.values(currentSessionScribeRooms))];
+            
+            // 2. Sort them by their physical Room Serial to assign SCR numbers in order
+            const roomSerialMap = (typeof getRoomSerialMap === 'function') ? getRoomSerialMap(sessionKey) : {};
+            uniqueScribeRoomsInSession.sort((a, b) => {
+                const serialA = parseInt(roomSerialMap[a]) || 999;
+                const serialB = parseInt(roomSerialMap[b]) || 999;
+                return serialA - serialB;
+            });
+
+            // 3. Create the Scribe Mapping (e.g., "Room 5" -> "SCR1")
+            const scribeRoomLabelMap = {};
+            uniqueScribeRoomsInSession.forEach((roomName, idx) => {
+                scribeRoomLabelMap[roomName] = `SCR${idx + 1}`;
+            });
 
             const reportRows = [];
 
+
             for (const s of allScribeStudents) {
                 const sessionKey = `${s.Date} | ${s.Time}`;
+
                 const sessionScribeRooms = allScribeAllotments[sessionKey] || {};
                 const sessionQPCodes = qpCodeMap[sessionKey] || {};
 
@@ -7632,7 +8423,10 @@ function getExamName(date, time, stream) {
                         if (rLoc) locText = ` (${rLoc})`;
                     }
                     const scribeSerial = roomSerialMap[rawScribeRoom] || '-';
-                    scribeRoomDisplay = `<strong>${scribeSerial} - ${rawScribeRoom}</strong>${locText}`;
+                    const scribeLabel = scribeRoomLabelMap[rawScribeRoom] || 'SCR?';
+                    // Display style: SCR1 - #10 - Room 5
+                    scribeRoomDisplay = `<strong><span style="color:#2563eb;">${scribeLabel}</span> - #${scribeSerial} - ${rawScribeRoom}</strong>${locText}`;
+
                 }
 
                 reportRows.push({
@@ -7700,8 +8494,8 @@ function getExamName(date, time, stream) {
                                 <td class="data">${student.OriginalRoom}</td>
                             </tr>
                             <tr>
-                                <td class="label">Scribe Allotted Room:</td>
-                                <td class="data" style="font-size: 1.1em;">${student.ScribeRoom}</td>
+                                <td class="label" style="font-size: 12pt; font-weight: bold;">Scribe Allotted Room:</td>
+                                <td class="data" style="font-size: 1.3em; font-weight: 800; border: 2px solid #000; padding: 10px; background-color: #f1f5f9;">${student.ScribeRoom}</td>
                             </tr>
                             <tr>
                                 <td class="label">Sign or Thumb Impression of Candidate:</td>
@@ -7745,8 +8539,95 @@ function getExamName(date, time, stream) {
         }
     });
 
+    // --- 🤝 REPORT 7: SCRIBE ASSISTANCE SUMMARY ---
+    generateScribeReportButton.addEventListener('click', async () => {
+        if (!reportsSessionSelect.value) { return alert("Please select an Exam Session."); }
+        
+        generateScribeReportButton.disabled = true;
+        generateScribeReportButton.textContent = "Generating...";
+        reportStatus.textContent = "Processing Scribe Summary...";
+
+        try {
+            const scribeListKey = 'examScribeList';
+            const scribeAllotmentKey = 'examScribeAllotment';
+            const allScribesData = JSON.parse(localStorage.getItem(scribeListKey) || '[]');
+            const allScribesAllotment = JSON.parse(localStorage.getItem(scribeAllotmentKey) || '{}');
+            const sessionAllotments = allScribesAllotment[reportsSessionSelect.value] || {};
+            const scribeRegKeys = Object.keys(sessionAllotments);
+
+            if (scribeRegKeys.length === 0) { return alert("No Scribes allotted for this session."); }
+
+            // Fetch students to cross-reference their Course and Name
+            const allStudentsForReport = getFilteredReportData('day-wise');
+            let htmlRows = '';
+            
+            // Generate clean Table Rows
+            scribeRegKeys.forEach((regNo, idx) => {
+                const roomName = sessionAllotments[regNo];
+                const scribeObj = allScribesData.find(s => s.regNo === regNo) || {};
+                const studentObj = allStudentsForReport.find(s => s['Register Number'] === regNo) || {};
+                
+                const candName = studentObj.Name || "Unknown Candidate";
+                const courseName = studentObj.Course || "Unknown Course";
+                const scribeName = scribeObj.name || "Unknown Scribe";
+
+                htmlRows += `
+                    <tr>
+                        <td style="text-align:center; padding:5px; border:1px solid #000;">${idx + 1}</td>
+                        <td style="font-weight:bold; padding:5px; border:1px solid #000;">${regNo}</td>
+                        <td style="padding:5px; border:1px solid #000; font-size:9pt;">${candName}</td>
+                        <td style="padding:5px; border:1px solid #000; font-size:9pt;">${courseName}</td>
+                        <td style="font-weight:bold; color:#059669; padding:5px; border:1px solid #000;">${scribeName}</td>
+                        <td style="text-align:center; font-weight:bold; padding:5px; border:1px solid #000;">${roomName}</td>
+                        <td style="padding:5px; border:1px solid #000;"></td>
+                    </tr>
+                `;
+            });
+
+            const html = `
+                <style> @media print { .print-page { box-shadow: none !important; border: none !important; margin: 0 auto !important; } } </style>
+                <div class="print-page bg-white text-black p-8 mx-auto my-4 shadow-lg border border-gray-200" style="width: 210mm; min-height: 297mm;">
+                    <div style="text-align: center; margin-bottom: 20px;">
+                        <h1 style="font-size: 16pt; font-weight: bold; margin: 0;">${typeof currentCollegeName !== 'undefined' ? currentCollegeName : "College Name"}</h1>
+                        <h2 style="font-size: 14pt; margin: 5px 0;">SCRIBE ASSISTANCE SUMMARY</h2>
+                        <h3 style="font-size: 11pt; font-weight: normal; margin: 5px 0;">Session: ${reportsSessionSelect.value}</h3>
+                    </div>
+                    <table style="width:100%; border-collapse:collapse; font-size:10pt;">
+                        <thead>
+                            <tr style="background-color:#f3f4f6;">
+                                <th style="width:5%; border:1px solid #000; padding:6px;">Sl No</th>
+                                <th style="width:15%; border:1px solid #000; padding:6px;">Reg No</th>
+                                <th style="width:25%; border:1px solid #000; padding:6px;">Candidate Name</th>
+                                <th style="width:15%; border:1px solid #000; padding:6px;">Course</th>
+                                <th style="width:20%; border:1px solid #000; padding:6px;">Scribe Name</th>
+                                <th style="width:10%; border:1px solid #000; padding:6px;">Room</th>
+                                <th style="width:10%; border:1px solid #000; padding:6px;">Sign</th>
+                            </tr>
+                        </thead>
+                        <tbody>${htmlRows}</tbody>
+                    </table>
+                </div>
+            `;
+
+            reportOutputArea.innerHTML = html;
+            reportOutputArea.style.display = 'block';
+            reportStatus.textContent = "Generated Scribe Assistance Summary.";
+            reportControls.classList.remove('hidden');
+            lastGeneratedReportType = "Scribe_Summary";
+
+        } catch (e) {
+            console.error("Scribe Summary Error:", e);
+            alert("Error generating report: " + e.message);
+            reportStatus.textContent = "Generation failed.";
+        } finally {
+            generateScribeReportButton.disabled = false;
+            generateScribeReportButton.textContent = "7-Generate Scribe Assistance Report";
+        }
+    });
+
     // --- V96: Removed PDF Download Functionality (Replaced with native Print) ---
     // downloadPdfButton.addEventListener('click', ... removed ...)
+
 
        // --- Event listener for the "Clear" button ---
     clearReportButton.addEventListener('click', clearReport);
@@ -8332,11 +9213,13 @@ async function parseCsvAndLoadData(csvText) {
 
 window.real_populate_session_dropdown = function () {
         try {
-            allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
-            if (allStudentData.length === 0) {
+            // Legacy HTML render logic safely removed by Antigravity
+            const knownRegDrop = JSON.parse(localStorage.getItem('examAllKnownSessions') || '[]');
+            if (allStudentData.length === 0 && knownRegDrop.length === 0) {
                 disable_absentee_tab(true);
                 return;
             }
+
 
             const previousSelection = sessionSelect.value;
             const seenKeys = new Set();
@@ -8361,10 +9244,12 @@ window.real_populate_session_dropdown = function () {
 
 
             // Clear Options
-            [sessionSelect, reportsSessionSelect, editSessionSelect, searchSessionSelect].forEach(el => {
+            const sessionSelectQP = document.getElementById('session-select-qp');
+            [sessionSelect, reportsSessionSelect, editSessionSelect, searchSessionSelect, sessionSelectQP].forEach(el => {
                 if(el) el.innerHTML = '<option value="">-- Select a Session --</option>';
             });
             if(reportsSessionSelect) reportsSessionSelect.innerHTML = '<option value="all">All Sessions</option>';
+
 
                       // --- 🧠 SMART DEFAULT LOGIC (Today's Active vs Next Upcoming) ---
             const now = new Date();
@@ -8379,9 +9264,10 @@ window.real_populate_session_dropdown = function () {
 
             allStudentSessions.forEach(session => {
                 const opt = `<option value="${session}">${session}</option>`;
-                [sessionSelect, reportsSessionSelect, editSessionSelect, searchSessionSelect].forEach(el => {
+                [sessionSelect, reportsSessionSelect, editSessionSelect, searchSessionSelect, sessionSelectQP].forEach(el => {
                     if (el) el.innerHTML += opt;
                 });
+
 
                 const [datePart, timePart] = session.split('|').map(s => s.trim());
                 if (!datePart || !timePart) return;
@@ -8420,11 +9306,12 @@ window.real_populate_session_dropdown = function () {
             const targetVal = (previousSelection && allStudentSessions.includes(previousSelection)) ? previousSelection : defaultSession;
 
             // Set Value & Initialize Trigger UI
-            [sessionSelect, editSessionSelect, searchSessionSelect].forEach(el => {
+            [sessionSelect, editSessionSelect, searchSessionSelect, sessionSelectQP].forEach(el => {
                 if(el && targetVal) el.value = targetVal;
                 // Dispatch change to run logic, but UI might not be ready yet
                 if(el) el.dispatchEvent(new Event('change'));
             });
+
             if(reportsSessionSelect) reportsSessionSelect.value = targetVal || "all";
 
             reportFilterSection.classList.remove('hidden');
@@ -8451,7 +9338,7 @@ window.real_populate_session_dropdown = function () {
 
         // Sync local list from store
         if (typeof jsonDataStore !== 'undefined') {
-            allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
+            // Removed legacy DOM array wipe
         }
 
         sessionSelect.value = savedSession;
@@ -8529,12 +9416,16 @@ window.real_populate_session_dropdown = function () {
         const [date, time] = sessionKey.split(' | ');
         const sessionStudents = allStudentData.filter(s => s.Date === date && s.Time === time);
 
-        // Perform allocation on the *entire* session
-        // *** THIS NOW USES THE MAIN ALLOCATION, WHICH IS SCRIBE-AWARE ***
-        const allocatedSessionData = performOriginalAllocation(sessionStudents);
+        // 🛡️ UNIFIED SEARCH (V12): Read from actual database
+        const allAllotments = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+        const sessionAllotment = allAllotments[sessionKey] || [];
+        
+        let allocatedStudent = null;
+        sessionAllotment.forEach(room => {
+            const found = (room.students || []).find(s => (s['Register Number'] || s.RegisterNo) === student['Register Number']);
+            if (found) allocatedStudent = { ...found, 'Room No': room.roomName };
+        });
 
-        // Find our selected student in the allocated list
-        const allocatedStudent = allocatedSessionData.find(s => s['Register Number'] === student['Register Number']);
 
         const roomNo = allocatedStudent ? allocatedStudent['Room No'] : 'N/A';
         const roomInfo = currentRoomConfig[roomNo];
@@ -8708,20 +9599,22 @@ window.real_populate_session_dropdown = function () {
             return;
         }
 
-        // Allocate rooms for correct display
-        const sessionStudents = allStudentData.filter(s => s.Date === date && s.Time === time);
-        const allocatedSessionData = performOriginalAllocation(sessionStudents);
-
-        const allocatedMap = allocatedSessionData.reduce((map, s) => {
-            map[s['Register Number']] = {
-                room: s['Room No'],
-                isScribe: s.isScribe,
-                stream: s.Stream,
-                name: s.Name
-            };
-            return map;
-        }, {});
-
+        // 🛡️ UNIFIED ABSENTEE VIEW (V12): Read from actual database
+        const allAllotments = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+        const sessionAllotment = allAllotments[sessionKey] || [];
+        
+        const allocatedMap = {};
+        sessionAllotment.forEach(room => {
+            (room.students || []).forEach(s => {
+                const reg = (typeof s === 'object') ? (s['Register Number'] || s.RegisterNo) : s;
+                allocatedMap[reg] = {
+                    room: room.roomName,
+                    isScribe: s.isScribe,
+                    stream: room.stream || "Regular",
+                    name: s.Name
+                };
+            });
+        });
         currentAbsenteeList.forEach(regNo => {
             const roomData = allocatedMap[regNo] || { room: 'N/A', isScribe: false, stream: 'Regular', name: 'Unknown' };
             const room = roomData.room;
@@ -8839,12 +9732,16 @@ window.real_populate_session_dropdown = function () {
 
     // --- NEW: Real-time Cloud Listener ---
     function subscribeToQPSession(sessionKey) {
+        // 🛡️ DEDUP GUARD: Bail if already listening to this exact session
+        if (window._activeQPSession === sessionKey && qpSessionUnsubscribe) {
+            return;
+        }
+        window._activeQPSession = sessionKey;
         // 1. Unsubscribe from previous session if any
         if (qpSessionUnsubscribe) {
             qpSessionUnsubscribe();
             qpSessionUnsubscribe = null;
         }
-
         if (!sessionKey || !window.firebase) return;
 
         const { db, doc, onSnapshot } = window.firebase;
@@ -8880,7 +9777,7 @@ window.real_populate_session_dropdown = function () {
 window.real_populate_qp_code_session_dropdown = function () {
         try {
             if (allStudentData.length === 0) {
-                allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
+                // Removed legacy DOM array wipe
             }
             const knownRegistry_qp = JSON.parse(localStorage.getItem('examAllKnownSessions') || '[]');
             if (allStudentData.length === 0 && knownRegistry_qp.length === 0) {
@@ -8966,7 +9863,7 @@ window.real_populate_qp_code_session_dropdown = function () {
 
         // Sync local list from store
         if (typeof jsonDataStore !== 'undefined') {
-            allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
+            // Removed legacy DOM array wipe
         }
 
         sessionSelectQP.value = savedSession;
@@ -9067,6 +9964,8 @@ window.real_populate_qp_code_session_dropdown = function () {
                    class="qp-code-input block w-1/3 p-2 border border-gray-300 rounded-md shadow-sm text-sm focus:ring-indigo-500 focus:border-indigo-500 ${bgClass}" 
                    value="${savedCode}" 
                    data-course-key="${base64Key}"
+                   data-course="${item.course.replace(/"/g, '&quot;')}"
+                   data-stream="${item.stream.replace(/"/g, '&quot;')}"
                    placeholder="QP Code"
                    ${disabledAttr}>
         </div>
@@ -9689,8 +10588,17 @@ window.real_populate_qp_code_session_dropdown = function () {
                 for (const [sessionKey, students] of Object.entries(sessions)) {
                     const [date, time] = sessionKey.split(' | ');
 
-                    // Run allocation logic to get Seats & Rooms
-                    const allocatedStudents = performOriginalAllocation(students);
+                    // 🛡️ UNIFIED CACHE (V12): Use saved session record
+                    const allAllotments = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+                    const sessionAllotment = allAllotments[sessionKey] || [];
+                    
+                    const allocatedStudents = [];
+                    sessionAllotment.forEach(room => {
+                        (room.students || []).forEach(s => {
+                            allocatedStudents.push({ ...s, 'Room No': room.roomName, seatNumber: s.seat || '?' });
+                        });
+                    });
+
 
                     // Helper: Absentee Set for this session
                     const sessionAbsentees = new Set(allAbsentees[sessionKey] || []);
@@ -9730,7 +10638,8 @@ window.real_populate_qp_code_session_dropdown = function () {
 
                         // F. Room & Location
                         let roomNo = s['Room No'];
-                        let seatNo = s.seatNumber;
+                        // 🛡️ UNIFIED: Read sticky seat property
+                        let seatNo = s.seat || s.seatNumber || '?';
 
                         const roomInfo = currentRoomConfig[roomNo] || {};
                         const location = roomInfo.location || "";
@@ -9843,7 +10752,7 @@ window.real_populate_qp_code_session_dropdown = function () {
   window.real_populate_room_allotment_session_dropdown = function () {
         try {
             if (allStudentData.length === 0) {
-                allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
+                // Removed legacy DOM array wipe
             }
             const knownRegistry_room = JSON.parse(localStorage.getItem('examAllKnownSessions') || '[]');
             if (allStudentData.length === 0 && knownRegistry_room.length === 0) {
@@ -10016,6 +10925,31 @@ window.real_populate_qp_code_session_dropdown = function () {
             streamStats[roomStream].roomsUsed++;
         });
 
+        
+        // --- MIXING STRATEGY LOCK: Disable strategy selection if allotments exist ---
+        const totalAllottedOverall = Object.values(streamStats).reduce((sum, s) => sum + s.allotted, 0);
+        const mixingRadios = document.querySelectorAll('input[name="mixing-strategy"]');
+        if (totalAllottedOverall > 0) {
+            mixingRadios.forEach(radio => {
+                radio.disabled = true;
+                radio.parentElement.style.opacity = "0.5";
+                radio.parentElement.title = "Cannot change strategy mid-allotment. Wipe allotment to change.";
+            });
+            const mixPanel = document.getElementById('mixing-strategy-panel');
+            if (mixPanel) mixPanel.style.border = "1px solid #fee2e2"; // Subtle red border to show locked state
+        } else {
+            mixingRadios.forEach(radio => {
+                radio.disabled = false;
+                radio.parentElement.style.opacity = "1";
+                radio.parentElement.title = "";
+            });
+            const mixPanel = document.getElementById('mixing-strategy-panel');
+            if (mixPanel) mixPanel.style.border = "none";
+        }
+
+
+
+        
         // 2. Render Stats Cards
         Object.keys(streamStats).forEach(streamName => {
             const stats = streamStats[streamName];
@@ -10148,6 +11082,13 @@ window.real_populate_qp_code_session_dropdown = function () {
     // Render the list of allotted rooms (WITH CAPACITY TAGS & LOCK)
     function renderAllottedRooms() {
         allottedRoomsList.innerHTML = '';
+        const clearAllBtn = document.getElementById('clear-all-rooms-btn');
+        if (clearAllBtn) {
+            clearAllBtn.disabled = isAllotmentLocked;
+            clearAllBtn.className = isAllotmentLocked 
+                ? "text-xs px-3 py-1.5 bg-gray-100 border border-gray-300 text-gray-400 rounded flex items-center gap-1 font-bold cursor-not-allowed opacity-60" 
+                : "text-xs px-3 py-1.5 bg-white border border-red-600 text-red-600 rounded hover:bg-red-50 flex items-center gap-1 font-bold transition";
+        }      
         const roomSerialMap = getRoomSerialMap(currentSessionKey);
 
         if (currentSessionAllotment.length === 0) {
@@ -10162,10 +11103,12 @@ window.real_populate_qp_code_session_dropdown = function () {
             const idx2 = currentStreamConfig.indexOf(s2);
             if (idx1 !== idx2) return idx1 - idx2;
 
-            const numA = parseInt(a.roomName.replace(/\D/g, ''), 10) || 0;
-            const numB = parseInt(b.roomName.replace(/\D/g, ''), 10) || 0;
-            return numA - numB;
+            // Sort by serial (assignment order) not room number — preserves shuffle visibility
+            const serialA = roomSerialMap[a.roomName] || 999;
+            const serialB = roomSerialMap[b.roomName] || 999;
+            return serialA - serialB;
         });
+
 
         currentSessionAllotment.forEach((room, index) => {
             const roomDiv = document.createElement('div');
@@ -10234,6 +11177,252 @@ window.real_populate_qp_code_session_dropdown = function () {
         });
     }
 
+       // --- CLEAR ALL ROOMS ---
+    window.deleteAllRooms = async function() {
+        if (isAllotmentLocked) return alert('List is locked. Please unlock it first.');
+        if (!confirm('Are you sure you want to clear ALL room allotments for this session? This action cannot be undone.')) return;
+
+        currentSessionAllotment.forEach(roomData => {
+            if (roomData && roomData.students) {
+                roomData.students.forEach(s => {
+                    const reg = (typeof s === 'object') ? s['Register Number'] : s;
+                    if (currentScribeAllotment[reg]) delete currentScribeAllotment[reg];
+                });
+            }
+            const allInvigMappings = JSON.parse(localStorage.getItem('examInvigilatorMapping') || '{}');
+            if (allInvigMappings[currentSessionKey] && allInvigMappings[currentSessionKey][roomData.roomName]) {
+                delete allInvigMappings[currentSessionKey][roomData.roomName];
+                localStorage.setItem('examInvigilatorMapping', JSON.stringify(allInvigMappings));
+                if (window.currentInvigMapping) delete window.currentInvigMapping[roomData.roomName];
+            }
+        });
+
+        currentSessionAllotment = [];
+        hasUnsavedAllotment = true;
+        saveRoomAllotment();
+        updateAllotmentDisplay();
+        if (typeof window.renderInvigilationPanel === 'function') window.renderInvigilationPanel();
+
+        // 🚀 Trigger automatic cloud sync after clearing
+        const saveBtn = document.getElementById('save-room-allotment-button');
+        if (saveBtn) saveBtn.click();
+    };
+
+    // --- AUTO ALLOT (RANDOMIZED) LOGIC ---
+    const autoAllotBtn = document.getElementById('auto-allot-button');
+    if (autoAllotBtn) {
+        autoAllotBtn.addEventListener('click', () => {
+            getRoomCapacitiesFromStorage();
+            const listDiv = document.getElementById('auto-allot-room-list');
+            listDiv.innerHTML = '';
+            
+            // Calculate Needed Rooms Stream-wise and Total
+            const [date, time] = currentSessionKey.split(' | ');
+            const sessionStudents = allStudentData.filter(s => s.Date === date && s.Time === time);
+            
+            const streamStats = {};
+            currentStreamConfig.forEach(s => streamStats[s] = { total: 0 });
+            
+            sessionStudents.forEach(s => {
+                const st = s.Stream || "Regular";
+                if (!streamStats[st]) streamStats[st] = { total: 0 };
+                streamStats[st].total++;
+            });
+            
+            let neededHtml = '';
+            let totalNeededRooms = 0;
+            
+            for (const [st, counts] of Object.entries(streamStats)) {
+                if (counts.total > 0) {
+                    const rooms = Math.ceil(counts.total / 30);
+                    totalNeededRooms += rooms;
+                    // Exact match to your card's calculation: Total Students / 30
+                    neededHtml += `<span class="ml-1.5 text-[10px] bg-amber-200 text-amber-900 px-1.5 py-0.5 rounded shadow-sm">${st}: ~${rooms}</span>`;
+                }
+            }
+            
+            const neededEl = document.getElementById('auto-allot-needed-capacity');
+            if (neededEl) {
+                neededEl.innerHTML = totalNeededRooms > 0 
+                    ? `<span class="mr-1">~${totalNeededRooms}</span> ${neededHtml}`
+                    : `0`;
+            }
+            
+            const allottedRoomNames = currentSessionAllotment.map(r => r.roomName);
+            const allScribeAllotments = JSON.parse(localStorage.getItem('examScribeAllotment') || '{}');
+            const scribeRoomNames = Object.values(allScribeAllotments[currentSessionKey] || {});
+            
+            const sortedRoomNames = Object.keys(currentRoomConfig).sort((a, b) => {
+                return (parseInt(a.replace(/\\D/g, ''), 10) || 0) - (parseInt(b.replace(/\\D/g, ''), 10) || 0);
+            });
+
+            sortedRoomNames.forEach(roomName => {
+                if (allottedRoomNames.includes(roomName) || scribeRoomNames.includes(roomName)) return;
+                const room = currentRoomConfig[roomName];
+                const location = room.location ? ` (${room.location})` : '';
+                
+                const label = document.createElement('label');
+                label.className = "flex items-center gap-3 p-3 border border-gray-200 rounded-lg cursor-pointer hover:bg-teal-50 transition bg-white shadow-sm";
+                label.innerHTML = `
+                    <input type="checkbox" class="auto-allot-room-cb w-5 h-5 text-teal-600 rounded focus:ring-teal-500 cursor-pointer" value="${roomName}" data-cap="${room.capacity}">
+                    <div class="flex-1">
+                        <div class="font-bold text-gray-800">${roomName}${location}</div>
+                        <div class="text-xs text-gray-500 font-medium">Standard Capacity: ${room.capacity}</div>
+                    </div>
+                `;
+                label.querySelector('input').addEventListener('change', updateAutoAllotCounter);
+                listDiv.appendChild(label);
+            });
+            
+            document.getElementById('auto-allot-search').value = '';
+            document.getElementById('auto-allot-search').oninput = (e) => {
+                const val = e.target.value.toLowerCase();
+                listDiv.querySelectorAll('label').forEach(lbl => {
+                    lbl.style.display = lbl.innerText.toLowerCase().includes(val) ? 'flex' : 'none';
+                });
+            };
+            
+            updateAutoAllotCounter();
+            document.getElementById('auto-allot-modal').classList.remove('hidden');
+        });
+    }
+
+    function updateAutoAllotCounter() {
+        let count = 0, cap = 0;
+        document.querySelectorAll('.auto-allot-room-cb:checked').forEach(cb => {
+            count++;
+            cap += parseInt(cb.getAttribute('data-cap')) || 30;
+        });
+        document.getElementById('auto-allot-selected-count').textContent = count;
+        document.getElementById('auto-allot-total-capacity').textContent = cap;
+        document.getElementById('run-auto-allot-button').disabled = count === 0;
+    }
+
+    document.getElementById('close-auto-allot-modal')?.addEventListener('click', () => {
+        document.getElementById('auto-allot-modal').classList.add('hidden');
+    });
+
+    document.getElementById('run-auto-allot-button')?.addEventListener('click', async () => {
+        const checkedBoxes = Array.from(document.querySelectorAll('.auto-allot-room-cb:checked'));
+        if (checkedBoxes.length === 0) return;
+        
+        document.getElementById('auto-allot-modal').classList.add('hidden');
+        
+        // Randomly shuffle selected rooms (Prevents deterministic daily neighboring)
+        const selectedRooms = checkedBoxes.map(cb => ({
+            name: cb.value,
+            capacity: parseInt(cb.getAttribute('data-cap')) || 30
+        })).sort(() => Math.random() - 0.5); 
+        
+        const activeStrategy = document.querySelector('input[name="mixing-strategy"]:checked')?.value || 'none';
+        let roomIndex = 0;
+
+        // Process sequentially to respect Paper Mixing Engine internally
+        for (const stream of currentStreamConfig) {
+            let remainingForStream = true;
+            while (remainingForStream && roomIndex < selectedRooms.length) {
+                const r = selectedRooms[roomIndex];
+                
+                const [date, time] = currentSessionKey.split(' | ');
+                const sessionStudentRecords = allStudentData.filter(s => s.Date === date && s.Time === time);
+                const allottedRegNos = new Set();
+                currentSessionAllotment.forEach(rm => rm.students.forEach(s => allottedRegNos.add(s['Register Number'] || s.RegisterNo)));
+                
+                const candidates = sessionStudentRecords.filter(s => 
+                    !allottedRegNos.has(s['Register Number']) && (s.Stream || "Regular") === stream
+                );
+                
+                if (candidates.length === 0) {
+                    remainingForStream = false;
+                    break;
+                }
+                
+                // Programmatically invoke the internal filling engine (silent UI sync variant)
+                await selectRoomForAllotmentSilent(r.name, r.capacity, stream, activeStrategy);
+                roomIndex++;
+            }
+        }
+        
+        hasUnsavedAllotment = true;
+        saveRoomAllotment();
+        updateAllotmentDisplay();
+        if (window.renderInvigilationPanel) window.renderInvigilationPanel();
+
+        // 🚀 Trigger automatic cloud sync after auto-allotment finishes
+        const saveBtn = document.getElementById('save-room-allotment-button');
+        if (saveBtn) saveBtn.click();
+    });
+
+
+    // Invisible equivalent to your existing selectRoomForAllotment that respects Mixing Engine fully
+    async function selectRoomForAllotmentSilent(roomName, capacity, targetStream, strategy = 'none') {
+        const [date, time] = currentSessionKey.split(' | ');
+        const sessionStudentRecords = allStudentData.filter(s => s.Date === date && s.Time === time);
+        const allottedRegNos = new Set();
+        currentSessionAllotment.forEach(room => room.students.forEach(s => allottedRegNos.add(s['Register Number'] || s.RegisterNo)));
+
+        const candidates = [];
+        sessionStudentRecords.sort((a, b) => {
+            // Primary: Course alphabetically
+            if (a.Course !== b.Course) return (a.Course || '').localeCompare(b.Course || '');
+            // Secondary: Register prefix DESC, number ASC
+            const regA = a['Register Number'] ? a['Register Number'].toString().trim() : "";
+            const regB = b['Register Number'] ? b['Register Number'].toString().trim() : "";
+            const matchA = regA.match(/^([a-zA-Z\-_]*)(\d+)$/i);
+            const matchB = regB.match(/^([a-zA-Z\-_]*)(\d+)$/i);
+            if (matchA && matchB) {
+                const prefixA = matchA[1].toUpperCase();
+                const prefixB = matchB[1].toUpperCase();
+                if (prefixA !== prefixB) return prefixB.localeCompare(prefixA); // prefix DESC
+                return parseInt(matchA[2], 10) - parseInt(matchB[2], 10); // number ASC
+            }
+            return regA.localeCompare(regB);
+        });
+        for (const student of sessionStudentRecords) {
+            if (!allottedRegNos.has(student['Register Number']) && (student.Stream || "Regular") === targetStream) {
+                candidates.push(student);
+            }
+        }
+        
+        let limit = parseInt(capacity) || 30;
+        let newStudents = [];
+        const streamPart = typeof mixingParts !== 'undefined' ? mixingParts[targetStream] : null;
+        const leftoverThreshold = Math.max(limit, 33); 
+        
+        if (candidates.length <= leftoverThreshold) {
+            newStudents = candidates.slice();
+        } else if (!streamPart || !streamPart.partB || streamPart.partB.length === 0) {
+            newStudents = candidates.slice(0, limit);
+        } else if (strategy === 'ratio_1_1' || strategy === 'ratio_2_1') {
+            const ratio = (strategy === 'ratio_2_1') ? (2 / 3) : 0.5;
+            let takeA = Math.round(limit * ratio);
+            let takeB = limit - takeA;
+            const sliceA = streamPart.partA.slice(streamPart.pA, streamPart.pA + takeA);
+            const sliceB = streamPart.partB.slice(streamPart.pB, streamPart.pB + takeB);
+            if (sliceA.length < takeA || sliceB.length < takeB) {
+                newStudents = candidates.slice(0, candidates.length);
+            } else {
+                newStudents = [...sliceA, ...sliceB];
+                streamPart.pA += sliceA.length;
+                streamPart.pB += sliceB.length;
+            }
+        } else {
+            newStudents = candidates.slice(0, limit);
+        }
+
+        if (newStudents.length === 0) return;
+
+        const studentsWithSeats = newStudents.map((s, idx) => {
+            const studentObj = (typeof s === 'object') ? { ...s } : { RegisterNo: s };
+            studentObj.seat = idx + 1;
+            return studentObj;
+        });
+
+        currentSessionAllotment.push({ roomName: roomName, capacity: capacity, students: studentsWithSeats, stream: targetStream });
+    }
+ 
+
+    
   // Delete a room from allotment (Fixed: Actually removes the room now)
     window.deleteRoom = async function (index) {
         if (!confirm('Are you sure you want to remove this room allotment?')) return;
@@ -10422,23 +11611,23 @@ window.real_populate_qp_code_session_dropdown = function () {
         const candidates = [];
 
         // Sort: Prefix Descending (Z->Y), Number Ascending (001->002)
+        // Sort: Course ASC → Prefix DESC → Number ASC
         sessionStudentRecords.sort((a, b) => {
-            if (a.Course !== b.Course) return a.Course.localeCompare(b.Course);
+            // Primary: Course alphabetically
+            if (a.Course !== b.Course) return (a.Course || '').localeCompare(b.Course || '');
+            // Secondary: Register prefix DESC, number ASC
             const regA = a['Register Number'] ? a['Register Number'].toString().trim() : "";
             const regB = b['Register Number'] ? b['Register Number'].toString().trim() : "";
-            const matchA = regA.match(/^([A-Z]+)(\d+)$/i);
-            const matchB = regB.match(/^([A-Z]+)(\d+)$/i);
+            const matchA = regA.match(/^([a-zA-Z\-_]*)(\d+)$/i);
+            const matchB = regB.match(/^([a-zA-Z\-_]*)(\d+)$/i);
             if (matchA && matchB) {
                 const prefixA = matchA[1].toUpperCase();
-                const numA = parseInt(matchA[2], 10);
                 const prefixB = matchB[1].toUpperCase();
-                const numB = parseInt(matchB[2], 10);
-                if (prefixA !== prefixB) return prefixB.localeCompare(prefixA);
-                return numA - numB;
+                if (prefixA !== prefixB) return prefixB.localeCompare(prefixA); // prefix DESC
+                return parseInt(matchA[2], 10) - parseInt(matchB[2], 10); // number ASC
             }
             return regA.localeCompare(regB);
         });
-
         for (const student of sessionStudentRecords) {
             const regNo = student['Register Number'];
             const studentStream = student.Stream || "Regular";
@@ -10482,16 +11671,17 @@ window.real_populate_qp_code_session_dropdown = function () {
             const sliceB = streamPart.partB.slice(streamPart.pB, streamPart.pB + takeB);
 
             // ── GUARD 3: Partial last room — one course nearly exhausted ──────
-            // If either slice is shorter than requested, mixing can't be done
-            // cleanly. Take all remaining candidates as-is. No scramble.
             if (sliceA.length < takeA || sliceB.length < takeB) {
                 newStudents = candidates.slice(0, candidates.length);
             } else {
-                // Normal mixed room: combine Part A and Part B, advance pointers
+                // 🛡️ BLOCK MIXING: Always continuous seats (A1...A20, then B1...B10)
                 newStudents = [...sliceA, ...sliceB];
+
                 streamPart.pA += sliceA.length;
                 streamPart.pB += sliceB.length;
+
             }
+
 
         } else {
             // No Mix selected: standard fill, original behaviour preserved
@@ -10506,12 +11696,20 @@ window.real_populate_qp_code_session_dropdown = function () {
             return;
         }
 
+        // Assign "Sticky Seat" numbers permanently during allotment
+        const studentsWithSeats = newStudents.map((s, idx) => {
+            const studentObj = (typeof s === 'object') ? { ...s } : { RegisterNo: s };
+            studentObj.seat = idx + 1; // Assigned once here!
+            return studentObj;
+        });
+
         currentSessionAllotment.push({
             roomName: roomName,
             capacity: capacity,
-            students: newStudents,
+            students: studentsWithSeats,
             stream: targetStream
         });
+
 
        
 
@@ -10539,7 +11737,7 @@ window.real_populate_qp_code_session_dropdown = function () {
 
         // Sync local list from store
         if (typeof jsonDataStore !== 'undefined') {
-            allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
+            // Removed legacy DOM array wipe
         }
 
         allotmentSessionSelect.value = savedSession;
@@ -10646,37 +11844,50 @@ if (saveScribeBtn) {
         });
     }
 
-    if (saveRoomAllotmentButton) {
-        saveRoomAllotmentButton.addEventListener('click', () => {
-            if (!currentSessionKey) return;
+        if (saveRoomAllotmentButton) {
+        saveRoomAllotmentButton.addEventListener('click', async () => {
+            try { // 🛡️ GLOBAL GUARD: Prevents silent UI freeze on error
+                if (!currentSessionKey) return;
 
-            // 1. Update Global Allotment Objects
-            const allAllotments = JSON.parse(localStorage.getItem(ROOM_ALLOTMENT_KEY) || '{}');
-            allAllotments[currentSessionKey] = currentSessionAllotment;
+                // 1. Update Global Allotment Objects
+                const allAllotments = JSON.parse(localStorage.getItem(ROOM_ALLOTMENT_KEY) || '{}');
+                allAllotments[currentSessionKey] = currentSessionAllotment;
 
-            const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
-            allScribeAllotments[currentSessionKey] = currentScribeAllotment;
+                const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
+                allScribeAllotments[currentSessionKey] = currentScribeAllotment;
 
-            // 2. Save to Local Storage
-            localStorage.setItem(ROOM_ALLOTMENT_KEY, JSON.stringify(allAllotments));
-            localStorage.setItem(SCRIBE_ALLOTMENT_KEY, JSON.stringify(allScribeAllotments));
+                // 2. Save to Local Storage
+                localStorage.setItem(ROOM_ALLOTMENT_KEY, JSON.stringify(allAllotments));
+                localStorage.setItem(SCRIBE_ALLOTMENT_KEY, JSON.stringify(allScribeAllotments));
 
-            // 3. Sync to Cloud
-            if (currentCollegeId && typeof syncDataToCloud === 'function') {
-                syncSessionToCloud(currentSessionKey);
+                // 3. Sync to Cloud
+                if (currentCollegeId && typeof syncDataToCloud === 'function') {
+                    await syncSessionToCloud(currentSessionKey);
+                }
+
+                // 3b. 🚀 Publish Seating to Public Portal
+                if (currentCollegeId) {
+                    await publishSeatingToPublic(currentSessionKey, currentSessionAllotment, currentScribeAllotment);
+                }
+
+                // 4. Reset Dirty Flag
+                hasUnsavedAllotment = false;
+
+
+                // 5. UI Feedback
+                roomAllotmentStatus.textContent = 'Allotment Saved Successfully!';
+                setTimeout(() => { roomAllotmentStatus.textContent = ''; }, 2000);
+
+                // 6. Refresh Display (Button changes to "✅ Saved")
+                updateAllotmentDisplay();
+            } catch (err) {
+                console.error("Critical Save Error:", err);
+                alert("🛑 SAVE FAILED: Please check your internet connection.");
+                roomAllotmentStatus.textContent = 'Error: Save Failed';
             }
-
-            // 4. Reset Dirty Flag
-            hasUnsavedAllotment = false;
-
-            // 5. UI Feedback
-            roomAllotmentStatus.textContent = 'Allotment Saved Successfully!';
-            setTimeout(() => { roomAllotmentStatus.textContent = ''; }, 2000);
-
-            // 6. Refresh Display (Button changes to "✅ Saved")
-            updateAllotmentDisplay();
         });
     }
+
 
     // --- END ROOM ALLOTMENT FUNCTIONALITY ---
 
@@ -11279,9 +12490,11 @@ function renderScribeAllotmentList(sessionKey) {
         scribeRoomModal.classList.add('hidden');
         renderScribeAllotmentList(sessionKey);
         studentToAllotScribeRoom = null;
-        hasUnsavedScribes = true; // ADD THIS FLAG
-        updateSyncStatus("Unsaved Changes", "warning"); // <--- ADD THIS LINE
+        hasUnsavedScribes = true; // Stay in "Dirty" status until session is complete or manually saved
+        updateSyncStatus("Local Changes Unsaved", "warning");
+
     }
+
 
     scribeCloseRoomModal.addEventListener('click', () => {
         scribeRoomModal.classList.add('hidden');
@@ -11368,7 +12581,7 @@ window.real_disable_all_report_buttons = function (disabled) {
 
         // Sync local list from store
         if (typeof jsonDataStore !== 'undefined') {
-            allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
+            // Removed legacy DOM array wipe
         }
 
         editSessionSelect.value = savedSession;
@@ -12488,15 +13701,36 @@ Are you sure you want to update these records?
                 getRoomCapacitiesFromStorage();
                 loadQPCodes();
 
-                const data = getFilteredReportData('room-wise');
-                if (data.length === 0) { alert("No data found."); return; }
+                // 🛡️ UNIFIED PIPELINE (V7): Use actual database for Stickers
+                const allAllotments = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+                const sessionAllotment = allAllotments[sessionKey] || [];
+                
+                if (sessionAllotment.length === 0) { 
+                    alert("Please allot rooms before generating stickers."); 
+                    generateStickerButton.disabled = false;
+                    generateStickerButton.textContent = "Generate Stickers";
+                    return; 
+                }
 
-                const processed_rows = performOriginalAllocation(data);
                 const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
+                const final_student_list_for_stickers = [];
+
+                // Load from database
+                sessionAllotment.forEach(room => {
+                    (room.students || []).forEach(s => {
+                        final_student_list_for_stickers.push({
+                            ...s,
+                            'Room No': room.roomName,
+                            seatNumber: s.seat || '?',
+                            Stream: room.stream || 'Regular'
+                        });
+                    });
+                });
 
                 // 1. Group by Session -> Room
                 const sessions = {};
-                processed_rows.forEach(student => {
+                final_student_list_for_stickers.forEach(student => {
+
                     let roomName = student['Room No'];
                     let isScribe = false;
                     if (student.isScribe) {
@@ -12746,7 +13980,7 @@ Are you sure you want to update these records?
 
         // Sync local list from store
         if (typeof jsonDataStore !== 'undefined') {
-            allStudentData = JSON.parse(jsonDataStore.innerHTML || '[]');
+            // Removed legacy DOM array wipe
         }
 
         searchSessionSelect.value = savedSession;
@@ -12857,10 +14091,29 @@ function showStudentDetailsModal(regNo, sessionKey) {
         return;
     }
 
-    // 1. Calculate Allocation Logic
-    const sessionStudents = allStudentData.filter(s => s.Date === date && s.Time === time);
-    const allocatedSessionData = performOriginalAllocation(sessionStudents);
-    const allocatedStudent = allocatedSessionData.find(s => s['Register Number'] === regNo);
+    // 🛡️ UNIFIED SEARCH (V11): Read from actual database, not simulation
+    const allAllotments = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+    const sessionAllotment = allAllotments[sessionKey] || [];
+    
+    let allocatedStudent = null;
+    sessionAllotment.forEach(room => {
+        const found = (room.students || []).find(s => {
+            const sReg = (typeof s === 'object') ? (s['Register Number'] || s.RegisterNo) : s;
+            return sReg === regNo;
+        });
+        if (found) {
+            allocatedStudent = { 
+                ...found, 
+                'Room No': room.roomName,
+                seatNumber: found.seat || '?' 
+            };
+        }
+    });
+
+    if (!allocatedStudent) {
+        alert("Student not found in any room allotment.");
+        return;
+    }
 
     // 2. Scribe Info
     const allScribeAllotments = JSON.parse(localStorage.getItem('examScribeAllotment') || '{}');
@@ -13009,33 +14262,50 @@ function showStudentDetailsModal(regNo, sessionKey) {
 
             // Calculate allocation for this specific session
             const sessionStudents = allStudentData.filter(s => s.Date === exam.Date && s.Time === exam.Time);
-            const allocatedSession = performOriginalAllocation(sessionStudents);
-            const studentAlloc = allocatedSession.find(s => s['Register Number'] === regNo);
 
-            let roomDisplay = "Not Allotted";
-            let rowClass = "";
+            // 🛡️ UNIFIED SEARCH (V15): Absolute Synchronization
+            const allAllotments = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+            const sessionAllotment = allAllotments[sessionKey] || [];
+            
+            let assignedHall = "Not Allotted";
+            let rowCss = "";
+            let foundInRoom = null;
 
-            if (studentAlloc && studentAlloc['Room No'] !== "Unallotted") {
-                const roomName = studentAlloc['Room No'];
-                // *** FIX: Get Location ***
-                const roomInfo = currentRoomConfig[roomName] || {};
-                const location = roomInfo.location ? ` <br><span class="text-xs text-gray-500">(${roomInfo.location})</span>` : "";
+            sessionAllotment.forEach(room => {
+                const match = (room.students || []).find(s => {
+                    const r = (typeof s === 'object') ? (s['Register Number'] || s.RegisterNo) : s;
+                    return r === regNo;
+                });
+                if (match) {
+                    foundInRoom = { 
+                        name: room.roomName, 
+                        seat: match.seat || '?' 
+                    };
+                }
+            });
 
-                roomDisplay = `<strong>${roomName}</strong> (Seat: ${studentAlloc.seatNumber})${location}`;
+            if (foundInRoom) {
+                const hallInfo = currentRoomConfig[foundInRoom.name] || {};
+                const hallLoc = hallInfo.location ? ` <br><span class="text-xs text-gray-500">(${hallInfo.location})</span>` : "";
+                assignedHall = `<strong>${foundInRoom.name}</strong> (Seat: ${foundInRoom.seat})${hallLoc}`;
 
-                const sessionScribeMap = allScribeAllotments[sessionKey] || {};
-                const scribeRoom = sessionScribeMap[regNo];
-                if (scribeRoom) {
-                    const sInfo = currentRoomConfig[scribeRoom] || {};
-                    const sLoc = sInfo.location ? ` (${sInfo.location})` : "";
-                    roomDisplay += `<br><span class="text-orange-600 text-xs font-bold">Scribe: ${scribeRoom}${sLoc}</span>`;
-                    rowClass = "bg-orange-50";
+                // Scribe Sync
+                const scMap = allScribeAllotments[sessionKey] || {};
+                const scRoom = scMap[regNo];
+                if (scRoom) {
+                    const scInfo = currentRoomConfig[scRoom] || {};
+                    const scLoc = scInfo.location ? ` (${scInfo.location})` : "";
+                    assignedHall += `<br><span class="text-orange-600 text-xs font-bold">Scribe: ${scRoom}${scLoc}</span>`;
+                    rowCss = "bg-orange-50";
                 }
             }
 
+            
+
             const tr = document.createElement('tr');
-            if (rowClass) tr.className = rowClass;
+            if (rowCss) tr.className = rowCss; // 🛡️ FIXED: Matches the new rowCss variable (V15)
             tr.innerHTML = `
+
                 <td class="px-3 py-2 border-b">${exam.Date}</td>
                 <td class="px-3 py-2 border-b">${exam.Time}</td>
                 <td class="px-3 py-2 border-b text-xs">
@@ -13043,7 +14313,8 @@ function showStudentDetailsModal(regNo, sessionKey) {
                     <span class="font-bold text-gray-600">${qpDisplay}</span>
                     <span class="text-indigo-600 ml-1">(${streamDisplay})</span>
                 </td>
-                <td class="px-3 py-2 border-b text-sm">${roomDisplay}</td>
+                <td class="px-3 py-2 border-b text-sm">${assignedHall}</td>
+
             `;
             tbody.appendChild(tr);
         });
@@ -13116,16 +14387,40 @@ Are you sure?
             if (confirm(confirmMsg)) {
                 if (!confirm("Are you absolutely sure?")) return;
 
-                // --- EXECUTE DELETE (Strict Stream Check) ---
-                allStudentData = allStudentData.filter(s => {
-                    const sStream = s.Stream || "Regular";
-                    return !(s.Date === date &&
-                        s.Time === time &&
-                        s.Course === targetCourse &&
-                        sStream === targetStream);
-                });
+                // --- 🛡️ ABSOLUTE SYNC (V14): Cascading Delete ---
+                const deletedRegNos = new Set(studentsToDelete.map(d => d['Register Number']));
+                
+                // 1. Purge from Master List
+                allStudentData = allStudentData.filter(s => !deletedRegNos.has(s['Register Number'] || s.RegisterNo));
+                
+                // 2. Purge from Sticky Allotments (Reports)
+                let roomAllots = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}');
+                if (roomAllots[sessionVal]) {
+                    roomAllots[sessionVal].forEach(room => {
+                        room.students = (room.students || []).filter(s => {
+                            const reg = (typeof s === 'object') ? (s['Register Number'] || s.RegisterNo) : s;
+                            return !deletedRegNos.has(reg);
+                        });
+                    });
+                    localStorage.setItem('examRoomAllotment', JSON.stringify(roomAllots));
+                }
 
-                alert(`Deleted ${studentsToDelete.length} records.\nThe page will now reload.`);
+                // 3. Purge from Scribe Assignments
+                let scribeAllots = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
+                if (scribeAllots[sessionVal]) {
+                    deletedRegNos.forEach(r => delete scribeAllots[sessionVal][r]);
+                    localStorage.setItem(SCRIBE_ALLOTMENT_KEY, JSON.stringify(scribeAllots));
+                }
+
+                // 4. Purge from Absentee List
+                let allAbsentees = JSON.parse(localStorage.getItem(ABSENTEE_LIST_KEY) || '{}');
+                if (allAbsentees[sessionVal]) {
+                    allAbsentees[sessionVal] = allAbsentees[sessionVal].filter(r => !deletedRegNos.has(r));
+                    localStorage.setItem(ABSENTEE_LIST_KEY, JSON.stringify(allAbsentees));
+                }
+
+                alert(`Deep Deleted ${studentsToDelete.length} records from all modules.\nThe page will now reload.`);
+
 
                // MODULAR SYNC (V2)
                 if (typeof syncSessionToCloud === 'function') {
@@ -14479,6 +15774,23 @@ window.handlePythonExtraction = async function (jsonString) {
 
     // --- V65: Initial Data Load on Startup (Clean Version) ---
 async function loadInitialData() { 
+    // 🧹 EVICT STALE THAWED HISTORICAL RECORDS (Older than 7 days)
+    try {
+        const allCached = await loadExamDataIDB();
+        const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+        const active = allCached.filter(r => {
+            if (!r._thawedAt) return true; // Keep un-tagged (live data)
+            return new Date(r._thawedAt).getTime() > sevenDaysAgo;
+        });
+        if (active.length < allCached.length) {
+            await saveExamDataIDB(active, true);
+            console.log(`🧹 Evicted ${allCached.length - active.length} stale historical records from IDB.`);
+        }
+    } catch(e) { console.warn("Eviction check failed:", e); }
+
+
+
+    
         try {
             console.log("Loading Local Data...");
             updateHeaderCollegeName(); // <--- ADD THIS LINE HERE
@@ -14772,20 +16084,30 @@ async function loadInitialData() {
 
     // 5. Render Function (Strictly Black & White - No Date)
     function renderBillHTML(bill, container) {
+
         function numToWords(n) {
+            // 🛡️ SANITIZER: Handles Strings, Numbers, and Fractional parts in Archive Mode
+            n = Math.floor(Number(String(n).replace(/[^\d.]/g, '')));
+            if (!n || n === 0) return 'Zero';
             const a = ['', 'One ', 'Two ', 'Three ', 'Four ', 'Five ', 'Six ', 'Seven ', 'Eight ', 'Nine ', 'Ten ', 'Eleven ', 'Twelve ', 'Thirteen ', 'Fourteen ', 'Fifteen ', 'Sixteen ', 'Seventeen ', 'Eighteen ', 'Nineteen '];
             const b = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
             if ((n = n.toString()).length > 9) return 'Overflow';
+            // 🛡️ REGEX FIX: Use single backslashes for JS Regex literals
             const n_array = ('000000000' + n).slice(-9).match(/^(\d{2})(\d{2})(\d{2})(\d{1})(\d{2})$/);
-            if (!n_array) return;
+            if (!n_array) return 'Zero';
+
             let str = '';
             str += (n_array[1] != 0) ? (a[Number(n_array[1])] || b[n_array[1][0]] + ' ' + a[n_array[1][1]]) + 'Crore ' : '';
             str += (n_array[2] != 0) ? (a[Number(n_array[2])] || b[n_array[2][0]] + ' ' + a[n_array[2][1]]) + 'Lakh ' : '';
             str += (n_array[3] != 0) ? (a[Number(n_array[3])] || b[n_array[3][0]] + ' ' + a[n_array[3][1]]) + 'Thousand ' : '';
             str += (n_array[4] != 0) ? (a[Number(n_array[4])] || b[n_array[4][0]] + ' ' + a[n_array[4][1]]) + 'Hundred ' : '';
             str += (n_array[5] != 0) ? ((str != '') ? 'and ' : '') + (a[Number(n_array[5])] || b[n_array[5][0]] + ' ' + a[n_array[5][1]]) : '';
-            return str.trim();
+            return str.trim() || 'Zero';
         }
+
+
+
+
 
         const totalAmount = bill.grand_total.toFixed(2);
         const [rupeesPart, paisePart] = totalAmount.split('.');
@@ -15494,13 +16816,737 @@ if (btnSessionReschedule) {
                 console.error(e);
                 alert("Error during deletion: " + e.message);
             }
-        });
+               });
     }
 
-     
+// --- BATCH ARCHIVE: View State Control ---
+window.archiveModalViewMode = 'sessions'; // 'sessions' or 'exams'
+
+window.switchArchiveView = function(mode) {
+    window.archiveModalViewMode = mode;
+    const btnSessions = document.getElementById('btn-archive-view-sessions');
+    const btnExams = document.getElementById('btn-archive-view-exams');
+    
+    if (mode === 'sessions') {
+        btnSessions.className = "flex-1 py-3 text-xs font-bold uppercase tracking-wider border-b-2 border-indigo-600 text-indigo-600 bg-indigo-50/50 transition";
+        btnExams.className = "flex-1 py-3 text-xs font-bold uppercase tracking-wider border-b-2 border-transparent text-gray-500 hover:bg-gray-50 transition";
+    } else {
+        btnExams.className = "flex-1 py-3 text-xs font-bold uppercase tracking-wider border-b-2 border-indigo-600 text-indigo-600 bg-indigo-50/50 transition";
+        btnSessions.className = "flex-1 py-3 text-xs font-bold uppercase tracking-wider border-b-2 border-transparent text-gray-500 hover:bg-gray-50 transition";
+    }
+    
+    // Re-render the list
+    window.renderBatchArchiveList();
+};
+
+window.renderBatchArchiveList = function() {
+    const listDiv = document.getElementById('batch-archive-checkbox-list');
+    if (!listDiv) return;
+    
+    const known = JSON.parse(localStorage.getItem('examAllKnownSessions') || '[]');
+    
+    if (window.archiveModalViewMode === 'sessions') {
+        // --- 1. RENDER INDIVIDUAL SESSIONS ---
+        known.sort((a, b) => {
+            try {
+                const partsA = a.split(' | ')[0].split('.');
+                const partsB = b.split(' | ')[0].split('.');
+                const dateA = parseInt((partsA[2]||"").substring(0,4) + (partsA[1]||"").padStart(2,'0') + (partsA[0]||"").padStart(2,'0'));
+                const dateB = parseInt((partsB[2]||"").substring(0,4) + (partsB[1]||"").padStart(2,'0') + (partsB[0]||"").padStart(2,'0'));
+                return (dateB || 0) - (dateA || 0);
+            } catch(e) { return 0; }
+        });
+
+        listDiv.innerHTML = known.filter(sk => sk).map(sk => `
+            <label class="flex items-center gap-3 p-3 bg-white border border-gray-200 rounded shadow-sm hover:bg-indigo-50 cursor-pointer transition">
+                <input type="checkbox" value="${sk}" class="archive-session-cb w-5 h-5 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500">
+                <div class="flex flex-col">
+                    <span class="text-xs font-bold text-gray-700">${sk}</span>
+                    <span class="text-[10px] text-gray-400 font-medium">${getExamName(sk.split(' | ')[0], sk.split(' | ')[1], 'Regular') || 'Untitled Exam'}</span>
+                </div>
+            </label>
+        `).join('');
+    } else {
+        // --- 2. RENDER BY EXAM NAME ---
+        const examMap = {};
+        known.forEach(sk => {
+            const [date, time] = sk.split(' | ');
+            if (date && time) {
+                // Check multiple streams to find the name
+                const name = getExamName(date.trim(), time.trim(), 'Regular') 
+                          || getExamName(date.trim(), time.trim(), 'EDE') 
+                          || 'Untitled Exams';
+                if (!examMap[name]) examMap[name] = [];
+                examMap[name].push(sk);
+            }
+        });
+
+        const sortedNames = Object.keys(examMap).sort();
+        if (sortedNames.length === 0) {
+            listDiv.innerHTML = `<p class="text-xs text-gray-500 italic p-4 text-center">No tagged exam names found.</p>`;
+            return;
+        }
+
+        listDiv.innerHTML = sortedNames.map(name => `
+            <label class="flex items-center justify-between gap-3 p-3 bg-white border border-gray-200 rounded shadow-sm hover:bg-blue-50 cursor-pointer transition">
+                <div class="flex items-center gap-3">
+                    <input type="checkbox" value="EXAM_GROUP::${name}" class="archive-session-cb w-5 h-5 text-blue-600 border-gray-300 rounded focus:ring-blue-500">
+                    <div class="flex flex-col">
+                        <span class="text-sm font-black text-indigo-900 uppercase">${name}</span>
+                        <span class="text-[10px] text-gray-400 font-bold">${examMap[name].length} Sessions grouped</span>
+                    </div>
+                </div>
+                <div class="shrink-0 bg-gray-100 px-2 py-1 rounded text-[10px] font-bold text-gray-500 italic">Exam Tag</div>
+            </label>
+        `).join('');
+    }
+};
+
+window.generateBatchArchive = async function() {
+    const rawChecked = Array.from(document.querySelectorAll('.archive-session-cb:checked')).map(cb => cb.value);
+        // Snapshot rates and scribe list at the moment of archiving
+    const archivedRates = JSON.parse(localStorage.getItem('examRemunerationConfig') || '{}');
+    const scribeAllotment = JSON.parse(localStorage.getItem('examScribeAllotment') || '{}');
+    if (rawChecked.length === 0) return alert("Select at least one option to archive.");
+
+    const btn = document.querySelector('#batch-archive-modal button.bg-indigo-600');
+    const origText = btn.innerHTML;
+    btn.innerHTML = 'Bundling Data... Please wait';
+    btn.disabled = true;
+    await new Promise(r => setTimeout(r, 100));
+
+    // --- STEP 1: RESOLVE GROUPS ---
+    const finalSessionSet = new Set();
+    const known = JSON.parse(localStorage.getItem('examAllKnownSessions') || '[]');
+    
+    rawChecked.forEach(val => {
+        if (val.startsWith('EXAM_GROUP::')) {
+            const targetName = val.replace('EXAM_GROUP::', '');
+            known.forEach(sk => {
+                const [d, t] = sk.split(' | ');
+                const name = getExamName(d.trim(), t.trim(), 'Regular') || getExamName(d.trim(), t.trim(), 'EDE');
+                if (name === targetName) finalSessionSet.add(sk);
+            });
+        } else {
+            finalSessionSet.add(val);
+        }
+    });
+
+    const checked = Array.from(finalSessionSet);
+    let allArchiveData = [];
+    
+    // Correctly fetch College Name using the actual local storage key
+    const collegeName = localStorage.getItem('examCollegeName') || 'ExamFlow Project';
+    
+    // Calculate the overarching Exam Name for this Archive Batch dynamically
+    const archiveExamNamesSet = new Set();
+    checked.forEach(sessionKey => {
+        const [d, t] = sessionKey.split(' | ');
+        const n1 = getExamName(d.trim(), t.trim(), 'Regular');
+        const n2 = getExamName(d.trim(), t.trim(), 'EDE');
+        if (n1) archiveExamNamesSet.add(n1);
+        if (n2) archiveExamNamesSet.add(n2);
+    });
+    const archiveExamName = archiveExamNamesSet.size > 0 
+        ? Array.from(archiveExamNamesSet).join(" & ") 
+        : "University Examinations";
+
+    let sourceStudentData = allStudentData;
+
+    if (!sourceStudentData || sourceStudentData.length === 0) {
+        sourceStudentData = await loadExamDataIDB() || [];
+    }
+    
+    checked.forEach(sessionKey => {
+        const [datePart, timePart] = sessionKey.split(' | ');
+        const targetDate = (datePart || "").trim();
+        const targetTime = (timePart || "").trim();
+        
+        const students = sourceStudentData.filter(s => 
+            (s.Date || "").trim() === targetDate && 
+            (s.Time || "").trim() === targetTime
+        );
+
+        const rooms = JSON.parse(localStorage.getItem('examRoomAllotment') || '{}')[sessionKey] || {};
+        const qpMap = JSON.parse(localStorage.getItem('examQPCodes') || '{}')[sessionKey] || {};
+        const absentees = JSON.parse(localStorage.getItem('examAbsenteeList') || '{}')[sessionKey] || {};
+        const invigilators = JSON.parse(localStorage.getItem('examInvigilatorMapping') || '{}')[sessionKey] || {};
+        // Fixed: examRoomConfig is stored as an Object/Map, not an Array
+        const roomConfig = JSON.parse(localStorage.getItem('examRoomConfig') || '{}');
+        
+        const studentMap = {};
+        if (Array.isArray(rooms)) {
+            rooms.forEach(roomObj => {
+                const roomName = roomObj.roomName;
+                // Location lookup directly from the config map
+                const roomInfo = roomConfig[roomName] || {};
+                const roomDisplay = (roomInfo.location && roomInfo.location.trim()) ? roomName + ' (' + roomInfo.location + ')' : roomName;
+
+
+
+        
+                if (roomObj.students && Array.isArray(roomObj.students)) {
+                    roomObj.students.forEach((s, idx) => {
+                        const regNo = (typeof s === 'object') ? (s['Register Number'] || s.RegisterNo) : s;
+                        studentMap[regNo] = { 
+                            room: roomDisplay, 
+                            seat: s.seat || (idx + 1), // Use sticky seat
+                            invigilator: invigilators[roomName] || 'Not Assigned',
+                            stream: roomObj.stream || 'Regular'
+                        };
+                    });
+                }
+            });
+        }
+
+
+        students.forEach(s => {
+            const regNo = s['Register Number'] || s.RegisterNo;
+            allArchiveData.push({
+                sessionKey: sessionKey,
+                regNo: regNo,
+                name: s.Name,
+                course: s.Course,
+                date: s.Date,
+                time: s.Time,
+                room: studentMap[regNo]?.room || 'Unassigned',
+                seat: studentMap[regNo]?.seat || '-',
+                invigilator: studentMap[regNo]?.invigilator || '-',
+                qpCode: qpMap[window.getQpKey(s.Course, s.Stream)] || 'N/A',
+                stream: studentMap[regNo]?.stream || s.Stream || 'Regular',
+                isScribe: typeof scribeRegNos !== 'undefined' ? scribeRegNos.has(regNo) : false,
+                status: absentees[regNo] ? 'ABSENT' : 'PRESENT'
+            });
+        });
+    });
+
+    // 🛡️ SORTING: Ensure students are listed from Seat 1 to 30 for every room
+    allArchiveData.sort((a, b) => {
+        // First sort by Room Name
+        if (a.room !== b.room) return a.room.localeCompare(b.room);
+        // Then sort by Seat Number (numeric)
+        const sA = parseInt(a.seat) || 0;
+        const sB = parseInt(b.seat) || 0;
+        return sA - sB;
+    });
+
+    // Pre-compute session summaries
+
+    const sessionSummary = {};
+    allArchiveData.forEach(row => {
+        let streamName = row.stream || 'Regular';
+        let uniqueKey = row.sessionKey + '_' + streamName; // Separate Regular and EDE on same date/time
+        
+        if (!sessionSummary[uniqueKey]) {
+            sessionSummary[uniqueKey] = { 
+                date: row.date, 
+                time: row.time, 
+                stream: streamName, 
+                normalCount: 0, 
+                scribeCount: 0 
+            };
+        }
+        if (row.status !== 'ABSENT') {
+            if (row.isScribe) sessionSummary[uniqueKey].scribeCount++;
+            else sessionSummary[uniqueKey].normalCount++;
+        }
+    });
+
+
+    const htmlBlob = `<!DOCTYPE html>
+
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Exam Archive Database</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @media print { .no-print { display: none !important; } }
+        body { font-family: 'Inter', sans-serif; background: #f9fafb; padding: 20px; }
+        @media (max-width: 640px) {
+            table thead { display: none; }
+            table tr { display: block; border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 12px; padding: 8px; background: white; }
+            table td { display: flex; justify-content: space-between; padding: 4px 6px; font-size: 12px; border: none; border-bottom: 1px solid #f3f4f6; text-align: right; }
+            table td::before { content: attr(data-label); font-weight: 700; color: #6b7280; margin-right: 8px; white-space: nowrap; flex-shrink: 0; text-align: left; }
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-6">
+    <div class="max-w-[90rem] mx-auto bg-white p-6 sm:p-8 rounded-xl shadow-lg border border-gray-200">
+        <div class="flex flex-col sm:flex-row justify-between items-start border-b pb-6 mb-6 gap-4">
+            <div>
+                <h1 class="text-3xl font-black text-indigo-900 uppercase">${collegeName}</h1>
+                <h2 class="text-lg font-bold text-indigo-700 mt-1">${archiveExamName}</h2>
+                <p class="text-sm font-bold text-gray-500 mt-2">EXAM BATCH ARCHIVE DATABASE</p>
+                <p class="text-xs text-gray-400 mt-1">Generated on: ${new Date().toLocaleString()}</p>
+            </div>
+
+            <div class="flex gap-2">
+                <button onclick="downloadCSV()" class="no-print bg-green-700 text-white px-5 py-2.5 rounded-lg font-bold shadow-md hover:bg-green-800 transition flex items-center gap-2">CSV</button>
+                <button onclick="showBillModal()" class="text-xs bg-green-600 text-white px-3 py-2 rounded-lg font-bold hover:bg-green-700 transition shadow">💰 Generate Bill</button>
+                <button onclick="window.print()" class="no-print bg-gray-800 text-white px-5 py-2.5 rounded-lg font-bold shadow-md hover:bg-black transition flex items-center gap-2">Print</button>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6 no-print">
+            <div class="p-4 bg-indigo-50 border border-indigo-200 rounded-lg shadow-sm">
+                <span class="text-[10px] font-bold text-indigo-500 uppercase tracking-widest">Sessions</span>
+                <p class="text-2xl font-black text-indigo-900">${checked.length}</p>
+            </div>
+            <div class="p-4 bg-blue-50 border border-blue-200 rounded-lg shadow-sm">
+                <span class="text-[10px] font-bold text-blue-500 uppercase tracking-widest">Total</span>
+                <p id="stat-total" class="text-2xl font-black text-blue-900">${allArchiveData.length}</p>
+            </div>
+            <div class="p-4 bg-green-50 border border-green-200 rounded-lg shadow-sm">
+                <span class="text-[10px] font-bold text-green-500 uppercase tracking-widest">Present</span>
+                <p id="stat-present" class="text-2xl font-black text-green-900">0</p>
+            </div>
+            <div class="p-4 bg-red-50 border border-red-200 rounded-lg shadow-sm">
+                <span class="text-[10px] font-bold text-red-500 uppercase tracking-widest">Absent</span>
+                <p id="stat-absent" class="text-2xl font-black text-red-900">0</p>
+            </div>
+        </div>
+
+        <div class="mb-6 flex gap-4 no-print flex-col md:flex-row bg-gray-50 p-4 rounded-xl border border-gray-200">
+            <input type="text" id="searchInput" placeholder="Search Reg No, Name, Course, Hall, QP..." autocomplete="off"
+                class="flex-1 p-3 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none shadow-sm transition">
+            <select id="sessionFilter" class="w-full md:w-64 p-3 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none shadow-sm font-bold text-indigo-900 bg-white">
+                <option value="">All Sessions</option>
+                ${checked.map(sk => `<option value="${sk}">${sk}</option>`).join('')}
+            </select>
+        </div>
+
+        <div class="overflow-hidden rounded-xl border border-gray-200 shadow-sm">
+            <table class="w-full text-left border-collapse text-sm">
+                <thead>
+                    <tr class="bg-gray-100 text-gray-700 text-[10px] uppercase tracking-wider font-bold border-b">
+                        <th class="p-3">Session</th>
+                        <th class="p-3">Course</th>
+                        <th class="p-3">QP</th>
+                        <th class="p-3">Reg No.</th>
+                        <th class="p-3">Name</th>
+                        <th class="p-3">Hall & Seat</th>
+                        <th class="p-3">Stream</th>
+                        <th class="p-3">Invigilator</th>
+                        <th class="p-3">Status</th>
+                    </tr>
+                </thead>
+                <tbody id="tableBody" class="divide-y divide-gray-100"></tbody>
+            </table>
+            <div id="no-results" class="hidden p-8 text-center text-gray-500 font-bold italic">No records found.</div>
+        </div>
+    </div>
+
+    <script>
+        const data = ${JSON.stringify(allArchiveData).replace(/`/g, '\\`').replace(/\$/g, '\\$')};
+        const tbody = document.getElementById('tableBody');
+        const searchInput = document.getElementById('searchInput');
+        const sessionFilter = document.getElementById('sessionFilter');
+        const noResults = document.getElementById('no-results');
+        
+        function render() {
+            const query = searchInput.value.toLowerCase();
+            const sessionKey = sessionFilter.value;
+            
+            const filtered = data.filter(s => {
+                const matchSession = sessionKey === "" || s.sessionKey === sessionKey;
+                const matchQuery = 
+                    (s.regNo||"").toLowerCase().includes(query) || 
+                    (s.name||"").toLowerCase().includes(query) || 
+                    (s.course||"").toLowerCase().includes(query) ||
+                    (s.room||"").toLowerCase().includes(query) ||
+                    (s.qpCode||"").toLowerCase().includes(query) ||
+                    (s.stream||"").toLowerCase().includes(query);
+                return matchSession && matchQuery;
+            });
+            
+            document.getElementById('stat-total').innerText = filtered.length;
+            document.getElementById('stat-present').innerText = filtered.filter(d => d.status === 'PRESENT').length;
+            document.getElementById('stat-absent').innerText = filtered.filter(d => d.status === 'ABSENT').length;
+
+            if (filtered.length === 0) {
+                tbody.innerHTML = '';
+                noResults.classList.remove('hidden');
+            } else {
+                noResults.classList.add('hidden');
+                tbody.innerHTML = filtered.map(s => \`
+                    <tr class="hover:bg-indigo-50/50 transition \${s.status === 'ABSENT' ? 'bg-red-50' : ''}">
+                        <td data-label="Session" class="p-3 text-[10px] text-gray-400">\${s.sessionKey}</td>
+                        <td data-label="Course" class="p-3 font-bold text-indigo-700">\${s.course}</td>
+                        <td data-label="QP" class="p-3 font-mono font-bold text-rose-600">\${s.qpCode}</td>
+                        <td data-label="Reg No" class="p-3 font-mono font-bold">\${s.regNo}</td>
+                        <td data-label="Name" class="p-3 uppercase">\${s.name}</td>
+                        <td data-label="Hall & Seat" class="p-3">
+                            <span class="bg-gray-100 px-2 py-1 rounded font-bold text-xs">\${s.room}</span>
+                            <span class="text-gray-400 font-medium ml-1">#\${s.seat}</span>
+                        </td>
+                        <td data-label="Stream" class="p-3"><span class="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-700">\${s.stream}</span></td>
+                        <td data-label="Invigilator" class="p-3 text-xs italic text-gray-600">\${s.invigilator}</td>
+                        <td data-label="Status" class="p-3">
+                            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold \${s.status === 'PRESENT' ? 'bg-green-100 text-green-700' : 'bg-red-600 text-white shadow-sm'}">\${s.status}</span>
+                        </td>
+                    </tr>
+                \`).join('');
+            }
+        }
+
+        function downloadCSV() {
+            const headers = ['Session','Course','QP','Register No','Name','Stream','Room','Seat','Invigilator','Status'];
+            const rows = data.map(s => [
+                s.sessionKey, s.course, s.qpCode, s.regNo, s.name, s.stream, s.room, s.seat, s.invigilator, s.status
+            ].map(v => '"' + String(v || '').replace(/"/g, '""') + '"').join(','));
+            const csv = [headers.join(','), ...rows].join('\\n');
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv'}));
+            a.download = 'ExamArchive.csv';
+            a.click();
+        }
+
+        searchInput.addEventListener('input', render);
+        sessionFilter.addEventListener('change', render);
+        render();
+    <\/script>
+
+<script>
+    // Embedded archived data (self-contained, no Firebase needed)
+    const ARCHIVED_COLLEGE = ${JSON.stringify(collegeName).replace(/</g, '\\u003c')};
+    const ARCHIVED_EXAM = ${JSON.stringify(archiveExamName).replace(/</g, '\\u003c')};
+    const ARCHIVED_RATES = ${JSON.stringify(archivedRates).replace(/`/g, '\\`').replace(/\$/g, '\\$')};
+    const SESSION_SUMMARY = ${JSON.stringify(Object.values(sessionSummary)).replace(/`/g, '\\`').replace(/\$/g, '\\$')};
+
+
+    function showBillModal() {
+        const streamKeys = Object.keys(ARCHIVED_RATES);
+        
+        function numToWords(n) {
+            if (isNaN(n) || n === 0) return 'Zero';
+            const a = ['', 'One ', 'Two ', 'Three ', 'Four ', 'Five ', 'Six ', 'Seven ', 'Eight ', 'Nine ', 'Ten ', 'Eleven ', 'Twelve ', 'Thirteen ', 'Fourteen ', 'Fifteen ', 'Sixteen ', 'Seventeen ', 'Eighteen ', 'Nineteen '];
+            const b = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+            if ((n = n.toString()).length > 9) return 'Overflow';
+            const n_array = ('000000000' + n).slice(-9).match(/^(\\d{2})(\\d{2})(\\d{2})(\\d{1})(\\d{2})$/);
+            if (!n_array) return 'Zero';
+            let str = '';
+            str += (n_array[1] != 0) ? (a[Number(n_array[1])] || b[n_array[1][0]] + ' ' + a[n_array[1][1]]) + 'Crore ' : '';
+            str += (n_array[2] != 0) ? (a[Number(n_array[2])] || b[n_array[2][0]] + ' ' + a[n_array[2][1]]) + 'Lakh ' : '';
+            str += (n_array[3] != 0) ? (a[Number(n_array[3])] || b[n_array[3][0]] + ' ' + a[n_array[3][1]]) + 'Thousand ' : '';
+            str += (n_array[4] != 0) ? (a[Number(n_array[4])] || b[n_array[4][0]] + ' ' + a[n_array[4][1]]) + 'Hundred ' : '';
+            str += (n_array[5] != 0) ? ((str != '') ? 'and ' : '') + (a[Number(n_array[5])] || b[n_array[5][0]] + ' ' + a[n_array[5][1]]) : '';
+            return str.trim() || 'Zero';
+        }
+
+
+        let html = '<!DOCTYPE html><html><head><title>Remuneration Bill</title>'
+                 + '<style>'
+                 + 'body{background:#e5e7eb;font-family:sans-serif;margin:0;padding:20px;display:flex;flex-direction:column;align-items:center;}'
+                 + '.no-print{width:100%;max-width:850px;background:white;padding:16px;display:flex;justify-content:flex-end;gap:16px;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.1);margin-bottom:24px;box-sizing:border-box;}'
+                 + '.bill-page{width:100%;max-width:850px;background:white;padding:40px;margin-bottom:24px;box-shadow:0 4px 6px rgba(0,0,0,0.1);box-sizing:border-box;min-height:297mm;}'
+                 + '@media print { body{padding:0;background:white;display:block;} .no-print{display:none!important;} .bill-page{box-shadow:none;margin:0;padding:0;page-break-after:always;} }'
+                 + '</style></head><body>';
+
+        html += '<div class="no-print">'
+             + '<button onclick="window.print()" style="background:#1f2937;color:white;padding:10px 20px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:14px;">📄 Print Bill</button>'
+             + '<button onclick="window.close()" style="background:#dc2626;color:white;padding:10px 20px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:14px;">❌ Close Tab</button>'
+             + '</div>';
+        
+        streamKeys.forEach(function(stream) {
+            const rates = ARCHIVED_RATES[stream];
+            if (!rates) return;
+            
+            const streamSessions = SESSION_SUMMARY.filter(function(s) { 
+                return (s.stream || "Regular") === stream; 
+            }).sort(function(a, b) {
+                const d1 = a.date.split('.').reverse().join('');
+                const d2 = b.date.split('.').reverse().join('');
+                return d1.localeCompare(d2) || a.time.localeCompare(b.time);
+            });
+
+            if (streamSessions.length === 0) return;
+
+            let invigilation = 0, clerical = 0, sweeping = 0, peon = 0, supervision = 0;
+            let chiefTotal = 0, seniorTotal = 0, officeTotal = 0;
+            let bodyRows = "";
+
+            if (rates.is_sde_mode) {
+                const sessionsByDate = {};
+                streamSessions.forEach(function(s) {
+                    if (!sessionsByDate[s.date]) sessionsByDate[s.date] = [];
+                    sessionsByDate[s.date].push(s);
+                });
+
+                Object.keys(sessionsByDate).sort().forEach(function(date) {
+                    const daily = sessionsByDate[date];
+                    const isDouble = daily.length > 1;
+                    
+                    daily.forEach(function(session) {
+                        const count = session.normalCount + session.scribeCount;
+                        
+                        const chiefRate = isDouble ? (rates.chief_supdt_double||0) : (rates.chief_supdt_single||0);
+                        const seniorRate = isDouble ? (rates.senior_supdt_double||0) : (rates.senior_supdt_single||0);
+                        const chiefCost = chiefRate / daily.length;
+                        const seniorCost = seniorRate / daily.length;
+                        
+                        chiefTotal += chiefCost;
+                        seniorTotal += seniorCost;
+                        const supTotal = chiefCost + seniorCost;
+
+                        let normalInvigs = 0;
+                        const invigRatio = rates.invigilator_ratio || 30;
+                        if (count > 0) {
+                            normalInvigs = Math.floor(count / invigRatio);
+                            if ((count % invigRatio) > (rates.invigilator_min_fraction||0)) normalInvigs++;
+                            if (normalInvigs === 0) normalInvigs = 1;
+                        }
+                        let scribeInvigs = session.scribeCount > 0 ? Math.ceil(session.scribeCount / (rates.scribe_invigilator_ratio || 1)) : 0;
+                        const invigCost = (normalInvigs + scribeInvigs) * (rates.invigilator || 0);
+
+                        const staffCount = Math.ceil(count / (rates.clerk_ratio || 500));
+                        const clerkCost = ((isDouble ? (rates.clerk_double||0) : (rates.clerk_single||0)) / daily.length) * staffCount;
+                        const peonCost = ((isDouble ? (rates.peon_double||0) : (rates.peon_single||0)) / daily.length) * staffCount;
+                        const sweeperCost = ((isDouble ? (rates.sweeper_double||0) : (rates.sweeper_single||0)) / daily.length) * staffCount;
+
+                        supervision += supTotal; invigilation += invigCost; clerical += clerkCost; peon += peonCost; sweeping += sweeperCost;
+
+                        const lineTotal = invigCost + clerkCost + peonCost + sweeperCost + supTotal;
+                        
+                        let studentDetail = count + (session.scribeCount > 0 ? ' <span style="font-size:10px;">(Incl '+session.scribeCount+' Scr)</span>' : '');
+                        let invigDetail = normalInvigs + (scribeInvigs > 0 ? ' + '+scribeInvigs : '');
+
+                        bodyRows += '<tr style="border-bottom:1px solid black;text-align:center;">'
+                                  + '<td style="padding:4px;border:1px solid black;text-align:left;">' + session.date + '<br><span style="font-size:10px;">' + session.time + '</span></td>'
+                                  + '<td style="padding:4px;border:1px solid black;font-weight:bold;">' + studentDetail + '</td>'
+                                  + '<td style="padding:4px;border:1px solid black;">' + invigDetail + '<br><span style="font-size:10px;">(\u20B9' + invigCost + ')</span></td>'
+                                  + '<td style="padding:4px;border:1px solid black;">\u20B9' + clerkCost + '</td>'
+                                  + '<td style="padding:4px;border:1px solid black;">\u20B9' + peonCost + '</td>'
+                                  + '<td style="padding:4px;border:1px solid black;">\u20B9' + sweeperCost + '</td>'
+                                  + '<td style="padding:4px;border:1px solid black;">\u20B9' + chiefCost + '</td>'
+                                  + '<td style="padding:4px;border:1px solid black;">\u20B9' + seniorCost + '</td>'
+                                  + '<td style="padding:4px;border:1px solid black;font-weight:bold;">\u20B9' + lineTotal + '</td></tr>';
+                    });
+                });
+
+            } else {
+                streamSessions.forEach(function(session) {
+                    const count = session.normalCount + session.scribeCount;
+                    
+                    let normalInvigs = 0;
+                    const invigRatio = rates.invigilator_ratio || 30;
+                    if (count > 0) {
+                        normalInvigs = Math.floor(count / invigRatio);
+                        if ((count % invigRatio) > (rates.invigilator_min_fraction||0)) normalInvigs++;
+                        if (normalInvigs === 0) normalInvigs = 1;
+                    }
+                    let scribeInvigs = session.scribeCount > 0 ? Math.ceil(session.scribeCount / (rates.scribe_invigilator_ratio || 1)) : 0;
+                    const invigCost = (normalInvigs + scribeInvigs) * (rates.invigilator || 0);
+
+                    const clerkFullBatches = Math.floor(count / 100);
+                    const clerkRemainder = count % 100;
+                    let clerkCost = clerkFullBatches * (rates.clerk_full_slab||0);
+                    if (clerkRemainder > 0 && clerkRemainder <= 30) clerkCost += (rates.clerk_slab_1||0);
+                    else if (clerkRemainder > 30 && clerkRemainder <= 60) clerkCost += (rates.clerk_slab_2||0);
+                    else if (clerkRemainder > 60) clerkCost += (rates.clerk_full_slab||0);
+
+                    let sweeperCost = Math.ceil(count / 100) * (rates.sweeper_rate||0);
+                    if (sweeperCost < (rates.sweeper_min||0)) sweeperCost = (rates.sweeper_min||0);
+
+                    const chiefCost = rates.chief_supdt||0;
+                    const seniorCost = rates.senior_supdt||0;
+                    const officeCost = rates.office_supdt||0;
+                    const supTotal = chiefCost + seniorCost + officeCost;
+
+                    chiefTotal += chiefCost; seniorTotal += seniorCost; officeTotal += officeCost;
+                    supervision += supTotal; invigilation += invigCost; clerical += clerkCost; sweeping += sweeperCost;
+
+                    const lineTotal = invigCost + clerkCost + sweeperCost + supTotal;
+                    
+                    let studentDetail = count + (session.scribeCount > 0 ? ' <span style="font-size:10px;">(Incl '+session.scribeCount+' Scr)</span>' : '');
+                    let invigDetail = normalInvigs + (scribeInvigs > 0 ? ' + '+scribeInvigs : '');
+
+                    bodyRows += '<tr style="border-bottom:1px solid black;text-align:center;">'
+                              + '<td style="padding:4px;border:1px solid black;text-align:left;">' + session.date + '<br><span style="font-size:10px;">' + session.time + '</span></td>'
+                              + '<td style="padding:4px;border:1px solid black;font-weight:bold;">' + studentDetail + '</td>'
+                              + '<td style="padding:4px;border:1px solid black;">' + invigDetail + '<br><span style="font-size:10px;">(\u20B9' + invigCost + ')</span></td>'
+                              + '<td style="padding:4px;border:1px solid black;">\u20B9' + clerkCost + '</td>'
+                              + '<td style="padding:4px;border:1px solid black;">\u20B9' + sweeperCost + '</td>'
+                              + '<td style="padding:4px;border:1px solid black;">\u20B9' + chiefCost + '</td>'
+                              + '<td style="padding:4px;border:1px solid black;">\u20B9' + seniorCost + '</td>'
+                              + '<td style="padding:4px;border:1px solid black;">\u20B9' + officeCost + '</td>'
+                              + '<td style="padding:4px;border:1px solid black;font-weight:bold;">\u20B9' + lineTotal + '</td></tr>';
+                });
+            }
+            const totalRegistered = streamSessions.reduce(function(sum, s) { return sum + s.normalCount + s.scribeCount; }, 0);
+            const contingency = totalRegistered * (rates.contingent_charge || 0);
+            const dataEntry = rates.data_entry_operator || 0;
+            const accountant = rates.accountant || 0; // Fixed: Restored this line so it can be displayed later!
+            
+            let grandTotal = supervision + invigilation + clerical + sweeping + peon + contingency + dataEntry;
+            if (isNaN(grandTotal)) grandTotal = 0;
+
+            
+            const totalAmountStr = grandTotal.toFixed(2);
+            const parts = totalAmountStr.split('.');
+            let words = numToWords(Number(parts[0]));
+            if (Number(parts[1]) > 0) words += ' and ' + numToWords(Number(parts[1])) + ' Paise';
+
+
+
+            let supSummaryHTML = rates.is_sde_mode
+                ? 'Chief Supdt: \u20B9'+chiefTotal+', Senior Supdt: \u20B9'+seniorTotal+', <strong>Total: \u20B9'+supervision+'</strong>'
+                : 'CS: \u20B9'+chiefTotal+', SAS: \u20B9'+seniorTotal+', OS: \u20B9'+officeTotal+', <strong>Total: \u20B9'+supervision+'</strong>';
+
+            const peonHeader = rates.is_sde_mode ? '<th style="padding:4px;border:1px solid black;">Peon</th>' : '';
+            const osHeader = !rates.is_sde_mode ? '<th style="padding:4px;border:1px solid black;">OS</th>' : '';
+            const peonFooter = rates.is_sde_mode ? '<td style="padding:8px;border:1px solid black;">\u20B9'+peon+'</td>' : '';
+            const osFooter = !rates.is_sde_mode ? '<td style="padding:8px;border:1px solid black;">\u20B9'+officeTotal+'</td>' : '';
+            const colGroup = rates.is_sde_mode 
+                ? '<col style="width:16%;"><col style="width:12%;"><col style="width:10%;"><col style="width:8%;"><col style="width:8%;"><col style="width:8%;"><col style="width:10%;"><col style="width:10%;"><col style="width:12%;">'
+                : '<col style="width:16%;"><col style="width:12%;"><col style="width:10%;"><col style="width:8%;"><col style="width:8%;"><col style="width:10%;"><col style="width:10%;"><col style="width:10%;"><col style="width:12%;">';
+
+            html += '<div class="bill-page">'
+                 + '<div style="text-align:center;border-bottom:2px solid black;padding-bottom:16px;margin-bottom:16px;">'
+                 + '<h1 style="font-size:24px;font-weight:900;text-transform:uppercase;margin:0 0 8px 0;">' + ARCHIVED_COLLEGE + '</h1>'
+                 + '<h2 style="font-size:16px;font-weight:bold;margin:0 0 12px 0;">' + ARCHIVED_EXAM + '</h2>'
+                 + '<h2 style="font-size:20px;font-weight:bold;text-transform:uppercase;margin:0;">Exam Center Remuneration</h2>'
+                 + '<h3 style="font-size:18px;font-weight:600;margin:4px 0;">Archived Bill - ' + stream + ' Stream</h3>'
+                 + '</div>'
+                 
+                 + '<table style="width:100%;border-collapse:collapse;border:1px solid black;font-size:13px;margin-bottom:16px;table-layout:fixed;">'
+                 + '<colgroup>' + colGroup + '</colgroup>'
+                 + '<thead><tr style="background:white;color:black;">'
+                 + '<th style="padding:4px;border:1px solid black;text-align:left;">Session</th>'
+                 + '<th style="padding:4px;border:1px solid black;">Candidates</th>'
+                 + '<th style="padding:4px;border:1px solid black;">Invig</th>'
+                 + '<th style="padding:4px;border:1px solid black;">Clerk</th>'
+                 + peonHeader
+                 + '<th style="padding:4px;border:1px solid black;">Swpr</th>'
+                 + '<th style="padding:4px;border:1px solid black;">CS</th>'
+                 + '<th style="padding:4px;border:1px solid black;">SAS</th>'
+                 + osHeader
+                 + '<th style="padding:4px;border:1px solid black;">Total</th>'
+                 + '</tr></thead>'
+                 + '<tbody>' + bodyRows + '</tbody>'
+                 + '<tfoot><tr style="font-weight:bold;font-size:12px;text-align:center;background:white;">'
+                 + '<td colspan="2" style="padding:8px;border:1px solid black;text-align:right;">Subtotals:</td>'
+                 + '<td style="padding:8px;border:1px solid black;">\u20B9' + invigilation + '</td>'
+                 + '<td style="padding:8px;border:1px solid black;">\u20B9' + clerical + '</td>'
+                 + peonFooter
+                 + '<td style="padding:8px;border:1px solid black;">\u20B9' + sweeping + '</td>'
+                 + '<td style="padding:8px;border:1px solid black;">\u20B9' + chiefTotal + '</td>'
+                 + '<td style="padding:8px;border:1px solid black;">\u20B9' + seniorTotal + '</td>'
+                 + osFooter
+                 + '<td style="padding:8px;border:1px solid black;font-size:14px;">\u20B9' + (invigilation+clerical+sweeping+peon+supervision) + '</td>'
+                 + '</tr></tfoot>'
+                 + '</table>'
+                 
+                 + '<div style="display:flex;gap:32px;font-size:13px;border-top:2px solid black;padding-top:16px;margin-bottom:24px;">'
+                 + '<div style="flex:1;border:1px solid black;padding:12px;">'
+                 + '<div style="font-weight:bold;border-bottom:1px solid black;margin-bottom:8px;padding-bottom:4px;">1. Supervision Breakdown</div>'
+                 + '<div>' + supSummaryHTML + '</div>'
+                 + '</div>'
+                 + '<div style="flex:1;">'
+                 + '<div style="font-weight:bold;border-bottom:1px dotted black;margin-bottom:8px;padding-bottom:4px;display:flex;justify-content:space-between;"><span>2. Other Allowances</span></div>'
+                 + '<div style="display:flex;justify-content:space-between;border-bottom:1px dotted black;padding-bottom:4px;margin-bottom:4px;"><span>Contingency:</span> <strong>\u20B9' + contingency.toFixed(2) + '</strong></div>'
+                 + '<div style="display:flex;justify-content:space-between;border-bottom:1px dotted black;padding-bottom:4px;margin-bottom:4px;"><span>Data Entry Operator:</span> <strong>\u20B9' + dataEntry + '</strong></div>'
+                 + '<div style="display:flex;justify-content:space-between;border-bottom:1px dotted black;padding-bottom:4px;"><span>Accountant:</span> <strong>\u20B9' + accountant + '</strong></div>'
+                 + '</div>'
+                 + '</div>'
+
+                 + '<div style="border:1px solid black;padding:12px;display:flex;flex-direction:column;align-items:flex-end;">'
+                 + '<div style="width:100%;display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">'
+                 + '<span style="font-size:18px;font-weight:bold;text-transform:uppercase;">Grand Total Claim</span>'
+                 + '<span style="font-size:24px;font-weight:bold;font-family:monospace;">\u20B9' + grandTotal.toFixed(2) + '</span>'
+                 + '</div>'
+                 + '<div style="width:100%;text-align:right;border-top:1px solid black;padding-top:4px;">'
+                 + '<span style="font-size:13px;font-weight:bold;font-style:italic;">(Rupees ' + words + ' Only)</span>'
+                 + '</div>'
+                 + '</div>'
+                 
+                 + '<div style="margin-top:64px;display:flex;justify-content:flex-end;font-size:13px;font-weight:bold;">'
+                 + '<div style="border-top:1px solid black;width:33%;text-align:center;padding-top:8px;">Chief Superintendent</div>'
+                 + '</div>'
+                 
+                 + '</div>';
+        });
+        
+        html += '</body></html>';
+        
+        const newWin = window.open('', '_blank');
+        if (newWin) {
+            newWin.document.write(html);
+            newWin.document.close();
+            newWin.focus();
+        } else {
+            alert('Please allow popups to view the Bill.');
+        }
+    }
+
+
+
+    
+<\/script>
+
+
+
+</body>
+</html>`;
+
+    const blob = new Blob([htmlBlob], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const safeName = checked.length === 1 ? checked[0].replace(/[| :.]/g, '_') : `${checked.length}_Sessions`;
+    a.download = `ExamFlow_Archive_${safeName}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    
+    btn.innerHTML = origText;
+    btn.disabled = false;
+    closeBatchArchiveModal();
+};
+
+window.openBatchArchiveModal = function() {
+    console.log("🔔 Archive Modal: 'openBatchArchiveModal' triggered.");
+    try {
+        const modal = document.getElementById('batch-archive-modal');
+        if (!modal) return alert("Archive modal not found in DOM");
+
+        // Force visibility
+        document.body.appendChild(modal);
+        modal.classList.remove('hidden');
+        modal.style.setProperty('display', 'flex', 'important');
+        
+        // Render initial view
+        window.archiveModalViewMode = 'sessions';
+        window.switchArchiveView('sessions');
+
+    } catch (error) {
+        console.error("🔥 Archive Modal Error:", error);
+        alert("Error opening archive modal: " + error.message);
+    }
+};
+
+window.closeBatchArchiveModal = function() {
+    console.log("🚪 Archive Modal: Closing...");
+    const modal = document.getElementById('batch-archive-modal');
+    if (modal) {
+        modal.classList.add('hidden');
+        modal.style.setProperty('display', 'none', 'important');
+    }
+};
+
+
+
+
+window.toggleAllArchiveCheckboxes = function(check) {
+    console.log(`🔘 Archive Modal: Toggling all checkboxes to [${check}]`);
+    document.querySelectorAll('.archive-session-cb').forEach(cb => cb.checked = check);
+};
+
 
     // ==========================================
     // 📄 GLOBAL PDF PREVIEW (FIXED COLUMNS & PRINTING)
+
     // ==========================================
     window.openPdfPreview = function (contentHtml, filenamePrefix) {
         // 1. CLEAN CONTENT
@@ -16112,10 +18158,13 @@ if (btnSessionReschedule) {
         window.renderInvigilationPanel();
     }
 
-    // 6. Auto-Assign
-    window.autoAssignInvigilators = function () {
+      window.autoAssignInvigilators = async function () {
         const sessionKey = allotmentSessionSelect.value;
         if (!sessionKey) return;
+
+        // Ensure we have latest local data before starting
+        const allMappings = JSON.parse(localStorage.getItem(INVIG_MAPPING_KEY) || '{}');
+        currentInvigMapping = allMappings[sessionKey] || {};
 
         const invigSlots = JSON.parse(localStorage.getItem('examInvigilationSlots') || '{}');
         const staffData = JSON.parse(localStorage.getItem('examStaffData') || '[]');
@@ -16125,24 +18174,19 @@ if (btnSessionReschedule) {
 
         const availableStaff = [...slot.assigned];
         const usedNames = new Set(Object.values(currentInvigMapping));
-
         let changeCount = 0;
 
-        // 1. Build Full Room List
         const allRoomNames = new Set();
         if (currentSessionAllotment) currentSessionAllotment.forEach(r => allRoomNames.add(r.roomName));
         const allScribeAllotments = JSON.parse(localStorage.getItem(SCRIBE_ALLOTMENT_KEY) || '{}');
         const sessionScribeMap = allScribeAllotments[sessionKey] || {};
         Object.values(sessionScribeMap).forEach(r => allRoomNames.add(r));
 
-        // 2. Sort by Serial
         const serialMap = getRoomSerialMap(sessionKey);
         const sortedRooms = Array.from(allRoomNames).sort((a, b) => (serialMap[a] || 999) - (serialMap[b] || 999));
 
-        // 3. Assign
         sortedRooms.forEach(roomName => {
             if (!currentInvigMapping[roomName]) {
-                // Find a free staff
                 const freeEmail = availableStaff.find(e => {
                     const name = (staffData.find(s => s.email === e) || {}).name || e;
                     return !usedNames.has(name);
@@ -16158,16 +18202,33 @@ if (btnSessionReschedule) {
         });
 
         if (changeCount > 0) {
-            const allMappings = JSON.parse(localStorage.getItem(INVIG_MAPPING_KEY) || '{}');
             allMappings[sessionKey] = currentInvigMapping;
             localStorage.setItem(INVIG_MAPPING_KEY, JSON.stringify(allMappings));
-            if (typeof syncDataToCloud === 'function') syncDataToCloud('staff');
+            
+            // Mark as local priority to prevent overwrite
+            localSyncPriority[INVIG_MAPPING_KEY] = Date.now();
+            
+            updateSyncStatus("Saving...", "neutral");
+            if (typeof syncDataToCloud === 'function') {
+                // 📡 DUAL-SYNC FIX: Update BOTH the master staff list and the session record
+                // This prevents the refresh listener from overwriting with empty data.
+                await syncDataToCloud('staff');
+                if (typeof syncSessionToCloud === 'function') {
+                    await syncSessionToCloud(sessionKey);
+                    console.log(`✅ Dual-Sync successful for session: ${sessionKey}`);
+                }
+            }
+            
             renderInvigilationPanel();
+
+            
+            updateSyncStatus("Saved", "success");
             alert(`Auto-assigned ${changeCount} invigilators.`);
         } else {
             alert("No additional free staff found to assign.");
         }
     }
+
 
     // 7. Unassign All Invigilators
     window.unassignAllInvigilators = async function () {
@@ -16583,6 +18644,9 @@ if (displayLoc) {
                     <td style="text-align: center;">${serial}</td>
                     <td>${room.roomName}</td>
                     <td>${loc}</td>
+                    <td style="font-size: 8pt;">
+                        ${Array.from(new Set(room.students.map(s => s.Course || s['Course'] || '-'))).join(', ')}
+                    </td>
                     <td style="text-align: center;">${stream}</td>
                     <td style="text-align: center; font-weight: bold;">${count}</td>
                 </tr>
@@ -16626,7 +18690,8 @@ if (displayLoc) {
                             <th style="width: 8%;">S.No</th>
                             <th style="width: 25%;">Room Name</th>
                             <th style="width: 30%;">Location</th>
-                            <th style="width: 20%;">Stream</th>
+                            <th style="width: 25%;">Mixed Courses</th>
+                            <th style="width: 15%;">Stream</th>
                             <th style="width: 17%;">Students</th>
                         </tr>
                     </thead>
@@ -18726,9 +20791,139 @@ window.downloadInvigilationListPDF = async function () {
 
     // Call it after data is loaded
     restoreActiveTab();
-});
 
+    // --- GLOBALLY AVAILABLE FUNCTIONS ---
+    window.syncSessionToCloud = syncSessionToCloud;
+    window.syncDataToCloud = syncDataToCloud;
 
+    // --- 📋 CLIPBOARD QP CODE IMPORTER (Fuzzy Match & Stream Aware) ---
+    window.importQPFromClipboard = async function() {
+        try {
+            const text = await navigator.clipboard.readText();
+            if (!text || text.trim().length === 0) {
+                alert("Clipboard is empty. Please copy QP code data from the university portal first.");
+                return;
+            }
+
+            // ⚡ PREFIX INTERCEPTOR
+            const rawPrefix = prompt("Enter alphabetical prefix for these QP Codes (e.g. K, Z) to auto-prepend, or leave empty to skip:", "");
+            if (rawPrefix === null) return; 
+            const prefix = rawPrefix.trim().toUpperCase();
+
+            const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+            
+            // We use an Array to hold all portal rows for Deep Fuzzy Searching
+            const parsedPairs = [];
+
+            lines.forEach(line => {
+                const tabParts = line.split('\t').map(p => p.trim()).filter(p => p);
+                const dashParts = line.split(/\s+-\s+/).map(p => p.trim()).filter(p => p);
+                const commaParts = line.split(',').map(p => p.trim()).filter(p => p);
+
+                let searchString = null, qpCode = null;
+
+                // ⚡ SMART DETECTION: University Portal Table
+                if (tabParts.length >= 4 && line.includes('--(')) {
+                    qpCode = tabParts[0]; 
+                    // Keep the ENTIRE Name & Code for highest fuzzy success rate
+                    searchString = tabParts[1].toUpperCase(); 
+                } 
+                // Fallback Generic Manual Parsing
+                else if (tabParts.length >= 2) {
+                    searchString = tabParts[0].toUpperCase();
+                    qpCode = tabParts[tabParts.length - 1]; 
+                } else if (dashParts.length === 2) {
+                    searchString = dashParts[0].toUpperCase();
+                    qpCode = dashParts[1];
+                } else if (commaParts.length >= 2) {
+                    searchString = commaParts[0].toUpperCase();
+                    qpCode = commaParts[commaParts.length - 1];
+                }
+
+                if (searchString && qpCode && qpCode !== searchString) {
+                    // Compress structure to remove bad portal spaces (e.g. "1234 A" -> "1234A")
+                    let finalQpCode = qpCode.trim().toUpperCase().replace(/\s+/g, '');
+                    if (prefix && !finalQpCode.startsWith(prefix)) {
+                        finalQpCode = prefix + finalQpCode;
+                    }
+                    
+                    parsedPairs.push({
+                        searchText: searchString, // Native unmolested string
+                        code: finalQpCode,
+                        isEde: finalQpCode.endsWith('A') // Flags "A" suffix for EDE
+                    });
+                }
+            });
+
+            if (parsedPairs.length === 0) {
+                alert("Could not detect any valid codes. Format expected: 'Code [tab] Subject' or raw Portal Table.");
+                return;
+            }
+
+            const sessionKey = document.getElementById('session-select-qp')?.value;
+            if (!sessionKey) {
+                alert("Please select a session first.");
+                return;
+            }
+
+            let matched = 0;
+
+            // ⚡ FUZZY ASSIGNMENT LAYER
+            document.querySelectorAll('#qp-code-container input[data-course]').forEach(input => {
+                const uiCourseName = input.dataset.course.trim().toUpperCase();
+                const streamName = (input.dataset.stream || "").toUpperCase();
+                const isEdeStream = streamName.includes("EDE");
+                
+                // 1. Hard Filter by Stream (Only match 'A' suffix to EDE, non-'A' to Regular)
+                let validPairs = parsedPairs.filter(p => p.isEde === isEdeStream);
+                // Fallback if no specific stream match is found
+                if (validPairs.length === 0) validPairs = parsedPairs;
+
+                let bestMatch = null;
+
+                // Pass 1: Exact Substring Included
+                bestMatch = validPairs.find(p => p.searchText.includes(uiCourseName) || uiCourseName.includes(p.searchText));
+
+                // Pass 2: Deep Word-Tokenizing Fuzzy Match (e.g., handles "Research Meth" vs "RESEARCH METHODOLOGY--(BCM6B16)")
+                if (!bestMatch) {
+                    const words = uiCourseName.split(/[\s,.-]+/).filter(w => w.length > 2); // Ignore 'of', 'in'
+                    if (words.length > 0) {
+                        let bestScore = 0;
+                        validPairs.forEach(p => {
+                            let score = 0;
+                            words.forEach(w => { if (p.searchText.includes(w)) score++; });
+                            if (score > bestScore) {
+                                bestScore = score;
+                                bestMatch = p;
+                            }
+                        });
+                        // Requires at least 1 solid keyword overlap to prevent false positives
+                        if (bestScore < 1) bestMatch = null; 
+                    }
+                }
+
+                if (bestMatch) {
+                    input.value = bestMatch.code;
+                    matched++;
+                }
+            });
+
+            if (matched > 0) {
+                document.getElementById('qp-code-status').textContent = `✅ ${matched} mapping pairs imported successfully (Fuzzy Match). Click Save QP Codes below to confirm.`;
+                document.getElementById('save-qp-codes-button')?.click(); // Auto-clicks save if valid
+            } else {
+                alert(`Found ${parsedPairs.length} codes on Clipboard, but zero matched your registered Course Names.`);
+            }
+
+        } catch (e) {
+            console.error("Clipboard access failed:", e);
+            alert("Clipboard access blocked. Please allow clipboard permissions or input manually.");
+        }
+    };
+
+    // --- END GLOBALLY AVAILABLE FUNCTIONS ---
+
+}); // <-- Closes the DOMContentLoaded block from the top of the file
 
 // ==========================================
 // 🔒 APP SECURITY: DAILY ENTRY LOCK
@@ -18768,8 +20963,10 @@ function verifyAppPassword() {
     }
 }
 
+
 // Attach Event Listeners on Load
 document.addEventListener('DOMContentLoaded', () => {
+
     // --- App Security Toggle Logic ---
     const toggleAppPassword = document.getElementById('toggle-app-password');
     const isPasswordEnabled = localStorage.getItem('appPasswordEnabled') === 'true'; // Default is false
@@ -18806,5 +21003,49 @@ document.addEventListener('DOMContentLoaded', () => {
             if (e.key === 'Enter') verifyAppPassword(); 
         });
     }
+   
 });
+
+// =======================================================
+// 📦 BATCH ARCHIVE MODAL — GLOBAL SCOPE (always available)
+// These are defined outside DOMContentLoaded so they are
+// guaranteed to be registered even if earlier code errors.
+// =======================================================
+
+window.closeBatchArchiveModal = function() {
+    const modal = document.getElementById('batch-archive-modal');
+    if (modal) modal.classList.add('hidden');
+};
+
+window.toggleAllArchiveCheckboxes = function(check) {
+    document.querySelectorAll('.archive-session-cb').forEach(cb => cb.checked = check);
+};
+
+
+/**
+ * --- 📦 SESSION DOCUMENT EXPORTER HOOK ---
+ * Triggered by the UI button. Feeds the selected session to the export module.
+ */
+window.triggerSessionExport = function() {
+    // 🛡️ TRIPLE-CHECKED DATA FLUSH: Ensures memory is not empty before syncing
+    if (typeof qpCodeMap !== 'undefined') {
+        // Force a load if memory is empty to prevent wiping valid storage
+        if (Object.keys(qpCodeMap).length === 0 && typeof loadQPCodes === 'function') {
+            loadQPCodes();
+        }
+        localStorage.setItem('examQPCodes', JSON.stringify(qpCodeMap));
+    }
+    const sessionKey = document.getElementById('reports-session-select')?.value;
+    
+    if (!sessionKey) {
+        return alert("⚠️ Please select a Session from the dropdown first.");
+    }
+
+    if (typeof SESSION_EXPORT_JS !== 'undefined') {
+        SESSION_EXPORT_JS.exportSession(sessionKey);
+    } else {
+        alert("Error: Export Module (session_export.js) not found. Check index.html inclusion.");
+    }
+};
+
 
